@@ -1,0 +1,124 @@
+import 'dotenv/config';
+import { createServer } from 'node:http';
+import express from 'express';
+import { Server } from 'socket.io';
+import { EVENTS, ROOM_STATES } from '../shared/events.js';
+import { PLAYER } from '../shared/gameConfig.js';
+import { GameState } from './gameState.js';
+import { RoomManager } from './rooms.js';
+
+const app = express();
+app.disable('x-powered-by');
+app.get('/health', (_request, response) => {
+  response.json({ status: 'ok', service: 'fps-gods-game-server', rooms: roomManager.rooms.size });
+});
+
+const httpServer = createServer(app);
+const configuredOrigins = (process.env.CLIENT_ORIGIN ?? '')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+const io = new Server(httpServer, {
+  cors: {
+    origin: configuredOrigins.length ? configuredOrigins : true,
+    methods: ['GET', 'POST'],
+  },
+  pingInterval: 25_000,
+  pingTimeout: 20_000,
+  maxHttpBufferSize: 16_384,
+});
+const roomManager = new RoomManager(io);
+
+// Socket handlers validate room membership before any input can reach a game.
+io.on('connection', (socket) => {
+  socket.on(EVENTS.CREATE_ROOM, (payload = {}) => {
+    roomManager.createRoom(socket, payload.name);
+  });
+
+  socket.on(EVENTS.JOIN_ROOM, (payload = {}) => {
+    roomManager.joinRoom(socket, payload.code, payload.name);
+  });
+
+  socket.on(EVENTS.PLAYER_READY, (payload = {}) => {
+    roomManager.setReady(socket, payload.ready);
+  });
+
+  socket.on(EVENTS.START_GAME, () => {
+    const result = roomManager.startGame(socket);
+    if (result.error) {
+      roomManager.emitError(socket, result.error);
+      return;
+    }
+
+    const { room } = result;
+    const now = Date.now();
+    room.game = new GameState(room, {
+      emitRoom: (event, data) => io.to(room.code).emit(event, data),
+      emitPlayer: (playerId, event, data) => io.to(playerId).emit(event, data),
+    }, now);
+    io.to(room.code).emit(EVENTS.GAME_START, {
+      code: room.code,
+      targetKills: PLAYER.targetKills,
+      playerCount: room.players.size,
+    });
+    roomManager.broadcastRoomState(room);
+  });
+
+  socket.on(EVENTS.PLAYER_INPUT, (payload) => {
+    const room = roomManager.getRoomForSocket(socket);
+    if (room?.state === ROOM_STATES.PLAYING) room.game?.setInput(socket.id, payload, Date.now());
+  });
+
+  socket.on(EVENTS.SHOOT, () => {
+    const room = roomManager.getRoomForSocket(socket);
+    if (room?.state === ROOM_STATES.PLAYING) room.game?.shoot(socket.id, Date.now());
+  });
+
+  socket.on(EVENTS.PLAYER_RELOAD, () => {
+    const room = roomManager.getRoomForSocket(socket);
+    if (room?.state === ROOM_STATES.PLAYING) room.game?.reload(socket.id, Date.now());
+  });
+
+  socket.on(EVENTS.RETURN_TO_LOBBY, () => {
+    roomManager.returnToLobby(socket);
+  });
+
+  socket.on('disconnect', () => {
+    roomManager.handleDisconnect(socket);
+  });
+});
+
+// Fixed 20 Hz simulation and state broadcast. The server derives its own delta
+// time and caps long pauses so clients can never supply movement speed or dt.
+const tickRateMs = 50;
+let lastTick = Date.now();
+const simulationTimer = setInterval(() => {
+  const now = Date.now();
+  const delta = Math.min((now - lastTick) / 1_000, 0.1);
+  lastTick = now;
+
+  for (const room of roomManager.rooms.values()) {
+    if (room.state !== ROOM_STATES.PLAYING || !room.game) continue;
+    const result = room.game.update(delta, now);
+    if (result?.winner) {
+      roomManager.endGame(room, result.winner);
+      continue;
+    }
+    io.to(room.code).volatile.emit(EVENTS.GAME_STATE_UPDATE, room.game.getPublicState(now));
+  }
+}, tickRateMs);
+
+const port = Number(process.env.PORT) || 3001;
+const host = process.env.HOST || '0.0.0.0';
+httpServer.listen(port, host, () => {
+  console.log(`FPS GODS server listening on http://${host}:${port}`);
+});
+
+// Let container/process managers stop the timer and socket connections cleanly.
+function shutdown() {
+  clearInterval(simulationTimer);
+  io.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 2_000).unref();
+}
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
