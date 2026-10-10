@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#070a12" />
+    <meta name="description" content="FPS GODS — server-authoritative free-for-all arena combat." />
+    <title>FPS GODS — Deathmatch</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <canvas id="game-canvas" aria-label="FPS GODS 3D arena"></canvas>
+      <div class="world-vignette" aria-hidden="true"></div>
+
+      <div class="connection-pill" id="connection-pill" role="status" aria-live="polite">
+        <span class="connection-dot"></span>
+        <span id="connection-label">CONNECTING TO SERVER</span>
+      </div>
+
+      <main class="screen home-screen" id="home-screen">
+        <header class="brand-header">
+          <a class="brand-lockup" href="#" aria-label="FPS GODS home">
+            <span class="brand-mark"><span></span><span></span><span></span></span>
+            <span class="brand-name">FPS <b>GODS</b></span>
+          </a>
+          <div class="season-chip"><span class="chip-pulse"></span> LIVE ARENA <span class="chip-divider"></span> FREE-FOR-ALL</div>
+        </header>
+
+        <div class="home-layout">
+          <section class="hero-copy">
+            <p class="eyebrow"><span class="eyebrow-line"></span> THE ARENA IS OPEN</p>
+            <h1>OWN THE<br /><span>ARENA.</span></h1>
+            <p class="hero-description">No squads. No second chances.<br />Out-aim everyone and make the lobby yours.</p>
+            <div class="feature-strip" aria-label="Game features">
+              <div class="feature-item"><strong>30</strong><span>KILLS TO WIN</span></div>
+              <div class="feature-separator"></div>
+              <div class="feature-item"><strong>16</strong><span>PLAYERS MAX</span></div>
+              <div class="feature-separator"></div>
+              <div class="feature-item"><strong>FFA</strong><span>NO TEAMS</span></div>
+            </div>
+          </section>
+
+          <section class="launch-card" aria-labelledby="launch-title">
+            <div class="card-topline"><span class="card-index">01</span><span class="card-caption">DEPLOYMENT CONSOLE</span><span class="card-signal"></span></div>
+            <h2 id="launch-title">Enter the fight</h2>
+            <p class="card-intro">Choose your callsign, then create a room or join your squad's code.</p>
+
+            <label class="field-label" for="player-name">CALLSIGN</label>
+            <div class="input-wrap name-input-wrap">
+              <span class="input-prefix">//</span>
+              <input id="player-name" name="player-name" maxlength="16" autocomplete="nickname" placeholder="Rookie" value="" />
+            </div>
+
+            <button class="button button-primary create-button" id="create-room-button" type="button">
+              <span class="button-icon">＋</span><span>CREATE A ROOM</span><span class="button-arrow">↗</span>
+            </button>
+
+            <div class="or-divider"><span></span><b>OR JOIN WITH CODE</b><span></span></div>
+
+            <form class="join-form" id="join-room-form">
+              <label class="sr-only" for="room-code-input">Six character room code</label>
+              <div class="input-wrap code-input-wrap">
+                <span class="input-prefix">#</span>
+                <input id="room-code-input" name="room-code" maxlength="6" autocomplete="off" spellcheck="false" placeholder="A1B2C3" />
+              </div>
+              <button class="button button-secondary join-button" id="join-room-button" type="submit" aria-label="Join room">JOIN <span>→</span></button>
+            </form>
+            <p class="inline-error" id="home-error" aria-live="polite" hidden></p>
+            <p class="card-footnote"><span class="tiny-shield">◆</span> Matches are server-hosted and room-isolated.</p>
+          </section>
+        </div>
+
+        <footer class="home-footer">
+          <span>FPS GODS <b>·</b> BUILT FOR THE LAST ONE STANDING</span>
+          <span class="footer-right">WASD MOVE <i>·</i> MOUSE AIM <i>·</i> LMB FIRE</span>
+        </footer>
+      </main>
+
+      <main class="screen lobby-screen" id="lobby-screen" hidden>
+        <header class="brand-header lobby-header">
+          <a class="brand-lockup" href="#" aria-label="FPS GODS home">
+            <span class="brand-mark"><span></span><span></span><span></span></span>
+            <span class="brand-name">FPS <b>GODS</b></span>
+          </a>
+          <div class="lobby-state-chip"><span class="state-dot"></span><span>WAITING ROOM</span></div>
+        </header>
+
+        <div class="lobby-layout">
+          <section class="lobby-intro">
+            <p class="eyebrow"><span class="eyebrow-line"></span> LOBBY / <span id="lobby-room-code-small">------</span></p>
+            <h1>Squad up.<br /><span>Then settle it.</span></h1>
+            <p>Share the room code, get everyone ready, and launch the free-for-all.</p>
+            <div class="room-code-card">
+              <div><span class="field-label">ROOM CODE</span><strong id="lobby-room-code">------</strong></div>
+              <button class="copy-button" id="copy-room-code-button" type="button" aria-label="Copy room code">COPY <span>▣</span></button>
+            </div>
+            <p class="inline-error" id="room-error" aria-live="polite" hidden></p>
+          </section>
+
+          <section class="players-card" aria-labelledby="players-title">
+            <div class="players-card-header">
+              <div><p class="card-caption">ROSTER</p><h2 id="players-title">Players <span id="player-count">0 / 16</span></h2></div>
+              <span class="lobby-lock"><span class="state-dot"></span> OPEN</span>
+            </div>
+            <ul class="lobby-player-list" id="lobby-player-list" aria-live="polite"></ul>
+            <div class="lobby-actions">
+              <button class="button button-secondary ready-button" id="ready-button" type="button">MARK READY <span>✓</span></button>
+              <button class="button button-primary start-button" id="start-button" type="button" hidden>START MATCH <span>↗</span></button>
+            </div>
+            <p class="lobby-hint" id="lobby-hint">At least 2 players. Everyone must be ready to launch.</p>
+          </section>
+        </div>
+        <footer class="home-footer"><span>DEATHMATCH <b>·</b> FIRST TO 30 ELIMINATIONS</span><span class="footer-right">JUMP SPACE <i>·</i> RELOAD R <i>·</i> SCOREBOARD TAB</span></footer>
+      </main>
+
+      <section class="match-hud" id="match-hud" aria-label="Match HUD" hidden>
+        <div class="hud-topline">
+          <div class="match-room-chip"><span class="hud-cross-mark">✣</span><span>ROOM</span><strong id="hud-room-code">------</strong></div>
+          <div class="match-status"><span class="state-dot"></span> LIVE MATCH <span class="hud-divider"></span> FIRST TO <b id="target-kills">30</b></div>
+          <div class="hud-right-note"><span id="alive-count">0</span> OPERATORS <span class="tiny-slash">/</span> <span>FFA</span></div>
+        </div>
+
+        <div class="kill-feed" id="kill-feed" aria-live="polite"></div>
+        <div class="name-tags" id="name-tags" aria-hidden="true"></div>
+        <div class="crosshair" id="crosshair" aria-hidden="true"><span></span></div>
+
+        <div class="hud-bottom">
+          <div class="health-widget">
+            <div class="widget-label"><span class="health-icon">+</span> VITALS <span class="widget-separator"></span><span id="health-value">100</span><span class="widget-muted">/ 100</span></div>
+            <div class="health-track"><span id="health-fill"></span></div>
+            <div class="health-foot"><span id="health-state">COMBAT READY</span><span class="health-pip"></span></div>
+          </div>
+          <div class="center-controls-hint"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd><span>MOVE</span><span class="hint-divider"></span><kbd>SPACE</kbd><span>JUMP</span></div>
+          <div class="ammo-widget">
+            <div class="ammo-label">SIDEARM <span class="widget-separator"></span><span id="ammo-status">READY</span></div>
+            <div class="ammo-count"><strong id="ammo-value">12</strong><span class="ammo-divider">/</span><span id="ammo-max">12</span></div>
+            <div class="ammo-foot"><span id="reload-hint">R TO RELOAD</span><span class="ammo-bars"><i></i><i></i><i></i></span></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="pause-panel overlay-panel" id="pause-panel" hidden>
+        <div class="panel-eyebrow"><span class="eyebrow-line"></span> MATCH IN PROGRESS</div>
+        <h2>Click in<br /><span>to deploy.</span></h2>
+        <p>Pointer lock keeps your aim inside the arena. Press Esc to release it.</p>
+        <button class="button button-primary" id="resume-button" type="button">ENTER ARENA <span>↗</span></button>
+      </section>
+
+      <section class="death-panel overlay-panel" id="death-panel" hidden>
+        <div class="death-sigil">×</div>
+        <p class="panel-eyebrow">OPERATOR DOWN</p>
+        <h2>Take a breath.</h2>
+        <p>Re-deploying in <strong id="respawn-countdown">3.0</strong>s</p>
+      </section>
+
+      <section class="scoreboard-panel" id="scoreboard-panel" hidden aria-label="Scoreboard">
+        <div class="scoreboard-heading"><div><p class="card-caption">LIVE MATCH / FFA</p><h2>Scoreboard <span id="scoreboard-room">------</span></h2></div><span class="scoreboard-close">TAB TO CLOSE</span></div>
+        <div class="scoreboard-columns"><span>OPERATOR</span><span>K</span><span>D</span><span>STATUS</span></div>
+        <div class="scoreboard-body" id="scoreboard-body"></div>
+      </section>
+
+      <section class="end-panel overlay-panel" id="end-panel" hidden>
+        <div class="end-kicker"><span class="champion-star">✦</span> MATCH COMPLETE <span class="champion-star">✦</span></div>
+        <p class="panel-eyebrow">THE ARENA HAS A WINNER</p>
+        <h2 id="winner-name">CHAMPION</h2>
+        <p id="winner-summary">30 eliminations secured.</p>
+        <div class="end-score-wrap"><span>FINAL STANDINGS</span><div id="end-scoreboard"></div></div>
+        <button class="button button-primary return-button" id="return-lobby-button" type="button">RETURN TO LOBBY <span>↗</span></button>
+        <p class="end-waiting" id="end-waiting" hidden>Waiting for the host to reset the room…</p>
+      </section>
+
+      <div class="toast" id="toast" role="status" aria-live="polite"></div>
+      <div class="webgl-warning" id="webgl-warning" hidden>WebGL is unavailable in this browser. The room and server can still connect, but 3D rendering is disabled.</div>
+    </div>
+    <script type="module" src="/main.js"></script>
+  </body>
+</html>
