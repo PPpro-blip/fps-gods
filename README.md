@@ -72,7 +72,6 @@ test/
   server.test.js         Health route, CORS headers, and a live Socket.IO handshake
 vite.config.js           Vite root and development Socket.IO proxy
 vercel.json              Vercel build settings: build at root, publish dist/client
-railway.json             Build, start, health check, and restart policy for the server
 render.yaml              Alternative blueprint for the persistent Express/Socket.IO server
 package.json             Scripts and runtime/development dependencies
 package-lock.json        Reproducible npm dependency lockfile
@@ -136,13 +135,16 @@ Dashboard equivalent: **Project → Settings → Environment Variables → Add**
 
 ### Game server on a persistent Node host (Railway)
 
-Socket.IO needs long-lived WebSocket connections, and rooms and scores live in memory for the length of a match, so the server must run as a normal Node process — not as a Vercel function. This repository is configured for **Railway** (project `zealous-optimism`, `production` environment) via `railway.json`, which pins `npm ci` → `npm start`, health-checks `/health`, and restarts on failure (max 5 retries). Railway injects `PORT` and `server/index.js` already reads it; `HOST` defaults to `0.0.0.0`.
+Socket.IO needs long-lived WebSocket connections, and rooms and scores live in memory for the length of a match, so the server must run as a normal Node process — not as a Vercel function. This repository is deployed on **Railway** (project `zealous-optimism`, `production` environment), which auto-detects Node and runs the install plus the `start` script from `package.json` (`node server/index.js`). Railway injects `PORT` and `server/index.js` already reads it; `HOST` defaults to `0.0.0.0`. That auto-detected setup deploys green, so it is intentionally left alone.
 
-Two things must be done in the Railway dashboard, because config-as-code cannot express them:
+Three things to set in the Railway dashboard (they are per-service settings, not repository files):
 
 1. **Public domain** — Service → **Settings → Networking → Public Networking → Generate Domain**. Railway gives you `https://<name>-production-<hash>.up.railway.app`. That URL is the value for Vercel's `VITE_SOCKET_URL`.
 2. **Allowed client origins** — Service → **Variables**:
    `CLIENT_ORIGIN=https://fps-gods.vercel.app,https://fps-gods-*.vercel.app`
+3. **Health check** *(recommended)* — Service → **Settings → Deploy → Custom Healthcheck Path**: `/health`. Railway then waits for the server to answer before routing traffic and restarts it if it stops responding.
+
+A `railway.json` pinning these values was tried and **removed**: the deploy it produced failed in ~33s (too fast for the 120s health-check timeout, i.e. the config was rejected early), and Railway logs are not reachable from the environment where this was written. Re-add config-as-code only after confirming the failure reason in the deploy log.
 
 `CLIENT_ORIGIN` entries may contain `*` wildcards, which is how per-deployment Vercel preview URLs are allowed without listing every branch. An empty `CLIENT_ORIGIN` accepts every origin (development default), so multiplayer works before you set it — tighten it before announcing the game publicly. This is a browser policy, not authentication; gameplay stays validated server-side.
 
