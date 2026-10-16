@@ -72,7 +72,8 @@ test/
   server.test.js         Health route, CORS headers, and a live Socket.IO handshake
 vite.config.js           Vite root and development Socket.IO proxy
 vercel.json              Vercel build settings: build at root, publish dist/client
-render.yaml              Blueprint for the persistent Express/Socket.IO server
+railway.json             Build, start, health check, and restart policy for the server
+render.yaml              Alternative blueprint for the persistent Express/Socket.IO server
 package.json             Scripts and runtime/development dependencies
 package-lock.json        Reproducible npm dependency lockfile
 .env.example             Optional local/deployment configuration
@@ -124,29 +125,38 @@ The static client is written to `dist/client`; the Socket.IO/Express server list
 
 ```bash
 npm i -g vercel
-vercel link                        # or: dashboard -> Project -> Settings
-vercel env add VITE_SOCKET_URL production   # e.g. https://fps-gods-server.onrender.com
+# Project "fps-gods" in the "pppro-blips-projects" scope (prj_yfbVONCSVJxkQvZj1yIsLLlJFVcm)
+vercel link --project fps-gods --scope pppro-blips-projects
+vercel env add VITE_SOCKET_URL production   # e.g. https://fps-gods-production-1a2b.up.railway.app
 vercel env add VITE_SOCKET_URL preview      # same value
 vercel redeploy <deployment-url>            # or push to main: env changes need a rebuild
 ```
 
 Dashboard equivalent: **Project → Settings → Environment Variables → Add**, name `VITE_SOCKET_URL`, value = game server origin (no trailing slash), environments **Production** and **Preview**, then **Deployments → ⋯ → Redeploy**.
 
-### Game server on Render
+### Game server on a persistent Node host (Railway)
 
-`render.yaml` is a ready-made blueprint for the persistent Node process (Render → **New → Blueprint** → connect this repository). It builds with `npm ci`, starts with `npm start`, health-checks `/health`, and defaults `CLIENT_ORIGIN` to `https://fps-gods.vercel.app,https://fps-gods-*.vercel.app`.
+Socket.IO needs long-lived WebSocket connections, and rooms and scores live in memory for the length of a match, so the server must run as a normal Node process — not as a Vercel function. This repository is configured for **Railway** (project `zealous-optimism`, `production` environment) via `railway.json`, which pins `npm ci` → `npm start`, health-checks `/health`, and restarts on failure (max 5 retries). Railway injects `PORT` and `server/index.js` already reads it; `HOST` defaults to `0.0.0.0`.
 
-`CLIENT_ORIGIN` entries may contain `*` wildcards, which is how per-deployment Vercel preview URLs are allowed without listing each branch. An empty `CLIENT_ORIGIN` accepts every origin (development default). This is a browser policy, not authentication — gameplay remains validated server-side.
+Two things must be done in the Railway dashboard, because config-as-code cannot express them:
 
-Any persistent Node host with WebSocket support works instead of Render; set `HOST=0.0.0.0`, let the host inject `PORT`, and forward WebSocket upgrades. Free-tier instances sleep when idle, so the first player after a quiet period waits for a cold start; use a paid instance for an always-warm arena.
+1. **Public domain** — Service → **Settings → Networking → Public Networking → Generate Domain**. Railway gives you `https://<name>-production-<hash>.up.railway.app`. That URL is the value for Vercel's `VITE_SOCKET_URL`.
+2. **Allowed client origins** — Service → **Variables**:
+   `CLIENT_ORIGIN=https://fps-gods.vercel.app,https://fps-gods-*.vercel.app`
+
+`CLIENT_ORIGIN` entries may contain `*` wildcards, which is how per-deployment Vercel preview URLs are allowed without listing every branch. An empty `CLIENT_ORIGIN` accepts every origin (development default), so multiplayer works before you set it — tighten it before announcing the game publicly. This is a browser policy, not authentication; gameplay stays validated server-side.
+
+Idle services on Railway's lower plans can be put to sleep, so the first player after a quiet period may wait for a cold start. Disable sleeping (or use a higher plan) for an always-warm arena.
+
+`render.yaml` is an equivalent blueprint if you prefer Render (Render → **New → Blueprint** → connect this repository); it produces `https://fps-gods-server.onrender.com` and sets `CLIENT_ORIGIN` for you. Any persistent Node host with WebSocket support works: set `HOST=0.0.0.0`, let the host inject `PORT`, and forward WebSocket upgrades.
 
 ### Verify a deployment
 
 ```bash
-curl -i https://<your-vercel-domain>/ | head -20        # expect 200 + the FPS GODS HTML, not 404 NOT_FOUND
-curl -s https://<server>/health                          # expect {"status":"ok",...}
-curl -i -H "Origin: https://<your-vercel-domain>" \
-  "https://<server>/socket.io/?EIO=4&transport=polling"  # expect Access-Control-Allow-Origin echoed back
+curl -i https://fps-gods.vercel.app/ | head -20          # expect 200 + the FPS GODS HTML, not 404 NOT_FOUND
+curl -s https://<railway-domain>/health                  # expect {"status":"ok",...}
+curl -i -H "Origin: https://fps-gods.vercel.app" \
+  "https://<railway-domain>/socket.io/?EIO=4&transport=polling"  # expect Access-Control-Allow-Origin echoed back
 ```
 
 Then load the site, confirm the header pill reads `SERVER CONNECTED`, and create a room.
