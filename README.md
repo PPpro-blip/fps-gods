@@ -59,6 +59,7 @@ client/                 Vanilla HTML, CSS, and browser JavaScript
   ui.js                  DOM-driven lobby, scoreboard, and HUD
 server/
   index.js               Express health route, Socket.IO handlers, 20 Hz loop
+  origins.js             CLIENT_ORIGIN parsing and wildcard CORS matching
   rooms.js               Room creation, membership, host, and lifecycle
   gameState.js           Authoritative movement, weapons, damage, and scoring
   hitDetection.js        Server-side ray/AABB/cylinder collision
@@ -67,7 +68,11 @@ shared/
   gameConfig.js          Shared map, spawn, and gameplay constants
 test/
   gameplay.test.js       Room, movement, combat, and hit-detection tests
+  origins.test.js        CLIENT_ORIGIN wildcard and rejection policy tests
+  server.test.js         Health route, CORS headers, and a live Socket.IO handshake
 vite.config.js           Vite root and development Socket.IO proxy
+vercel.json              Vercel build settings: build at root, publish dist/client
+render.yaml              Blueprint for the persistent Express/Socket.IO server
 package.json             Scripts and runtime/development dependencies
 package-lock.json        Reproducible npm dependency lockfile
 .env.example             Optional local/deployment configuration
@@ -89,7 +94,7 @@ cp .env.example .env
 | `GAME_SERVER_URL` | `http://127.0.0.1:3001` | Development Vite proxy target. |
 | `VITE_PORT` | `5173` | Vite development port. |
 | `VITE_SOCKET_URL` | Same origin | Optional browser-facing Socket.IO server URL, set at client build time for split deployments. |
-| `CLIENT_ORIGIN` | Unrestricted | Optional comma-separated browser origins allowed by Socket.IO; set this in production. |
+| `CLIENT_ORIGIN` | Unrestricted | Optional comma-separated browser origins allowed by Socket.IO; entries may use `*` wildcards. Set this in production. |
 
 The Node process exposes a simple health endpoint at `http://localhost:3001/health`.
 
@@ -102,20 +107,59 @@ npm run build
 npm start
 ```
 
-The static client is written to `dist/client`; the Socket.IO/Express server listens on `PORT`. For a split deployment:
+The static client is written to `dist/client`; the Socket.IO/Express server listens on `PORT`. Production is a **split deployment**: a static host for the client and a persistent Node host for the authoritative server, because serverless/edge functions cannot hold Socket.IO connections open for the length of a match.
 
-1. Build the client with `VITE_SOCKET_URL=https://your-game-server.example.com` in the environment used by `npm run build`.
-2. Host `dist/client` on any static web host.
-3. Deploy the Node server on a persistent Node host with WebSocket support, set `HOST=0.0.0.0`, and configure `CLIENT_ORIGIN` to the exact client origin(s).
-4. Ensure the host forwards WebSocket connections and exposes the configured `PORT`.
+### Client on Vercel
 
-For a single-origin deployment, serve the static build and proxy `/socket.io` (including WebSocket upgrades) to the Node server. Vite's development proxy is not part of the production build.
+`vercel.json` pins the build settings, so the repository builds correctly with no dashboard configuration:
+
+| Setting | Value | Why |
+| --- | --- | --- |
+| Root Directory | `.` (repository root) | `npm run build` and `vite.config.js` live at the root, not in `client/`. |
+| Framework Preset | `vite` | Runs the Vite build. |
+| Build Command | `npm run build` | Writes to `dist/client`. |
+| Output Directory | `dist/client` | **Vercel's Vite preset assumes `dist`.** Publishing `dist` finds no `index.html` at its root and every route, including `/`, returns `404 NOT_FOUND`. |
+
+`VITE_SOCKET_URL` is inlined at build time, so it must exist as a Vercel environment variable *before* the build runs:
+
+```bash
+npm i -g vercel
+vercel link                        # or: dashboard -> Project -> Settings
+vercel env add VITE_SOCKET_URL production   # e.g. https://fps-gods-server.onrender.com
+vercel env add VITE_SOCKET_URL preview      # same value
+vercel redeploy <deployment-url>            # or push to main: env changes need a rebuild
+```
+
+Dashboard equivalent: **Project → Settings → Environment Variables → Add**, name `VITE_SOCKET_URL`, value = game server origin (no trailing slash), environments **Production** and **Preview**, then **Deployments → ⋯ → Redeploy**.
+
+### Game server on Render
+
+`render.yaml` is a ready-made blueprint for the persistent Node process (Render → **New → Blueprint** → connect this repository). It builds with `npm ci`, starts with `npm start`, health-checks `/health`, and defaults `CLIENT_ORIGIN` to `https://fps-gods.vercel.app,https://fps-gods-*.vercel.app`.
+
+`CLIENT_ORIGIN` entries may contain `*` wildcards, which is how per-deployment Vercel preview URLs are allowed without listing each branch. An empty `CLIENT_ORIGIN` accepts every origin (development default). This is a browser policy, not authentication — gameplay remains validated server-side.
+
+Any persistent Node host with WebSocket support works instead of Render; set `HOST=0.0.0.0`, let the host inject `PORT`, and forward WebSocket upgrades. Free-tier instances sleep when idle, so the first player after a quiet period waits for a cold start; use a paid instance for an always-warm arena.
+
+### Verify a deployment
+
+```bash
+curl -i https://<your-vercel-domain>/ | head -20        # expect 200 + the FPS GODS HTML, not 404 NOT_FOUND
+curl -s https://<server>/health                          # expect {"status":"ok",...}
+curl -i -H "Origin: https://<your-vercel-domain>" \
+  "https://<server>/socket.io/?EIO=4&transport=polling"  # expect Access-Control-Allow-Origin echoed back
+```
+
+Then load the site, confirm the header pill reads `SERVER CONNECTED`, and create a room.
+
+### Single-origin alternative
+
+Serve the static build and proxy `/socket.io` (including WebSocket upgrades) to the Node server from one origin; then leave `VITE_SOCKET_URL` unset so the client uses its own origin. Vite's development proxy is not part of the production build.
 
 ## Development notes
 
 - `npm run dev` uses Node's watch mode for the game server and Vite's hot reload for the browser code.
-- `npm test` runs the built-in Node test suite for room isolation, input validation, combat, cover raycasts, scoring, and respawns.
+- `npm test` runs the built-in Node test suite for room isolation, input validation, combat, cover raycasts, scoring, respawns, the health route, the `CLIENT_ORIGIN` policy, and a live Socket.IO handshake.
 - Shared gameplay constants ensure server collision dimensions and rendered arena geometry stay aligned.
 - Rooms and scores are held in memory. Restarting the Node process ends all active rooms; add a persistent store only if cross-restart recovery is needed.
 - A match cannot start until every connected player is ready. If a host disconnects, the oldest remaining player becomes host.
-- The Socket.IO server accepts origins by default for local development. Restrict `CLIENT_ORIGIN` before exposing a production server publicly.
+- The Socket.IO server accepts origins by default for local development. Restrict `CLIENT_ORIGIN` before exposing a production server publicly; `*` wildcards cover hosts that generate a new URL per deployment.

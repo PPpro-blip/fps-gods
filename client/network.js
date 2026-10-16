@@ -7,6 +7,14 @@ export class GameNetwork {
   constructor(handlers = {}) {
     this.handlers = handlers;
     const configuredUrl = import.meta.env.VITE_SOCKET_URL?.trim();
+
+    // A static host (such as Vercel) cannot serve Socket.IO, so a production
+    // build needs the game server origin baked in via VITE_SOCKET_URL. Same
+    // origin stays the fallback for single-origin/reverse-proxy deployments,
+    // but flag the missing value so the UI can explain the failure instead of
+    // silently retrying against the static site.
+    this.missingServerUrl = Boolean(import.meta.env.PROD) && !configuredUrl;
+
     this.socket = io(configuredUrl || undefined, {
       autoConnect: true,
       reconnection: true,
