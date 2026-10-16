@@ -4,5 +4,7 @@ dist/
 .env.*
 !.env.example
 .vite/
+# Local Vercel CLI project link (project id / org id); never commit this.
+.vercel/
 .DS_Store
 npm-debug.log*
