@@ -11,6 +11,7 @@ export class GameUI {
     this.lastHudPlayer = null;
 
     this.elements = {
+      shell: document.querySelector('.app-shell'),
       home: document.querySelector('#home-screen'),
       lobby: document.querySelector('#lobby-screen'),
       match: document.querySelector('#match-hud'),
@@ -18,6 +19,7 @@ export class GameUI {
       connectionLabel: document.querySelector('#connection-label'),
       name: document.querySelector('#player-name'),
       roomCodeInput: document.querySelector('#room-code-input'),
+      playNow: document.querySelector('#play-now-button'),
       create: document.querySelector('#create-room-button'),
       joinForm: document.querySelector('#join-room-form'),
       homeError: document.querySelector('#home-error'),
@@ -70,6 +72,7 @@ export class GameUI {
       localStorage.setItem('fps-gods-callsign', this.elements.name.value.slice(0, 16));
       this.clearError();
     });
+    this.elements.playNow.addEventListener('click', () => this.handlers.onPlayNow?.(this.playerName));
     this.elements.create.addEventListener('click', () => this.handlers.onCreate?.(this.playerName));
     this.elements.joinForm.addEventListener('submit', (event) => {
       event.preventDefault();
@@ -142,6 +145,7 @@ export class GameUI {
   }
 
   showHome() {
+    this.elements.shell.classList.remove('is-in-match');
     this.elements.home.hidden = false;
     this.elements.lobby.hidden = true;
     this.elements.match.hidden = true;
@@ -154,6 +158,7 @@ export class GameUI {
 
   showLobby(room = this.room, selfId = this.selfId) {
     if (!room) return;
+    this.elements.shell.classList.remove('is-in-match');
     this.room = room;
     this.selfId = selfId;
     this.lastHudPlayer = null;
@@ -248,6 +253,7 @@ export class GameUI {
   }
 
   showMatch(room = this.room) {
+    this.elements.shell.classList.add('is-in-match');
     if (room) {
       this.room = room;
       this.elements.hudCode.textContent = room.code;
@@ -317,6 +323,12 @@ export class GameUI {
       name.className = 'scoreboard-player-name';
       name.textContent = player.name;
       identity.append(rank, swatch, name);
+      if (player.isBot) {
+        const botTag = document.createElement('span');
+        botTag.className = 'scoreboard-bot-tag';
+        botTag.textContent = '[BOT]';
+        identity.append(botTag);
+      }
 
       const kills = document.createElement('span');
       kills.textContent = String(player.kills ?? 0);
@@ -394,7 +406,7 @@ export class GameUI {
       row.className = 'end-score-row';
       const name = document.createElement('span');
       name.className = index === 0 ? 'champion-name' : '';
-      name.textContent = `${index + 1}. ${player.name}`;
+      name.textContent = `${index + 1}. ${player.name}${player.isBot ? ' [BOT]' : ''}`;
       const kills = document.createElement('span');
       kills.textContent = `${player.kills} K`;
       const deaths = document.createElement('span');

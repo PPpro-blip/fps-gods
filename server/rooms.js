@@ -1,5 +1,5 @@
 import { randomInt } from 'node:crypto';
-import { EVENTS, ROOM_STATES } from '../shared/events.js';
+import { EVENTS, ROOM_MODES, ROOM_STATES } from '../shared/events.js';
 import { PLAYER } from '../shared/gameConfig.js';
 
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -48,6 +48,14 @@ export class RoomManager {
   }
 
   createRoom(socket, requestedName) {
+    return this.createRoomWithState(socket, requestedName, ROOM_STATES.LOBBY, ROOM_MODES.MULTIPLAYER, true);
+  }
+
+  createSoloBotsRoom(socket, requestedName) {
+    return this.createRoomWithState(socket, requestedName, ROOM_STATES.PLAYING, ROOM_MODES.SOLO_VS_BOTS, false);
+  }
+
+  createRoomWithState(socket, requestedName, state, mode, broadcast) {
     if (socket.data.roomCode) {
       this.emitError(socket, 'You are already in a room. Finish or leave that room first.');
       return null;
@@ -56,7 +64,8 @@ export class RoomManager {
     const code = createRoomCode(this.rooms);
     const room = {
       code,
-      state: ROOM_STATES.LOBBY,
+      state,
+      mode,
       hostId: socket.id,
       createdAt: Date.now(),
       players: new Map(),
@@ -65,7 +74,7 @@ export class RoomManager {
     };
     this.rooms.set(code, room);
     this.addPlayer(room, socket, requestedName);
-    this.broadcastRoomState(room);
+    if (broadcast) this.broadcastRoomState(room);
     return room;
   }
 
@@ -184,6 +193,7 @@ export class RoomManager {
           deaths: player.deaths,
           health: player.health,
           alive: player.alive,
+          isBot: Boolean(player.isBot),
         }))
       : [...room.players.values()].map((player) => ({
           id: player.id,
@@ -199,6 +209,7 @@ export class RoomManager {
     this.io.to(room.code).emit(EVENTS.ROOM_STATE, {
       code: room.code,
       state: room.state,
+      mode: room.mode,
       hostId: room.hostId,
       players,
       minPlayers: PLAYER.minPlayers,

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { EVENTS, ROOM_STATES } from '../shared/events.js';
+import { EVENTS, ROOM_MODES, ROOM_STATES } from '../shared/events.js';
+import { BOT, PLAYER } from '../shared/gameConfig.js';
 import { GameState } from '../server/gameState.js';
 import { castShot } from '../server/hitDetection.js';
 import { RoomManager } from '../server/rooms.js';
@@ -179,4 +180,132 @@ test('raycast distinguishes head/body damage zones and blocks shots through cove
     shooterId: 'shooter',
   });
   assert.equal(blocked, null);
+});
+
+test('SOLO_VS_BOTS creates five named bots and runs their movement brain at 10 Hz', () => {
+  const now = 1_000_000;
+  const room = {
+    code: 'BOT234',
+    state: ROOM_STATES.PLAYING,
+    mode: ROOM_MODES.SOLO_VS_BOTS,
+    players: new Map([
+      ['human', { id: 'human', name: 'Human', color: '#57d6ff', ready: true, connectedAt: 1 }],
+    ]),
+  };
+  const game = new GameState(room, { emitRoom() {}, emitPlayer() {} }, now);
+  const human = game.players.get('human');
+  const bots = [...game.players.values()].filter((player) => player.isBot);
+  const bot = bots[0];
+
+  assert.equal(BOT.count, 5);
+  assert.equal(bots.length, 5);
+  assert.deepEqual(
+    bots.map((player) => player.name),
+    ['GOD_BOT_01', 'GOD_BOT_02', 'GOD_BOT_03', 'GOD_BOT_04', 'GOD_BOT_05'],
+  );
+
+  human.x = 0;
+  human.z = -10;
+  bot.x = 0;
+  bot.y = 0;
+  bot.z = 0;
+  bot.yaw = 0;
+  bot.botBrain.waypoint = { x: -8, z: 0 };
+  bot.botBrain.nextWaypointAt = now + 10_000;
+
+  game.update(0.05, now + 50);
+  assert.equal(game.lastBotThinkAt, now, 'bots do not think on the 20 Hz simulation half-tick');
+  game.update(0.05, now + 100);
+  assert.equal(game.lastBotThinkAt, now + 100);
+  assert.ok(Math.abs(bot.yaw) < 0.001, 'the bot faces its nearest human');
+  assert.ok(bot.input.strafe < 0, 'the bot strafes toward its patrol waypoint while aiming');
+  assert.ok(bot.x < 0, 'the bot moves toward the selected waypoint');
+});
+
+test('bot shots use the player hit pipeline and introduce a random offset on 30 percent of shots', () => {
+  const now = 1_000_000;
+  const room = {
+    code: 'BOT234',
+    state: ROOM_STATES.PLAYING,
+    mode: ROOM_MODES.SOLO_VS_BOTS,
+    players: new Map([
+      ['human', { id: 'human', name: 'Human', color: '#57d6ff', ready: true, connectedAt: 1 }],
+    ]),
+  };
+  const emitted = [];
+  const game = new GameState(room, {
+    emitRoom: (event, data) => emitted.push({ channel: 'room', event, data }),
+    emitPlayer: (id, event, data) => emitted.push({ channel: id, event, data }),
+  }, now);
+  const human = game.players.get('human');
+  const [bot] = [...game.players.values()].filter((player) => player.isBot);
+  bot.x = 0;
+  bot.y = 0;
+  bot.z = 0;
+  bot.yaw = 0;
+  bot.pitch = 0;
+  human.x = 0;
+  human.y = 0;
+  human.z = -5;
+  human.spawnProtectionUntil = now - 1;
+  human.health = 25;
+
+  const originalRandom = Math.random;
+  try {
+    Math.random = () => 0.99;
+    game.shoot(bot.id, now + 1);
+  } finally {
+    Math.random = originalRandom;
+  }
+  assert.equal(human.alive, false);
+  assert.equal(bot.kills, 1);
+  assert.ok(emitted.some((event) => event.channel === bot.id && event.event === EVENTS.HIT_CONFIRMED));
+  const kill = emitted.find((event) => event.event === EVENTS.KILL_FEED_UPDATE);
+  assert.equal(kill?.data.killerName, 'GOD_BOT_01');
+  assert.equal(game.getScoreboard().find((player) => player.id === bot.id)?.isBot, true);
+
+  const missGame = new GameState(room, { emitRoom() {}, emitPlayer() {} }, now);
+  const missHuman = missGame.players.get('human');
+  const missBot = [...missGame.players.values()].find((player) => player.isBot);
+  missBot.x = 0;
+  missBot.y = 0;
+  missBot.z = 0;
+  missBot.yaw = 0;
+  missBot.pitch = 0;
+  missHuman.x = 0;
+  missHuman.y = 0;
+  missHuman.z = -5;
+  missHuman.spawnProtectionUntil = now - 1;
+  const randomValues = [0.1, 0.1, 0.5];
+  try {
+    Math.random = () => randomValues.shift() ?? 0.5;
+    missGame.shoot(missBot.id, now + 1);
+  } finally {
+    Math.random = originalRandom;
+  }
+  assert.equal(missHuman.health, 100, 'the randomly offset shot misses the target');
+});
+
+test('bots respawn three seconds after being eliminated', () => {
+  const now = 1_000_000;
+  const room = {
+    code: 'BOT234',
+    state: ROOM_STATES.PLAYING,
+    mode: ROOM_MODES.SOLO_VS_BOTS,
+    players: new Map([
+      ['human', { id: 'human', name: 'Human', color: '#57d6ff', ready: true, connectedAt: 1 }],
+    ]),
+  };
+  const game = new GameState(room, { emitRoom() {}, emitPlayer() {} }, now);
+  const bot = [...game.players.values()].find((player) => player.isBot);
+  bot.alive = false;
+  bot.health = 0;
+  bot.respawnAt = now + PLAYER.respawnMs;
+
+  game.update(0.05, bot.respawnAt - 1);
+  assert.equal(bot.alive, false);
+  game.update(0.05, bot.respawnAt);
+  assert.equal(bot.alive, true);
+  assert.equal(bot.health, 100);
+  assert.equal(bot.respawnAt, null);
 });

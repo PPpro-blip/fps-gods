@@ -7,25 +7,32 @@ export class GameNetwork {
   constructor(handlers = {}) {
     this.handlers = handlers;
     const configuredUrl = import.meta.env.VITE_SOCKET_URL?.trim();
+    const socketUrl = configuredUrl || window.location.origin;
 
-    // A static host (such as Vercel) cannot serve Socket.IO, so a production
-    // build needs the game server origin baked in via VITE_SOCKET_URL. Same
-    // origin stays the fallback for single-origin/reverse-proxy deployments,
-    // but flag the missing value so the UI can explain the failure instead of
-    // silently retrying against the static site.
-    this.missingServerUrl = Boolean(import.meta.env.PROD) && !configuredUrl;
-
-    this.socket = io(configuredUrl || undefined, {
+    this.socket = io(socketUrl, {
       autoConnect: true,
       reconnection: true,
-      reconnectionDelay: 500,
-      reconnectionDelayMax: 5_000,
+      reconnectionDelay: 3_000,
+      reconnectionDelayMax: 3_000,
+      randomizationFactor: 0,
       timeout: 10_000,
     });
 
     this.socket.on('connect', () => this.handlers.onConnect?.(this.socket.id));
-    this.socket.on('disconnect', (reason) => this.handlers.onDisconnect?.(reason));
-    this.socket.on('connect_error', (error) => this.handlers.onConnectionError?.(error));
+    this.socket.on('disconnect', (reason) => {
+      if (reason !== 'io client disconnect') console.error('[FPS GODS] Socket disconnected:', reason);
+      this.handlers.onDisconnect?.(reason);
+    });
+    this.socket.on('connect_error', (error) => {
+      console.error('[FPS GODS] Socket connection error:', error);
+      this.handlers.onConnectionError?.(error);
+    });
+    this.socket.io.on('reconnect_error', (error) => {
+      console.error('[FPS GODS] Socket reconnection error:', error);
+    });
+    this.socket.io.on('error', (error) => {
+      console.error('[FPS GODS] Socket manager error:', error);
+    });
 
     this.socket.on(EVENTS.ROOM_STATE, (state) => this.handlers.onRoomState?.(state));
     this.socket.on(EVENTS.ROOM_ERROR, (error) => this.handlers.onRoomError?.(error));
@@ -56,6 +63,10 @@ export class GameNetwork {
 
   joinRoom(code, name) {
     this.socket.emit(EVENTS.JOIN_ROOM, { code, name });
+  }
+
+  playNow(name) {
+    this.socket.emit(EVENTS.PLAY_NOW, { name });
   }
 
   setReady(ready) {

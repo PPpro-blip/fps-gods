@@ -1,5 +1,5 @@
-import { EVENTS } from '../shared/events.js';
-import { COVER, MAP, PLAYER, SPAWN_POINTS } from '../shared/gameConfig.js';
+import { EVENTS, ROOM_MODES } from '../shared/events.js';
+import { BOT, COVER, MAP, PLAYER, SPAWN_POINTS } from '../shared/gameConfig.js';
 import { castShot } from './hitDetection.js';
 
 const clamp = (value, minimum, maximum) => Math.min(maximum, Math.max(minimum, value));
@@ -37,11 +37,37 @@ function collidesWithCover(x, z, feetY) {
   return false;
 }
 
+function randomBotWaypoint() {
+  const maxX = MAP.halfWidth - MAP.wallThickness / 2 - PLAYER.radius - 1;
+  const maxZ = MAP.halfDepth - MAP.wallThickness / 2 - PLAYER.radius - 1;
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    const waypoint = {
+      x: (Math.random() * 2 - 1) * maxX,
+      z: (Math.random() * 2 - 1) * maxZ,
+    };
+    if (!collidesWithCover(waypoint.x, waypoint.z, 0)) return waypoint;
+  }
+  return { ...SPAWN_POINTS[Math.floor(Math.random() * SPAWN_POINTS.length)] };
+}
+
+function botWaypointDuration() {
+  return BOT.minimumWaypointTimeMs
+    + Math.random() * (BOT.maximumWaypointTimeMs - BOT.minimumWaypointTimeMs);
+}
+
 function makeGamePlayer(record, spawn, now) {
   return {
     id: record.id,
     name: record.name,
     color: record.color,
+    isBot: record.isBot === true,
+    botBrain: record.isBot === true ? {
+      waypoint: randomBotWaypoint(),
+      nextWaypointAt: now + botWaypointDuration(),
+      stuckThinkCount: 0,
+      lastX: spawn.x,
+      lastZ: spawn.z,
+    } : null,
     x: spawn.x,
     y: 0,
     z: spawn.z,
@@ -73,20 +99,35 @@ function makeGamePlayer(record, spawn, now) {
 export class GameState {
   constructor(room, { emitRoom, emitPlayer }, now = Date.now()) {
     this.room = room;
+    this.mode = room.mode ?? ROOM_MODES.MULTIPLAYER;
     this.emitRoom = emitRoom;
     this.emitPlayer = emitPlayer;
     this.players = new Map();
     this.feed = [];
     this.finished = false;
     this.winner = null;
+    this.lastBotThinkAt = now;
+
+    const records = [...room.players.values()];
+    if (this.mode === ROOM_MODES.SOLO_VS_BOTS) {
+      const botColors = ['#ff9858', '#ff647c', '#b18cff', '#ffc857', '#ff72cc'];
+      for (let index = 1; index <= BOT.count; index += 1) {
+        const name = `GOD_BOT_${String(index).padStart(2, '0')}`;
+        records.push({
+          id: `bot-${name}`,
+          name,
+          color: botColors[index - 1],
+          ready: true,
+          isBot: true,
+        });
+      }
+    }
 
     const spawns = shuffled(SPAWN_POINTS);
-    let index = 0;
-    for (const record of room.players.values()) {
+    records.forEach((record, index) => {
       const spawn = spawns[index % spawns.length];
       this.players.set(record.id, makeGamePlayer(record, spawn, now));
-      index += 1;
-    }
+    });
   }
 
   setInput(playerId, payload, now = Date.now()) {
@@ -108,13 +149,17 @@ export class GameState {
   update(deltaSeconds, now = Date.now()) {
     if (this.finished) return { winner: this.winner };
     const delta = clamp(finiteNumber(deltaSeconds, 0), 0, 0.1);
+    if (this.mode === ROOM_MODES.SOLO_VS_BOTS && now - this.lastBotThinkAt >= BOT.thinkIntervalMs) {
+      this.lastBotThinkAt = now;
+      this.updateBots(now);
+    }
 
     for (const player of this.players.values()) {
       if (!player.alive) {
         if (player.respawnAt !== null && now >= player.respawnAt) this.respawn(player, now);
         continue;
       }
-      if (now - player.lastInputAt > PLAYER.inputTimeoutMs) {
+      if (!player.isBot && now - player.lastInputAt > PLAYER.inputTimeoutMs) {
         player.input.forward = 0;
         player.input.strafe = 0;
         player.input.jump = false;
@@ -128,6 +173,80 @@ export class GameState {
     }
 
     return null;
+  }
+
+  updateBots(now) {
+    const humanPlayers = [...this.players.values()].filter((player) => !player.isBot && player.alive);
+    const humanTargets = new Map(humanPlayers.map((player) => [player.id, player]));
+
+    for (const bot of this.players.values()) {
+      if (!bot.isBot || !bot.alive) continue;
+      const brain = bot.botBrain;
+      const distanceToWaypoint = brain.waypoint
+        ? Math.hypot(brain.waypoint.x - bot.x, brain.waypoint.z - bot.z)
+        : Infinity;
+      const moved = Math.hypot(bot.x - brain.lastX, bot.z - brain.lastZ);
+      if ((Math.abs(bot.input.forward) > 0.05 || Math.abs(bot.input.strafe) > 0.05) && moved < 0.05) {
+        brain.stuckThinkCount += 1;
+      } else {
+        brain.stuckThinkCount = 0;
+      }
+      brain.lastX = bot.x;
+      brain.lastZ = bot.z;
+
+      if (!brain.waypoint
+        || distanceToWaypoint <= BOT.waypointReachDistance
+        || now >= brain.nextWaypointAt
+        || brain.stuckThinkCount >= BOT.stuckThinkCount) {
+        brain.waypoint = randomBotWaypoint();
+        brain.nextWaypointAt = now + botWaypointDuration();
+        brain.stuckThinkCount = 0;
+      }
+
+      const toWaypointX = brain.waypoint.x - bot.x;
+      const toWaypointZ = brain.waypoint.z - bot.z;
+      const waypointDistance = Math.hypot(toWaypointX, toWaypointZ);
+      const target = humanPlayers.reduce((nearest, player) => {
+        const distance = Math.hypot(player.x - bot.x, player.z - bot.z);
+        return !nearest || distance < nearest.distance ? { player, distance } : nearest;
+      }, null)?.player;
+
+      if (target) {
+        const deltaX = target.x - bot.x;
+        const deltaZ = target.z - bot.z;
+        const horizontalDistance = Math.hypot(deltaX, deltaZ);
+        bot.yaw = wrapAngle(Math.atan2(-deltaX, -deltaZ));
+        bot.pitch = clamp(
+          Math.atan2(target.y - bot.y, horizontalDistance),
+          -1.45,
+          1.45,
+        );
+      } else {
+        if (waypointDistance > 0) bot.yaw = wrapAngle(Math.atan2(-toWaypointX, -toWaypointZ));
+        bot.pitch = 0;
+      }
+
+      const desiredX = waypointDistance > BOT.waypointReachDistance ? toWaypointX / waypointDistance : 0;
+      const desiredZ = waypointDistance > BOT.waypointReachDistance ? toWaypointZ / waypointDistance : 0;
+      const forwardX = -Math.sin(bot.yaw);
+      const forwardZ = -Math.cos(bot.yaw);
+      const rightX = Math.cos(bot.yaw);
+      const rightZ = -Math.sin(bot.yaw);
+      bot.input.forward = clamp(desiredX * forwardX + desiredZ * forwardZ, -1, 1);
+      bot.input.strafe = clamp(desiredX * rightX + desiredZ * rightZ, -1, 1);
+      bot.input.jump = false;
+      bot.lastInputAt = now;
+
+      if (!target) continue;
+      const shot = castShot({
+        origin: { x: bot.x, y: bot.y + PLAYER.eyeHeight, z: bot.z },
+        direction: aimDirection(bot.yaw, bot.pitch),
+        players: humanTargets,
+        shooterId: bot.id,
+        maxDistance: PLAYER.shotRange,
+      });
+      if (shot?.target.id === target.id) this.shoot(bot.id, now);
+    }
   }
 
   updatePlayer(player, delta) {
@@ -200,11 +319,20 @@ export class GameState {
       y: shooter.y + PLAYER.eyeHeight,
       z: shooter.z,
     };
-    const direction = aimDirection(shooter.yaw, shooter.pitch);
+    let direction = aimDirection(shooter.yaw, shooter.pitch);
+    if (shooter.isBot && Math.random() < BOT.missChance) {
+      const side = Math.random() < 0.5 ? -1 : 1;
+      const missAngle = BOT.minimumMissAngleRadians
+        + Math.random() * (BOT.maximumMissAngleRadians - BOT.minimumMissAngleRadians);
+      direction = aimDirection(wrapAngle(shooter.yaw + side * missAngle), shooter.pitch);
+    }
+    const shotTargets = shooter.isBot
+      ? new Map([...this.players].filter(([, player]) => !player.isBot))
+      : this.players;
     const result = castShot({
       origin,
       direction,
-      players: this.players,
+      players: shotTargets,
       shooterId: shooter.id,
       maxDistance: PLAYER.shotRange,
     });
@@ -297,6 +425,7 @@ export class GameState {
         id: killer.id,
         name: killer.name,
         kills: killer.kills,
+        ...(killer.isBot ? { isBot: true } : {}),
       };
     }
   }
@@ -365,6 +494,7 @@ export class GameState {
         deaths: player.deaths,
         health: player.health,
         alive: player.alive,
+        isBot: player.isBot,
       }))
       .sort((left, right) => right.kills - left.kills || left.deaths - right.deaths || left.name.localeCompare(right.name));
   }
@@ -375,6 +505,7 @@ export class GameState {
       state: this.room.state,
       serverTime: now,
       targetKills: PLAYER.targetKills,
+      mode: this.mode,
       players: [...this.players.values()].map((player) => ({
         id: player.id,
         name: player.name,
@@ -392,6 +523,7 @@ export class GameState {
         kills: player.kills,
         deaths: player.deaths,
         alive: player.alive,
+        isBot: player.isBot,
         spawnProtected: now < player.spawnProtectionUntil,
         spawnProtectionUntil: player.spawnProtectionUntil,
         respawnAt: player.respawnAt,

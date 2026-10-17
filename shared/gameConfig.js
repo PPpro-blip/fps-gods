@@ -27,6 +27,18 @@ export const PLAYER = Object.freeze({
   inputTimeoutMs: 300,
 });
 
+export const BOT = Object.freeze({
+  count: 5,
+  thinkIntervalMs: 100,
+  missChance: 0.3,
+  minimumMissAngleRadians: 0.28,
+  maximumMissAngleRadians: 0.48,
+  waypointReachDistance: 1.5,
+  minimumWaypointTimeMs: 2_500,
+  maximumWaypointTimeMs: 7_000,
+  stuckThinkCount: 12,
+});
+
 // Twelve solid waist-to-head-high cover blocks. Each is an AABB in X/Z with
 // its base on the arena floor; the server uses the same dimensions for hits.
 export const COVER = Object.freeze([

@@ -2,6 +2,7 @@
 export const EVENTS = Object.freeze({
   CREATE_ROOM: 'CREATE_ROOM',
   JOIN_ROOM: 'JOIN_ROOM',
+  PLAY_NOW: 'PLAY_NOW',
   ROOM_STATE: 'ROOM_STATE',
   ROOM_ERROR: 'ROOM_ERROR',
   PLAYER_INPUT: 'PLAYER_INPUT',
@@ -28,4 +29,9 @@ export const ROOM_STATES = Object.freeze({
   LOBBY: 'LOBBY',
   PLAYING: 'PLAYING',
   ENDED: 'ENDED',
+});
+
+export const ROOM_MODES = Object.freeze({
+  MULTIPLAYER: 'MULTIPLAYER',
+  SOLO_VS_BOTS: 'SOLO_VS_BOTS',
 });

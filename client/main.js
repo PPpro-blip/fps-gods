@@ -81,10 +81,6 @@ function enterMatch(room = currentRoom) {
   ui.setPaused(document.pointerLockElement !== canvas);
 }
 
-// Shown once when a production build has no VITE_SOCKET_URL baked in, so the
-// failure reads as a deployment configuration problem instead of a timeout.
-let reportedMissingServerUrl = false;
-
 const network = new GameNetwork({
   onConnect: () => ui.setConnectionState('connected'),
   onDisconnect: (reason) => {
@@ -93,14 +89,7 @@ const network = new GameNetwork({
     controller.setEnabled(false);
     isShooting = false;
   },
-  onConnectionError: () => {
-    if (network.missingServerUrl && !reportedMissingServerUrl) {
-      reportedMissingServerUrl = true;
-      ui.setConnectionState('offline', 'No multiplayer server in this build. Set VITE_SOCKET_URL, then redeploy.');
-      return;
-    }
-    ui.setConnectionState('offline');
-  },
+  onConnectionError: () => ui.setConnectionState('offline'),
   onRoomState: (room) => {
     const previousState = currentRoom?.state;
     currentRoom = room;
@@ -173,6 +162,10 @@ const network = new GameNetwork({
 });
 
 ui.setHandlers({
+  onPlayNow: (name) => {
+    if (!network.connected) return ui.showError('Still connecting to the game server. Try again in a moment.');
+    network.playNow(name);
+  },
   onCreate: (name) => {
     if (!network.connected) return ui.showError('Still connecting to the game server. Try again in a moment.');
     network.createRoom(name);

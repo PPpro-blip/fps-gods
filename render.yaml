@@ -29,8 +29,3 @@ services:
       - key: HOST
         value: 0.0.0.0
       # Render injects PORT automatically and server/index.js already reads it.
-      - key: CLIENT_ORIGIN
-        # sync:false lets you widen this in the dashboard (extra preview or
-        # custom domains) without a blueprint update overwriting your value.
-        sync: false
-        value: https://fps-gods.vercel.app,https://fps-gods-*.vercel.app

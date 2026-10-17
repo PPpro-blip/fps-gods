@@ -80,12 +80,15 @@ button:focus-visible, input:focus-visible, a:focus-visible { outline: 2px solid 
 .button-primary:hover:not(:disabled) { background: var(--cyan-bright); box-shadow: 0 8px 28px rgba(44, 190, 231, .26); }
 .button-secondary { color: var(--text); border-color: rgba(170, 197, 227, .21); background: rgba(167, 195, 226, .055); }
 .button-secondary:hover:not(:disabled) { border-color: rgba(89, 216, 255, .56); background: rgba(89, 216, 255, .09); }
-.create-button { width: 100%; justify-content: flex-start; margin-top: 14px; }
+.play-button, .create-button { width: 100%; justify-content: flex-start; }
+.play-button { margin-top: 14px; }
+.play-button .button-arrow { font-size: 8px; }
+.create-button { margin-top: 8px; }
 .button-icon { font-size: 17px; font-weight: 400; }
 .button-arrow { margin-left: auto; font-size: 15px; }
-.or-divider { display: flex; align-items: center; gap: 12px; margin: 18px 0 12px; color: #657288; font: 8px var(--mono); letter-spacing: .13em; white-space: nowrap; }
+.or-divider { display: flex; align-items: center; gap: 12px; margin: 14px 0 10px; color: #657288; font: 8px var(--mono); letter-spacing: .13em; white-space: nowrap; }
 .or-divider span { width: 100%; height: 1px; background: var(--line); }
-.join-form { display: grid; grid-template-columns: 1fr 100px; gap: 8px; }
+.join-form { display: grid; grid-template-columns: 1fr 122px; gap: 8px; }
 .code-input-wrap input { font-family: var(--mono); letter-spacing: .22em; text-transform: uppercase; }
 .join-button { min-height: 46px; }
 .join-button span { color: var(--cyan); font-size: 15px; }
@@ -138,8 +141,9 @@ button:focus-visible, input:focus-visible, a:focus-visible { outline: 2px solid 
 .start-button span { font-size: 14px; }
 .lobby-hint { min-height: 13px; margin: 12px 0 0; color: #77849a; text-align: center; font-size: 9px; }
 
-.connection-pill { position: absolute; z-index: 31; top: 28px; right: 28px; display: flex; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid rgba(173, 198, 229, .12); background: rgba(5, 9, 15, .72); color: #a4afc0; font: 8px var(--mono); letter-spacing: .11em; backdrop-filter: blur(8px); transition: opacity .25s; }
-.connection-pill.is-connected { opacity: .4; }
+.connection-pill { position: absolute; z-index: 31; top: 28px; left: 280px; display: flex; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid rgba(173, 198, 229, .12); background: rgba(5, 9, 15, .72); color: #a4afc0; font: 8px var(--mono); letter-spacing: .11em; backdrop-filter: blur(8px); transition: opacity .25s; }
+.app-shell.is-in-match .connection-pill { right: 180px; left: auto; }
+.connection-pill.is-connected { opacity: .82; }
 .connection-pill.is-connected:hover { opacity: 1; }
 .connection-pill.is-offline { border-color: rgba(255, 100, 124, .32); color: var(--red); }
 .connection-dot { width: 6px; height: 6px; border-radius: 50%; background: #ffc857; box-shadow: 0 0 10px rgba(255, 200, 87, .7); }
@@ -239,6 +243,7 @@ kbd { min-width: 15px; height: 15px; display: inline-grid; place-items: center; 
 .scoreboard-rank { width: 18px; color: #748197; font: 9px var(--mono); }
 .scoreboard-swatch { width: 5px; height: 19px; background: var(--player-color); }
 .scoreboard-player-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.scoreboard-bot-tag { flex: none; padding: 3px 4px; border: 1px solid rgba(255, 152, 88, .32); color: var(--orange); font: 7px var(--mono); letter-spacing: .04em; }
 .scoreboard-row > span:not(:first-child) { text-align: center; font-family: var(--mono); }
 .scoreboard-status { color: var(--green); font: 8px var(--mono); text-align: center !important; }
 .scoreboard-status.is-down { color: var(--red); }
@@ -268,12 +273,17 @@ kbd { min-width: 15px; height: 15px; display: inline-grid; place-items: center; 
   .lobby-layout { gap: 6vw; }
   .center-controls-hint { display: none; }
 }
+@media (min-width: 681px) and (max-width: 999px) {
+  .connection-pill { top: 72px; right: auto; left: 30px; }
+  .app-shell.is-in-match .connection-pill { top: 72px; right: auto; left: 30px; }
+}
 @media (max-width: 680px) {
   .screen { padding: 19px 20px 16px; }
   .brand-header { min-height: 32px; }
   .season-chip { font-size: 7px; gap: 6px; }
   .brand-name { font-size: 20px; }
-  .connection-pill { top: 62px; right: 20px; padding: 6px 8px; font-size: 7px; }
+  .connection-pill { top: 62px; right: 20px; left: auto; padding: 6px 8px; font-size: 7px; }
+  .app-shell.is-in-match .connection-pill { top: 60px; right: auto; left: 12px; }
   .home-layout, .lobby-layout { display: flex; flex-direction: column; align-items: stretch; justify-content: center; gap: 20px; padding: 26px 0; }
   .hero-copy { padding: 0; }
   .hero-copy .eyebrow { margin-bottom: 13px; }

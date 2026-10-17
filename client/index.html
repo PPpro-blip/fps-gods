@@ -44,7 +44,7 @@
           <section class="launch-card" aria-labelledby="launch-title">
             <div class="card-topline"><span class="card-index">01</span><span class="card-caption">DEPLOYMENT CONSOLE</span><span class="card-signal"></span></div>
             <h2 id="launch-title">Enter the fight</h2>
-            <p class="card-intro">Choose your callsign, then create a room or join your squad's code.</p>
+            <p class="card-intro">Choose your callsign, then battle five bots or play with friends.</p>
 
             <label class="field-label" for="player-name">CALLSIGN</label>
             <div class="input-wrap name-input-wrap">
@@ -52,11 +52,14 @@
               <input id="player-name" name="player-name" maxlength="16" autocomplete="nickname" placeholder="Rookie" value="" />
             </div>
 
-            <button class="button button-primary create-button" id="create-room-button" type="button">
-              <span class="button-icon">＋</span><span>CREATE A ROOM</span><span class="button-arrow">↗</span>
+            <button class="button button-primary play-button" id="play-now-button" type="button">
+              <span class="button-icon">▶</span><span>PLAY NOW</span><span class="button-arrow">5 BOTS&nbsp; ↗</span>
+            </button>
+            <button class="button button-secondary create-button" id="create-room-button" type="button">
+              <span class="button-icon">＋</span><span>CREATE ROOM</span><span class="button-arrow">↗</span>
             </button>
 
-            <div class="or-divider"><span></span><b>OR JOIN WITH CODE</b><span></span></div>
+            <div class="or-divider"><span></span><b>OR JOIN A ROOM</b><span></span></div>
 
             <form class="join-form" id="join-room-form">
               <label class="sr-only" for="room-code-input">Six character room code</label>
@@ -64,7 +67,7 @@
                 <span class="input-prefix">#</span>
                 <input id="room-code-input" name="room-code" maxlength="6" autocomplete="off" spellcheck="false" placeholder="A1B2C3" />
               </div>
-              <button class="button button-secondary join-button" id="join-room-button" type="submit" aria-label="Join room">JOIN <span>→</span></button>
+              <button class="button button-secondary join-button" id="join-room-button" type="submit" aria-label="Join room">JOIN ROOM <span>→</span></button>
             </form>
             <p class="inline-error" id="home-error" aria-live="polite" hidden></p>
             <p class="card-footnote"><span class="tiny-shield">◆</span> Matches are server-hosted and room-isolated.</p>

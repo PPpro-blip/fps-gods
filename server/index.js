@@ -7,7 +7,6 @@ import { EVENTS, ROOM_STATES } from '../shared/events.js';
 import { PLAYER } from '../shared/gameConfig.js';
 import { GameState } from './gameState.js';
 import { RoomManager } from './rooms.js';
-import { createCorsOrigin } from './origins.js';
 
 // Fixed 20 Hz simulation and state broadcast. The server derives its own delta
 // time and caps long pauses so clients can never supply movement speed or dt.
@@ -17,11 +16,8 @@ const TICK_RATE_MS = 50;
  * Build the Express app, HTTP server, and Socket.IO instance without binding a
  * port. Exported so deployment/integration tests can boot the real server on an
  * ephemeral port and shut the simulation timer down again.
- *
- * @param {{ clientOrigin?: string }} [options]
  */
-export function createGameServer(options = {}) {
-  const clientOrigin = options.clientOrigin ?? process.env.CLIENT_ORIGIN ?? '';
+export function createGameServer() {
   const app = express();
   app.disable('x-powered-by');
   app.get('/health', (_request, response) => {
@@ -31,7 +27,7 @@ export function createGameServer(options = {}) {
   const httpServer = createServer(app);
   const io = new Server(httpServer, {
     cors: {
-      origin: createCorsOrigin(clientOrigin),
+      origin: '*',
       methods: ['GET', 'POST'],
     },
     pingInterval: 25_000,
@@ -39,6 +35,21 @@ export function createGameServer(options = {}) {
     maxHttpBufferSize: 16_384,
   });
   const roomManager = new RoomManager(io);
+
+  function launchRoom(room) {
+    const now = Date.now();
+    room.game = new GameState(room, {
+      emitRoom: (event, data) => io.to(room.code).emit(event, data),
+      emitPlayer: (playerId, event, data) => io.to(playerId).emit(event, data),
+    }, now);
+    io.to(room.code).emit(EVENTS.GAME_START, {
+      code: room.code,
+      mode: room.mode,
+      targetKills: PLAYER.targetKills,
+      playerCount: room.game.players.size,
+    });
+    roomManager.broadcastRoomState(room);
+  }
 
   // Socket handlers validate room membership before any input can reach a game.
   io.on('connection', (socket) => {
@@ -61,18 +72,12 @@ export function createGameServer(options = {}) {
         return;
       }
 
-      const { room } = result;
-      const now = Date.now();
-      room.game = new GameState(room, {
-        emitRoom: (event, data) => io.to(room.code).emit(event, data),
-        emitPlayer: (playerId, event, data) => io.to(playerId).emit(event, data),
-      }, now);
-      io.to(room.code).emit(EVENTS.GAME_START, {
-        code: room.code,
-        targetKills: PLAYER.targetKills,
-        playerCount: room.players.size,
-      });
-      roomManager.broadcastRoomState(room);
+      launchRoom(result.room);
+    });
+
+    socket.on(EVENTS.PLAY_NOW, (payload = {}) => {
+      const room = roomManager.createSoloBotsRoom(socket, payload.name);
+      if (room) launchRoom(room);
     });
 
     socket.on(EVENTS.PLAYER_INPUT, (payload) => {
