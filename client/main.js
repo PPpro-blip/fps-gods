@@ -1,10 +1,20 @@
 import * as THREE from 'three';
 import { PLAYER } from '../shared/gameConfig.js';
+import { getWeapon } from '../shared/weapons.js';
 import { GameNetwork } from './network.js';
 import { PlayerController, RemotePlayers, StateInterpolator } from './player.js';
-import { World } from './world.js';
-import { WeaponEffects } from './weapons.js';
-import { GameUI } from './ui.js';
+import { SmokeClouds, World } from './world.js';
+import { WeaponViewmodels } from './weapons.js';
+import { addLifetimeKills, GameUI, getLifetimeKills } from './ui.js';
+
+// Every error that escapes to the browser console is tagged so deployment
+// issues on Vercel/Railway are easy to spot.
+window.addEventListener('error', (event) => {
+  console.error('[FPS GODS] Uncaught error:', event.error ?? event.message);
+});
+window.addEventListener('unhandledrejection', (event) => {
+  console.error('[FPS GODS] Unhandled rejection:', event.reason);
+});
 
 const canvas = document.querySelector('#game-canvas');
 const ui = new GameUI();
@@ -27,11 +37,16 @@ try {
 }
 
 const world = new World(scene);
+const smokeClouds = new SmokeClouds(scene);
 const controller = new PlayerController(camera, canvas);
 const nameTagRoot = document.querySelector('#name-tags');
 const remotePlayers = new RemotePlayers(scene, nameTagRoot);
 const interpolator = new StateInterpolator();
-const weaponEffects = new WeaponEffects(scene, camera);
+const viewmodels = new WeaponViewmodels(camera, scene);
+viewmodels.load().then(() => {
+  viewmodels.setWeapon('pistol', { instant: true });
+  viewmodels.setVisible(false);
+}).catch((error) => console.error('[FPS GODS] Viewmodel preload failed:', error));
 
 let currentRoom = null;
 let matchActive = false;
@@ -43,6 +58,8 @@ let latestPlayers = [];
 let latestLocalPlayer = null;
 let serverClockOffset = 0;
 let latestPlayerAlive = false;
+let latestWeaponId = null;
+let recordedMatchKills = false;
 
 function canPlay() {
   return matchActive && !matchEnded && currentRoom?.state === 'PLAYING';
@@ -56,11 +73,16 @@ function clearMatchPresentation() {
   latestPlayers = [];
   latestLocalPlayer = null;
   latestPlayerAlive = false;
+  latestWeaponId = null;
+  recordedMatchKills = false;
   interpolator.clear();
   remotePlayers.clear();
+  smokeClouds.sync([]);
   controller.setEnabled(false);
   if (document.pointerLockElement === canvas) document.exitPointerLock();
   ui.setScoreboard(false);
+  ui.closeWeaponWheel();
+  viewmodels.setVisible(false);
 }
 
 function enterMatch(room = currentRoom) {
@@ -72,6 +94,8 @@ function enterMatch(room = currentRoom) {
     latestPlayers = [];
     latestLocalPlayer = null;
     latestPlayerAlive = false;
+    latestWeaponId = null;
+    recordedMatchKills = false;
     interpolator.clear();
     remotePlayers.clear();
     nextClientShotAt = 0;
@@ -79,26 +103,23 @@ function enterMatch(room = currentRoom) {
   ui.showMatch(room);
   controller.setEnabled(document.pointerLockElement === canvas);
   ui.setPaused(document.pointerLockElement !== canvas);
+  viewmodels.setVisible(true);
 }
 
-// Shown once when a production build has no VITE_SOCKET_URL baked in, so the
-// failure reads as a deployment configuration problem instead of a timeout.
-let reportedMissingServerUrl = false;
+function activeWeaponDefinition() {
+  return getWeapon(latestLocalPlayer?.weaponId ?? latestWeaponId ?? 'pistol');
+}
 
 const network = new GameNetwork({
   onConnect: () => ui.setConnectionState('connected'),
   onDisconnect: (reason) => {
     ui.setConnectionState('offline');
-    if (reason !== 'io client disconnect') ui.showToast('Connection interrupted. Trying to reconnect…');
+    if (reason !== 'io client disconnect') ui.showToast('Connection lost. Retrying every 3 seconds…');
     controller.setEnabled(false);
     isShooting = false;
   },
-  onConnectionError: () => {
-    if (network.missingServerUrl && !reportedMissingServerUrl) {
-      reportedMissingServerUrl = true;
-      ui.setConnectionState('offline', 'No multiplayer server in this build. Set VITE_SOCKET_URL, then redeploy.');
-      return;
-    }
+  onConnectionError: (error) => {
+    console.error('[FPS GODS] Could not reach game server at', network.serverUrl, error?.message ?? error);
     ui.setConnectionState('offline');
   },
   onRoomState: (room) => {
@@ -126,10 +147,15 @@ const network = new GameNetwork({
     const receivedAt = performance.now();
     latestPlayers = state.players ?? [];
     interpolator.push(latestPlayers, receivedAt);
+    smokeClouds.sync(state.smokes ?? [], state.serverTime ?? Date.now());
     serverClockOffset = (state.serverTime ?? Date.now()) - Date.now();
     latestLocalPlayer = latestPlayers.find((player) => player.id === network.id) ?? null;
     latestPlayerAlive = Boolean(latestLocalPlayer?.alive);
     if (latestLocalPlayer) {
+      if (latestLocalPlayer.weaponId !== latestWeaponId) {
+        latestWeaponId = latestLocalPlayer.weaponId;
+        viewmodels.setWeapon(latestWeaponId ?? 'pistol');
+      }
       ui.updateHud(latestLocalPlayer, Date.now() + serverClockOffset, latestPlayers.filter((player) => player.alive).length);
     }
     ui.updateScoreboard(latestPlayers, network.id);
@@ -139,6 +165,14 @@ const network = new GameNetwork({
     isShooting = false;
     controller.setEnabled(false);
     if (document.pointerLockElement === canvas) document.exitPointerLock();
+    if (!recordedMatchKills) {
+      recordedMatchKills = true;
+      const mine = result?.scoreboard?.find((player) => player.id === network.id);
+      if (mine?.kills) {
+        const total = addLifetimeKills(mine.kills);
+        ui.showToast(`+${mine.kills} lifetime kills. Total: ${total}`);
+      }
+    }
     ui.showGameEnd(result, network.id);
   },
   onReturnToLobby: () => {
@@ -151,6 +185,7 @@ const network = new GameNetwork({
       latestLocalPlayer.health = 0;
       latestLocalPlayer.respawnAt = data.respawnAt;
       latestPlayerAlive = false;
+      isShooting = false;
       ui.updateHud(latestLocalPlayer, Date.now() + serverClockOffset, latestPlayers.filter((player) => player.alive).length);
     }
   },
@@ -163,6 +198,13 @@ const network = new GameNetwork({
   onAmmoUpdate: (data) => {
     if (!latestLocalPlayer) return;
     Object.assign(latestLocalPlayer, data);
+    if (data.weaponId && data.weaponId !== latestWeaponId) {
+      latestWeaponId = data.weaponId;
+      viewmodels.setWeapon(data.weaponId);
+    }
+    if (data.reloading) {
+      viewmodels.startReload(getWeapon(data.weaponId ?? latestWeaponId ?? 'pistol').reloadMs);
+    }
     ui.updateHud(latestLocalPlayer, Date.now() + serverClockOffset, latestPlayers.filter((player) => player.alive).length);
   },
   onHealthUpdate: (data) => {
@@ -170,16 +212,26 @@ const network = new GameNetwork({
     latestLocalPlayer.health = data.health;
     ui.updateHud(latestLocalPlayer, Date.now() + serverClockOffset, latestPlayers.filter((player) => player.alive).length);
   },
+  onWeaponSwitched: (data) => {
+    if (data?.weaponId) viewmodels.setWeapon(data.weaponId);
+  },
 });
 
 ui.setHandlers({
-  onCreate: (name) => {
-    if (!network.connected) return ui.showError('Still connecting to the game server. Try again in a moment.');
-    network.createRoom(name);
-  },
-  onJoin: (name, code) => {
-    if (!network.connected) return ui.showError('Still connecting to the game server. Try again in a moment.');
-    network.joinRoom(code, name);
+  onBundleConfirmed: (bundleId, action, code) => {
+    if (!network.connected) {
+      ui.showError('Still connecting to the game server. Try again in a moment.');
+      return;
+    }
+    const name = ui.playerName;
+    const kills = getLifetimeKills();
+    if (action === 'solo') {
+      network.playSolo(name, bundleId, kills);
+    } else if (action === 'create') {
+      network.createRoom(name, bundleId, kills);
+    } else {
+      network.joinRoom(code, name, bundleId, kills);
+    }
   },
   onReady: (ready) => network.setReady(ready),
   onStart: () => network.startGame(),
@@ -200,13 +252,13 @@ canvas.addEventListener('click', () => {
 
 document.addEventListener('pointerlockchange', () => {
   const locked = document.pointerLockElement === canvas;
-  controller.setEnabled(locked && canPlay());
+  controller.setEnabled(locked && canPlay() && !ui.wheelOpen);
   if (!locked) isShooting = false;
-  if (canPlay()) ui.setPaused(!locked);
+  if (canPlay()) ui.setPaused(!locked && !ui.wheelOpen);
 });
 
 document.addEventListener('mousedown', (event) => {
-  if (event.button !== 0 || !canPlay() || document.pointerLockElement !== canvas || !latestPlayerAlive) return;
+  if (event.button !== 0 || !canPlay() || document.pointerLockElement !== canvas || !latestPlayerAlive || ui.wheelOpen) return;
   isShooting = true;
   fireOnce(performance.now());
 });
@@ -216,18 +268,84 @@ document.addEventListener('mouseup', (event) => {
 window.addEventListener('blur', () => { isShooting = false; });
 window.addEventListener('contextmenu', (event) => event.preventDefault());
 
-document.addEventListener('keydown', (event) => {
-  if (event.code !== 'KeyR' || event.repeat || !canPlay() || document.pointerLockElement !== canvas) return;
-  if (event.target instanceof HTMLElement && ['INPUT', 'TEXTAREA'].includes(event.target.tagName)) return;
-  event.preventDefault();
-  network.reload();
+// While the weapon wheel is open, raw mouse motion drives the wheel selector
+// instead of the camera; releasing Q equips the highlighted weapon.
+window.addEventListener('mousemove', (event) => {
+  if (ui.wheelOpen) ui.moveWeaponWheel(event.movementX ?? 0, event.movementY ?? 0);
 });
 
+document.addEventListener('keydown', (event) => {
+  const typing = event.target instanceof HTMLElement && ['INPUT', 'TEXTAREA'].includes(event.target.tagName);
+  if (typing) return;
+
+  if (event.code === 'KeyR' && !event.repeat && canPlay() && document.pointerLockElement === canvas) {
+    event.preventDefault();
+    network.reload();
+    return;
+  }
+
+  if (event.code === 'KeyQ' && !event.repeat && canPlay()) {
+    event.preventDefault();
+    const slots = latestLocalPlayer
+      ? bundleSlotsFor(latestLocalPlayer)
+      : [{ weaponId: 'pistol' }, { weaponId: 'smg' }, { weaponId: 'knife' }];
+    ui.openWeaponWheel(slots, latestLocalPlayer?.slot ?? 0);
+    controller.setEnabled(false);
+    isShooting = false;
+    ui.setPaused(false);
+    return;
+  }
+
+  // Number keys mirror the wheel for players who prefer direct selection.
+  if (['Digit1', 'Digit2', 'Digit3'].includes(event.code) && !event.repeat && canPlay() && latestLocalPlayer) {
+    event.preventDefault();
+    requestWeaponSwitch(Number(event.code.slice(-1)) - 1);
+  }
+});
+
+document.addEventListener('keyup', (event) => {
+  if (event.code !== 'KeyQ' || !ui.wheelOpen) return;
+  event.preventDefault();
+  const selected = ui.closeWeaponWheel();
+  if (selected !== null && latestLocalPlayer) requestWeaponSwitch(selected);
+  if (canPlay()) {
+    controller.setEnabled(document.pointerLockElement === canvas);
+    ui.setPaused(document.pointerLockElement !== canvas);
+  }
+});
+
+function bundleSlotsFor(player) {
+  // The three slots come straight from the player's bundle; the server echoes
+  // them one by one via state, but the shared catalog keeps the wheel instant.
+  const bundleSlots = {
+    rusher: ['smg', 'shotgun', 'knife'],
+    ghost: ['pistol', 'sniper', 'smoke'],
+    heavy: ['lmg', 'rocket', 'shield'],
+    gods: ['railgun', 'minigun', 'fist'],
+  };
+  return (bundleSlots[player.bundleId] ?? bundleSlots.rusher).map((weaponId) => ({ weaponId }));
+}
+
+function requestWeaponSwitch(slot) {
+  if (!latestLocalPlayer || slot === latestLocalPlayer.slot) return;
+  network.switchWeapon(slot);
+  const slots = bundleSlotsFor(latestLocalPlayer);
+  const weaponId = slots[slot]?.weaponId;
+  if (weaponId) {
+    viewmodels.setWeapon(weaponId);
+    latestWeaponId = weaponId;
+  }
+}
+
 function fireOnce(now) {
-  if (!canPlay() || !latestPlayerAlive || !latestLocalPlayer || latestLocalPlayer.reloading || latestLocalPlayer.ammo <= 0 || document.pointerLockElement !== canvas || now < nextClientShotAt) return;
-  nextClientShotAt = now + PLAYER.fireIntervalMs;
+  if (!canPlay() || !latestPlayerAlive || !latestLocalPlayer || latestLocalPlayer.reloading || document.pointerLockElement !== canvas || now < nextClientShotAt) return;
+  const weapon = activeWeaponDefinition();
+  if (latestLocalPlayer.overheated) return;
+  if (!weapon.unlimited && weapon.magSize > 0 && (latestLocalPlayer.ammo ?? 0) <= 0) return;
+
+  nextClientShotAt = now + weapon.fireRateMs;
   network.shoot();
-  weaponEffects.fire(now);
+  viewmodels.fire(now);
 }
 
 function resize() {
@@ -244,6 +362,8 @@ window.addEventListener('resize', resize);
 // the local camera position is interpolated from authoritative server snapshots.
 function animate(now = performance.now()) {
   requestAnimationFrame(animate);
+  const deltaSeconds = Math.min(0.05, (now - (animate.lastFrame ?? now)) / 1_000);
+  animate.lastFrame = now;
 
   if (matchActive) {
     if (canPlay() && network.connected) {
@@ -270,10 +390,15 @@ function animate(now = performance.now()) {
     const orbit = now * 0.000035;
     camera.position.set(Math.sin(orbit) * 31, 22 + Math.sin(orbit * 0.7) * 1.3, Math.cos(orbit) * 31);
     camera.lookAt(0, 0.65, 0);
+    camera.updateMatrixWorld(true);
   }
 
-  weaponEffects.gun.visible = matchActive && !matchEnded;
+  viewmodels.setVisible(matchActive && !matchEnded && Boolean(latestLocalPlayer));
+  const movingSpeed = latestLocalPlayer?.alive
+    ? Math.hypot(latestLocalPlayer.vx ?? 0, latestLocalPlayer.vz ?? 0)
+    : 0;
   if (renderer) renderer.render(scene, camera);
-  weaponEffects.update(now);
+  viewmodels.update(now, deltaSeconds, { movingSpeed });
+  smokeClouds.update(now);
 }
 requestAnimationFrame(animate);

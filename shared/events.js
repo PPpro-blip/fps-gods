@@ -2,11 +2,13 @@
 export const EVENTS = Object.freeze({
   CREATE_ROOM: 'CREATE_ROOM',
   JOIN_ROOM: 'JOIN_ROOM',
+  PLAY_SOLO: 'PLAY_SOLO',
   ROOM_STATE: 'ROOM_STATE',
   ROOM_ERROR: 'ROOM_ERROR',
   PLAYER_INPUT: 'PLAYER_INPUT',
   GAME_STATE_UPDATE: 'GAME_STATE_UPDATE',
   SHOOT: 'SHOOT',
+  SWITCH_WEAPON: 'SWITCH_WEAPON',
   HIT_CONFIRMED: 'HIT_CONFIRMED',
   PLAYER_DIED: 'PLAYER_DIED',
   PLAYER_RESPAWNED: 'PLAYER_RESPAWNED',
@@ -16,7 +18,7 @@ export const EVENTS = Object.freeze({
   GAME_END: 'GAME_END',
   RETURN_TO_LOBBY: 'RETURN_TO_LOBBY',
 
-  // Lobby and pistol actions are also explicit, shared socket contracts.
+  // Lobby and weapon actions are also explicit, shared socket contracts.
   PLAYER_READY: 'PLAYER_READY',
   START_GAME: 'START_GAME',
   PLAYER_RELOAD: 'PLAYER_RELOAD',
@@ -28,4 +30,10 @@ export const ROOM_STATES = Object.freeze({
   LOBBY: 'LOBBY',
   PLAYING: 'PLAYING',
   ENDED: 'ENDED',
+});
+
+/** Room flavours. SOLO_VS_BOTS matches are private instant drop-ins. */
+export const ROOM_TYPES = Object.freeze({
+  MULTIPLAYER: 'MULTIPLAYER',
+  SOLO_VS_BOTS: 'SOLO_VS_BOTS',
 });

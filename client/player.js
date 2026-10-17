@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { PLAYER } from '../shared/gameConfig.js';
+import { RemoteWeaponModels } from './weapons.js';
 
 const INTERPOLATION_DELAY_MS = 90;
 const MAX_EXTRAPOLATION_MS = 130;
@@ -151,13 +152,16 @@ export class PlayerController {
   }
 }
 
-// Simple colored capsules and HTML name labels for every remote operator.
+// Colored capsules, HTML name labels (with a [BOT] tag where relevant) and the
+// world-space copy of each operator's currently equipped weapon.
 export class RemotePlayers {
   constructor(scene, nameTagRoot) {
     this.scene = scene;
     this.nameTagRoot = nameTagRoot;
     this.players = new Map();
     this.projected = new THREE.Vector3();
+    this.weaponModels = new RemoteWeaponModels();
+    this.weaponModels.load().catch((error) => console.error('[FPS GODS] Remote weapon load failed:', error));
     this.capsuleGeometry = new THREE.CapsuleGeometry(
       PLAYER.radius,
       PLAYER.height - PLAYER.radius * 2,
@@ -199,12 +203,47 @@ export class RemotePlayers {
     const label = document.createElement('div');
     label.className = 'name-tag';
     label.style.setProperty('--player-color', data.color || '#57d6ff');
-    label.textContent = data.name;
+    if (data.isBot) {
+      const botTag = document.createElement('span');
+      botTag.className = 'name-tag-bot';
+      botTag.textContent = '[BOT]';
+      label.append(botTag);
+    }
+    const nameSpan = document.createElement('span');
+    nameSpan.className = 'name-tag-label';
+    nameSpan.textContent = data.name;
+    label.append(nameSpan);
     this.nameTagRoot.append(label);
 
-    const record = { mesh, label, shield, name: data.name, color: data.color, alive: true };
+    const record = {
+      mesh,
+      label,
+      nameLabel: nameSpan,
+      shield,
+      name: data.name,
+      color: data.color,
+      alive: true,
+      weaponId: null,
+      weaponGroup: null,
+    };
     this.players.set(data.id, record);
     return record;
+  }
+
+  setEquippedWeapon(record, data) {
+    const desired = data.shieldActive ? 'shield' : data.weaponId;
+    if (record.weaponId === desired && record.weaponGroup) return;
+    if (record.weaponGroup) {
+      record.mesh.remove(record.weaponGroup);
+      record.weaponGroup = null;
+    }
+    const group = this.weaponModels.build(desired ?? 'pistol');
+    if (group) {
+      group.position.set(0.12, -0.08, -0.18);
+      record.mesh.add(group);
+      record.weaponGroup = group;
+    }
+    record.weaponId = desired;
   }
 
   update(players, interpolator, camera, renderAt, localPlayerId) {
@@ -220,7 +259,7 @@ export class RemotePlayers {
       const record = this.ensurePlayer(data);
       const pose = interpolator.sample(data.id, renderAt) ?? data;
       record.name = data.name;
-      record.label.textContent = data.name;
+      record.nameLabel.textContent = data.name;
       record.color = data.color;
       record.label.style.setProperty('--player-color', data.color || '#57d8ff');
       record.mesh.visible = Boolean(pose.alive);
@@ -231,6 +270,7 @@ export class RemotePlayers {
       record.mesh.rotation.y = pose.yaw;
       record.shield.visible = Boolean(pose.spawnProtected);
       record.label.classList.toggle('is-protected', Boolean(pose.spawnProtected));
+      this.setEquippedWeapon(record, pose);
 
       this.projected.set(pose.x, pose.y + PLAYER.height + 0.28, pose.z).project(camera);
       const onScreen = this.projected.z > -1 && this.projected.z < 1

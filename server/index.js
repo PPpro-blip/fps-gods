@@ -3,11 +3,11 @@ import { createServer } from 'node:http';
 import { pathToFileURL } from 'node:url';
 import express from 'express';
 import { Server } from 'socket.io';
-import { EVENTS, ROOM_STATES } from '../shared/events.js';
+import { EVENTS, ROOM_STATES, ROOM_TYPES } from '../shared/events.js';
 import { PLAYER } from '../shared/gameConfig.js';
 import { GameState } from './gameState.js';
 import { RoomManager } from './rooms.js';
-import { createCorsOrigin } from './origins.js';
+import { socketCorsOptions } from './origins.js';
 
 // Fixed 20 Hz simulation and state broadcast. The server derives its own delta
 // time and caps long pauses so clients can never supply movement speed or dt.
@@ -17,11 +17,8 @@ const TICK_RATE_MS = 50;
  * Build the Express app, HTTP server, and Socket.IO instance without binding a
  * port. Exported so deployment/integration tests can boot the real server on an
  * ephemeral port and shut the simulation timer down again.
- *
- * @param {{ clientOrigin?: string }} [options]
  */
-export function createGameServer(options = {}) {
-  const clientOrigin = options.clientOrigin ?? process.env.CLIENT_ORIGIN ?? '';
+export function createGameServer() {
   const app = express();
   app.disable('x-powered-by');
   app.get('/health', (_request, response) => {
@@ -30,24 +27,45 @@ export function createGameServer(options = {}) {
 
   const httpServer = createServer(app);
   const io = new Server(httpServer, {
-    cors: {
-      origin: createCorsOrigin(clientOrigin),
-      methods: ['GET', 'POST'],
-    },
+    // Wildcard origin: any deployment of the static client can connect. This is
+    // what keeps fps-gods.vercel.app (and previews) off the CONNECTION LOST
+    // screen; the real safety net is that every gameplay rule runs here.
+    cors: socketCorsOptions(),
     pingInterval: 25_000,
     pingTimeout: 20_000,
     maxHttpBufferSize: 16_384,
   });
   const roomManager = new RoomManager(io);
 
+  function beginMatch(room) {
+    const now = Date.now();
+    room.game = new GameState(room, {
+      emitRoom: (event, data) => io.to(room.code).emit(event, data),
+      emitPlayer: (playerId, event, data) => io.to(playerId).emit(event, data),
+    }, now);
+    io.to(room.code).emit(EVENTS.GAME_START, {
+      code: room.code,
+      type: room.type,
+      targetKills: PLAYER.targetKills,
+      playerCount: room.players.size,
+    });
+    roomManager.broadcastRoomState(room);
+  }
+
   // Socket handlers validate room membership before any input can reach a game.
   io.on('connection', (socket) => {
     socket.on(EVENTS.CREATE_ROOM, (payload = {}) => {
-      roomManager.createRoom(socket, payload.name);
+      roomManager.createRoom(socket, payload.name, payload.bundle, payload.lifetimeKills);
     });
 
     socket.on(EVENTS.JOIN_ROOM, (payload = {}) => {
-      roomManager.joinRoom(socket, payload.code, payload.name);
+      roomManager.joinRoom(socket, payload.code, payload.name, payload.bundle, payload.lifetimeKills);
+    });
+
+    socket.on(EVENTS.PLAY_SOLO, (payload = {}) => {
+      const result = roomManager.playSolo(socket, payload.name, payload.bundle, payload.lifetimeKills);
+      if (!result) return;
+      beginMatch(result.room);
     });
 
     socket.on(EVENTS.PLAYER_READY, (payload = {}) => {
@@ -60,19 +78,7 @@ export function createGameServer(options = {}) {
         roomManager.emitError(socket, result.error);
         return;
       }
-
-      const { room } = result;
-      const now = Date.now();
-      room.game = new GameState(room, {
-        emitRoom: (event, data) => io.to(room.code).emit(event, data),
-        emitPlayer: (playerId, event, data) => io.to(playerId).emit(event, data),
-      }, now);
-      io.to(room.code).emit(EVENTS.GAME_START, {
-        code: room.code,
-        targetKills: PLAYER.targetKills,
-        playerCount: room.players.size,
-      });
-      roomManager.broadcastRoomState(room);
+      beginMatch(result.room);
     });
 
     socket.on(EVENTS.PLAYER_INPUT, (payload) => {
@@ -88,6 +94,13 @@ export function createGameServer(options = {}) {
     socket.on(EVENTS.PLAYER_RELOAD, () => {
       const room = roomManager.getRoomForSocket(socket);
       if (room?.state === ROOM_STATES.PLAYING) room.game?.reload(socket.id, Date.now());
+    });
+
+    socket.on(EVENTS.SWITCH_WEAPON, (payload = {}) => {
+      const room = roomManager.getRoomForSocket(socket);
+      if (room?.state === ROOM_STATES.PLAYING) {
+        room.game?.switchWeapon(socket.id, Number(payload.slot), Date.now());
+      }
     });
 
     socket.on(EVENTS.RETURN_TO_LOBBY, () => {
