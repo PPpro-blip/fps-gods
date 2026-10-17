@@ -3,7 +3,7 @@ import { PLAYER } from '../shared/gameConfig.js';
 import { GameNetwork } from './network.js';
 import { PlayerController, RemotePlayers, StateInterpolator } from './player.js';
 import { World } from './world.js';
-import { WeaponEffects } from './weapons.js';
+import { WeaponEffects, WeaponModelLibrary } from './weapons.js';
 import { GameUI } from './ui.js';
 
 function getOrCreateProfileId() {
@@ -13,6 +13,21 @@ function getOrCreateProfileId() {
     ?? `profile-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
   localStorage.setItem('fps-gods-profile-id', profileId);
   return profileId;
+}
+
+function readRoomSession() {
+  try {
+    const session = JSON.parse(localStorage.getItem('fps-gods-room-session') ?? 'null');
+    if (session && /^[A-Z2-9]{6}$/.test(session.roomCode)
+      && typeof session.resumeToken === 'string' && /^[A-Za-z0-9_-]{40,48}$/.test(session.resumeToken)) return session;
+  } catch {
+    localStorage.removeItem('fps-gods-room-session');
+  }
+  return null;
+}
+
+function clearRoomSession() {
+  localStorage.removeItem('fps-gods-room-session');
 }
 
 const canvas = document.querySelector('#game-canvas');
@@ -39,9 +54,13 @@ try {
 const world = new World(scene);
 const controller = new PlayerController(camera, canvas);
 const nameTagRoot = document.querySelector('#name-tags');
-const remotePlayers = new RemotePlayers(scene, nameTagRoot);
+const weaponModels = new WeaponModelLibrary();
+const remotePlayers = new RemotePlayers(scene, nameTagRoot, weaponModels);
 const interpolator = new StateInterpolator();
-const weaponEffects = new WeaponEffects(scene, camera);
+const weaponEffects = new WeaponEffects(scene, camera, weaponModels);
+weaponModels.ready.then((loaded) => {
+  if (!loaded) ui.showToast('One or more weapon models could not be loaded. Check the game asset files.');
+});
 
 let currentRoom = null;
 let matchActive = false;
@@ -111,9 +130,10 @@ function enterMatch(room = currentRoom) {
 }
 
 const network = new GameNetwork({
-  onConnect: () => {
+  onConnect: (_socketId, recovered) => {
     ui.setConnectionState('connected');
     network.requestProfile(profileId, ui.playerName);
+    if (!recovered) network.resumeRoom(readRoomSession());
   },
   onDisconnect: (reason) => {
     ui.setConnectionState('offline');
@@ -124,6 +144,22 @@ const network = new GameNetwork({
   },
   onConnectionError: () => ui.setConnectionState('offline'),
   onProfileUpdate: (profile) => ui.setProfile(profile),
+  onRoomSession: (session) => localStorage.setItem('fps-gods-room-session', JSON.stringify(session)),
+  onRoomResumeFailed: (error) => {
+    clearRoomSession();
+    currentRoom = null;
+    if (matchActive) clearMatchPresentation();
+    ui.setRoom(null, network.id);
+    ui.showHome();
+    ui.showToast(error?.message ?? 'The previous room session has expired.');
+  },
+  onRoomLeft: () => {
+    clearRoomSession();
+    currentRoom = null;
+    clearMatchPresentation();
+    ui.setRoom(null, network.id);
+    ui.showHome();
+  },
   onRoomState: (room) => {
     const previousState = currentRoom?.state;
     currentRoom = room;
@@ -156,8 +192,9 @@ const network = new GameNetwork({
     world.updateCover(state.cover);
     weaponEffects.updateSmokeClouds(state.smokeClouds ?? []);
     if (latestLocalPlayer) {
-      weaponEffects.setWeapon(latestLocalPlayer.currentWeaponId);
-      ui.updateHud(latestLocalPlayer, Date.now() + serverClockOffset, latestPlayers.filter((player) => player.alive).length);
+      weaponEffects.setWeapon(latestLocalPlayer.currentWeaponId, latestLocalPlayer.bundleId);
+      weaponEffects.setMovementSpeed(Math.hypot(latestLocalPlayer.vx ?? 0, latestLocalPlayer.vz ?? 0));
+      ui.updateHud(latestLocalPlayer, Date.now() + serverClockOffset, latestPlayers.filter((player) => player.alive && player.connected !== false).length);
     }
     ui.updateScoreboard(latestPlayers, network.id);
   },
@@ -181,7 +218,7 @@ const network = new GameNetwork({
       latestPlayerAlive = false;
       isShooting = false;
       closeWeaponWheel(false);
-      ui.updateHud(latestLocalPlayer, Date.now() + serverClockOffset, latestPlayers.filter((player) => player.alive).length);
+      ui.updateHud(latestLocalPlayer, Date.now() + serverClockOffset, latestPlayers.filter((player) => player.alive && player.connected !== false).length);
     }
   },
   onPlayerRespawned: (data) => {
@@ -193,8 +230,11 @@ const network = new GameNetwork({
   onAmmoUpdate: (data) => {
     if (!latestLocalPlayer) return;
     Object.assign(latestLocalPlayer, data);
-    weaponEffects.setWeapon(latestLocalPlayer.currentWeaponId);
-    ui.updateHud(latestLocalPlayer, Date.now() + serverClockOffset, latestPlayers.filter((player) => player.alive).length);
+    weaponEffects.setWeapon(latestLocalPlayer.currentWeaponId, latestLocalPlayer.bundleId);
+    if (data.reloading) {
+      weaponEffects.startReload((data.reloadCompletesAt ?? Date.now() + 900) - (Date.now() + serverClockOffset));
+    }
+    ui.updateHud(latestLocalPlayer, Date.now() + serverClockOffset, latestPlayers.filter((player) => player.alive && player.connected !== false).length);
   },
   onWeaponUpdate: (data) => {
     const player = latestPlayers.find((candidate) => candidate.id === data.playerId);
@@ -211,19 +251,27 @@ const network = new GameNetwork({
         currentWeaponName: data.weaponName,
         currentWeaponIcon: data.weaponIcon,
       });
-      weaponEffects.setWeapon(data.weaponId);
-      ui.updateHud(latestLocalPlayer, Date.now() + serverClockOffset, latestPlayers.filter((candidate) => candidate.alive).length);
+      weaponEffects.setWeapon(data.weaponId, data.bundleId);
+      ui.updateHud(latestLocalPlayer, Date.now() + serverClockOffset, latestPlayers.filter((candidate) => candidate.alive && candidate.connected !== false).length);
     }
   },
   onWeaponOverheated: (data) => {
     if (data.weaponId === latestLocalPlayer?.currentWeaponId) ui.showToast('MINIGUN OVERHEATED — cooling down.');
+  },
+  onWeaponFired: (data) => {
+    if (data.playerId === network.id) {
+      weaponEffects.fire(performance.now(), data.weaponId, data.bundleId, data);
+      return;
+    }
+    remotePlayers.flashWeapon(data.playerId, data.weaponId, data.bundleId);
+    weaponEffects.showRemoteTracer(data);
   },
   onSmokeUpdate: (data) => weaponEffects.updateSmokeClouds(data.smokeClouds ?? []),
   onCoverDestroyed: (data) => world.destroyCover(data.blockId),
   onHealthUpdate: (data) => {
     if (!latestLocalPlayer) return;
     latestLocalPlayer.health = data.health;
-    ui.updateHud(latestLocalPlayer, Date.now() + serverClockOffset, latestPlayers.filter((player) => player.alive).length);
+    ui.updateHud(latestLocalPlayer, Date.now() + serverClockOffset, latestPlayers.filter((player) => player.alive && player.connected !== false).length);
   },
 });
 
@@ -243,6 +291,7 @@ ui.setHandlers({
     if (!network.connected) return ui.showError('Still connecting to the game server. Try again in a moment.');
     network.joinRoom(code, name, bundleId, id);
   },
+  onLeaveRoom: () => network.leaveRoom(),
   onReady: (ready) => network.setReady(ready),
   onStart: () => network.startGame(),
   onReturnToLobby: () => network.returnToLobby(),
@@ -312,6 +361,7 @@ document.addEventListener('keydown', (event) => {
   if (event.code !== 'KeyR' || event.repeat || !canPlay()
     || document.pointerLockElement !== canvas || weaponWheelOpen) return;
   event.preventDefault();
+  weaponEffects.startReload();
   network.reload();
 });
 
@@ -327,7 +377,6 @@ function fireOnce(now) {
     || document.pointerLockElement !== canvas || now < nextClientShotAt) return;
   nextClientShotAt = now + 50;
   network.shoot();
-  weaponEffects.fire(now, latestLocalPlayer.currentWeaponId);
 }
 
 function resize() {

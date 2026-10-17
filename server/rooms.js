@@ -1,11 +1,21 @@
-import { randomInt } from 'node:crypto';
+import { createHash, randomBytes, randomInt } from 'node:crypto';
 import { EVENTS, ROOM_MODES, ROOM_STATES } from '../shared/events.js';
 import { DEFAULT_BUNDLE_ID, BUNDLE_UNLOCK_KILLS } from '../shared/bundles.js';
 import { PLAYER } from '../shared/gameConfig.js';
 import { PlayerProfileStore } from './profiles.js';
 import { getBundleLoadout, isBundleId } from './weaponConfig.js';
 
+export const ROOM_RECONNECT_GRACE_MS = 45_000;
+
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+
+function createResumeToken() {
+  return randomBytes(32).toString('base64url');
+}
+
+function hashResumeToken(token) {
+  return createHash('sha256').update(token).digest('hex');
+}
 const PLAYER_COLORS = [
   '#57d6ff', '#ff657a', '#b18cff', '#ffc857',
   '#6be6a8', '#ff925c', '#67a2ff', '#ff72cc',
@@ -118,6 +128,78 @@ export class RoomManager {
     return room;
   }
 
+  resumeRoom(socket, payload = {}, now = Date.now()) {
+    const code = String(payload.roomCode ?? '').trim().toUpperCase();
+    const token = typeof payload.resumeToken === 'string' ? payload.resumeToken : '';
+    const room = this.rooms.get(code);
+    if (socket.data.roomCode || !room || !/^[A-Z2-9]{6}$/.test(code) || !/^[A-Za-z0-9_-]{40,48}$/.test(token)) {
+      socket.emit(EVENTS.ROOM_RESUME_FAILED, { message: 'That room session has expired. Join the room again with its code.' });
+      return null;
+    }
+
+    const tokenHash = hashResumeToken(token);
+    const player = [...room.players.values()].find((candidate) => candidate.resumeTokenHash === tokenHash);
+    const disconnectedTooLong = player && !player.connected
+      && (player.disconnectedAt === null || now - player.disconnectedAt > ROOM_RECONNECT_GRACE_MS);
+    if (!player || disconnectedTooLong
+      || (socket.data.profileId && socket.data.profileId !== player.profileId)) {
+      socket.emit(EVENTS.ROOM_RESUME_FAILED, { message: 'That room session has expired. Join the room again with its code.' });
+      return null;
+    }
+
+    const previousId = player.id;
+    if (room.game && !room.game.rebindPlayer(previousId, socket.id, now)) {
+      socket.emit(EVENTS.ROOM_RESUME_FAILED, { message: 'That match can no longer be resumed. Create or join another room.' });
+      return null;
+    }
+    const previousSocket = this.io.sockets?.sockets?.get(previousId);
+    if (previousSocket && previousId !== socket.id) {
+      previousSocket.leave(room.code);
+      previousSocket.data.roomCode = undefined;
+      previousSocket.data.playerId = undefined;
+      previousSocket.disconnect(true);
+    }
+    room.players.delete(previousId);
+    player.id = socket.id;
+    player.connected = true;
+    player.disconnectedAt = null;
+    player.connectedAt = now;
+    const resumeToken = createResumeToken();
+    player.resumeTokenHash = hashResumeToken(resumeToken);
+    room.players.set(player.id, player);
+    if (room.hostId === previousId) room.hostId = socket.id;
+
+    socket.join(room.code);
+    socket.data.roomCode = room.code;
+    socket.data.playerId = socket.id;
+    socket.data.profileId = player.profileId;
+    socket.emit(EVENTS.ROOM_SESSION, { roomCode: room.code, resumeToken });
+    this.broadcastRoomState(room);
+    if (room.state === ROOM_STATES.ENDED) {
+      socket.emit(EVENTS.GAME_END, {
+        code: room.code,
+        winner: room.winner,
+        scoreboard: room.game?.getScoreboard() ?? [],
+      });
+    }
+    return room;
+  }
+
+  recoverSocket(socket, now = Date.now()) {
+    const room = this.getRoomForSocket(socket);
+    const player = room?.players.get(socket.id);
+    if (!room || !player) return false;
+    player.connected = true;
+    player.disconnectedAt = null;
+    player.connectedAt = now;
+    room.game?.setPlayerConnected(socket.id, true, now);
+    const resumeToken = createResumeToken();
+    player.resumeTokenHash = hashResumeToken(resumeToken);
+    socket.emit(EVENTS.ROOM_SESSION, { roomCode: room.code, resumeToken });
+    this.broadcastRoomState(room);
+    return true;
+  }
+
   resolveProfileSelection(socket, requestedName, selection = {}) {
     const callsign = cleanName(requestedName);
     const profile = this.profileStore.getOrCreate(
@@ -150,12 +232,18 @@ export class RoomManager {
       name: uniqueName(room, profileSelection.callsign || cleanName(requestedName)),
       color: PLAYER_COLORS[room.players.size % PLAYER_COLORS.length],
       ready: false,
+      connected: true,
       connectedAt: Date.now(),
+      disconnectedAt: null,
+      resumeTokenHash: null,
     };
+    const resumeToken = createResumeToken();
+    player.resumeTokenHash = hashResumeToken(resumeToken);
     room.players.set(player.id, player);
     socket.join(room.code);
     socket.data.roomCode = room.code;
     socket.data.playerId = player.id;
+    socket.emit(EVENTS.ROOM_SESSION, { roomCode: room.code, resumeToken });
   }
 
   setReady(socket, requestedReady) {
@@ -166,6 +254,7 @@ export class RoomManager {
       this.emitError(socket, 'Ready status can only be changed in the lobby.');
       return;
     }
+    if (!player.connected) return;
 
     player.ready = requestedReady === true;
     this.broadcastRoomState(room);
@@ -176,6 +265,9 @@ export class RoomManager {
     if (!room) return { error: 'Join a room before starting a match.' };
     if (room.hostId !== socket.id) return { error: 'Only the room host can start the match.' };
     if (room.state !== ROOM_STATES.LOBBY) return { error: 'This room is not waiting in the lobby.' };
+    if ([...room.players.values()].some((player) => !player.connected)) {
+      return { error: 'Wait for disconnected operators to reconnect or for their room session to expire.' };
+    }
     if (room.players.size < PLAYER.minPlayers) return { error: 'At least two players are needed to start.' };
     if ([...room.players.values()].some((player) => !player.ready)) {
       return { error: 'Every player, including the host, must be ready first.' };
@@ -211,6 +303,60 @@ export class RoomManager {
     return room;
   }
 
+  leaveRoom(socket) {
+    const room = this.getRoomForSocket(socket);
+    if (!room) {
+      socket.emit(EVENTS.ROOM_LEFT, { roomCode: null });
+      return null;
+    }
+    this.removePlayer(room, socket.id);
+    socket.leave(room.code);
+    socket.data.roomCode = undefined;
+    socket.data.playerId = undefined;
+    socket.emit(EVENTS.ROOM_LEFT, { roomCode: room.code });
+    return room;
+  }
+
+  expireDisconnectedPlayers(now = Date.now()) {
+    for (const room of this.rooms.values()) {
+      let changed = false;
+      for (const player of [...room.players.values()]) {
+        if (player.connected || player.disconnectedAt === null
+          || now - player.disconnectedAt <= ROOM_RECONNECT_GRACE_MS) continue;
+        this.removePlayer(room, player.id, false);
+        changed = true;
+      }
+      if (room.players.size === 0) {
+        this.rooms.delete(room.code);
+      } else if (changed) {
+        this.ensureHost(room);
+        this.broadcastRoomState(room);
+      }
+    }
+  }
+
+  removePlayer(room, playerId, broadcast = true) {
+    const player = room.players.get(playerId);
+    if (!player) return false;
+    room.players.delete(playerId);
+    room.game?.removePlayer(playerId);
+    if (room.hostId === playerId) this.ensureHost(room);
+    if (room.players.size === 0) {
+      this.rooms.delete(room.code);
+      return true;
+    }
+    if (broadcast) this.broadcastRoomState(room);
+    return true;
+  }
+
+  ensureHost(room) {
+    const connectedPlayers = [...room.players.values()].filter((player) => player.connected);
+    const candidates = connectedPlayers.length ? connectedPlayers : [...room.players.values()];
+    if (!candidates.length) return;
+    const nextHost = candidates.sort((left, right) => left.connectedAt - right.connectedAt)[0];
+    room.hostId = nextHost.id;
+  }
+
   getRoomForSocket(socket) {
     const code = socket.data.roomCode;
     return code ? this.rooms.get(code) ?? null : null;
@@ -229,6 +375,7 @@ export class RoomManager {
           health: player.health,
           alive: player.alive,
           isBot: Boolean(player.isBot),
+          connected: player.connected !== false,
           bundleId: player.bundleId,
           currentWeaponId: player.currentWeaponId,
           currentWeaponName: player.currentWeaponName,
@@ -243,6 +390,7 @@ export class RoomManager {
           deaths: 0,
           health: PLAYER.maxHealth,
           alive: true,
+          connected: player.connected !== false,
           bundleId: player.bundleId,
           currentWeaponId: player.currentWeaponId,
         }));
@@ -272,26 +420,16 @@ export class RoomManager {
     this.broadcastRoomState(room);
   }
 
-  handleDisconnect(socket) {
-    const code = socket.data.roomCode;
-    const room = code ? this.rooms.get(code) : null;
-    if (!room) return;
+  handleDisconnect(socket, now = Date.now()) {
+    const room = this.getRoomForSocket(socket);
+    const player = room?.players.get(socket.id);
+    if (!room || !player) return;
 
-    room.players.delete(socket.id);
-    room.game?.removePlayer(socket.id);
-    socket.data.roomCode = undefined;
-    socket.data.playerId = undefined;
+    player.connected = false;
+    player.disconnectedAt = now;
+    room.game?.setPlayerConnected(socket.id, false, now);
 
-    if (room.players.size === 0) {
-      this.rooms.delete(room.code);
-      return;
-    }
-
-    if (room.hostId === socket.id) {
-      const nextHost = [...room.players.values()].sort((left, right) => left.connectedAt - right.connectedAt)[0];
-      room.hostId = nextHost.id;
-    }
-
+    if (room.hostId === socket.id) this.ensureHost(room);
     this.broadcastRoomState(room);
   }
 

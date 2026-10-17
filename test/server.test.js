@@ -40,6 +40,24 @@ async function connectSocket(url, origin) {
   return socket;
 }
 
+function waitForEvent(socket, event, predicate = () => true, timeoutMs = 5_000) {
+  return new Promise((resolve, reject) => {
+    let lastData = null;
+    const timeout = setTimeout(() => {
+      socket.off(event, onData);
+      reject(new Error(`no ${event} event within ${timeoutMs}ms; last event was ${JSON.stringify(lastData)?.slice(0, 240) ?? 'none'}`));
+    }, timeoutMs);
+    const onData = (data) => {
+      lastData = data;
+      if (!predicate(data)) return;
+      clearTimeout(timeout);
+      socket.off(event, onData);
+      resolve(data);
+    };
+    socket.on(event, onData);
+  });
+}
+
 test('the health route reports ok for host health checks', async () => {
   const server = await startServer();
   try {
@@ -132,6 +150,134 @@ test('PLAY_NOW instantly starts SOLO_VS_BOTS with five named bots', async () => 
     assert.equal(room?.game?.mode, ROOM_MODES.SOLO_VS_BOTS);
   } finally {
     socket.close();
+    await server.close();
+  }
+});
+
+test('two live clients join, ready, play, synchronize weapon switches, and resume a room session', async () => {
+  const server = await startServer();
+  const host = await connectSocket(server.url, 'https://host.example');
+  const guest = await connectSocket(server.url, 'https://guest.example');
+  const guestId = guest.id;
+  let resumedGuest;
+  let phase = 'create room';
+  const guestProfileId = 'multiplayer-guest-profile';
+
+  try {
+    const hostSessionPromise = waitForEvent(host, EVENTS.ROOM_SESSION);
+    const hostRoomPromise = waitForEvent(host, EVENTS.ROOM_STATE, (state) => state.players.length === 1);
+    host.emit(EVENTS.CREATE_ROOM, {
+      name: 'LiveHost',
+      profileId: 'multiplayer-host-profile',
+      bundleId: 'RUSHER',
+    });
+    const [hostSession, lobby] = await Promise.all([hostSessionPromise, hostRoomPromise]);
+    assert.equal(lobby.mode, ROOM_MODES.MULTIPLAYER);
+    assert.equal(lobby.players[0].name, 'LiveHost');
+
+    phase = 'join room';
+    const guestSessionPromise = waitForEvent(guest, EVENTS.ROOM_SESSION);
+    const joinedRoomPromise = waitForEvent(guest, EVENTS.ROOM_STATE, (state) => state.players.length === 2);
+    guest.emit(EVENTS.JOIN_ROOM, {
+      code: lobby.code,
+      name: 'LiveGuest',
+      profileId: guestProfileId,
+      bundleId: 'GHOST',
+    });
+    const [guestSession, joinedRoom] = await Promise.all([guestSessionPromise, joinedRoomPromise]);
+    assert.deepEqual(joinedRoom.players.map((player) => player.bundleId).sort(), ['GHOST', 'RUSHER']);
+    assert.equal(hostSession.roomCode, lobby.code);
+    assert.equal(guestSession.roomCode, lobby.code);
+
+    phase = 'ready both players';
+    const readyRoomPromise = waitForEvent(host, EVENTS.ROOM_STATE, (state) => state.players.length === 2 && state.players.every((player) => player.ready));
+    host.emit(EVENTS.PLAYER_READY, { ready: true });
+    guest.emit(EVENTS.PLAYER_READY, { ready: true });
+    await readyRoomPromise;
+
+    phase = 'start the match';
+    const liveRoomPromise = waitForEvent(host, EVENTS.ROOM_STATE, (state) => state.state === ROOM_STATES.PLAYING);
+    host.emit(EVENTS.START_GAME);
+    const liveRoom = await liveRoomPromise;
+    const room = server.roomManager.rooms.get(lobby.code);
+    const originalGuestState = room.game.players.get(guest.id);
+    assert.ok(originalGuestState);
+
+    phase = 'synchronize weapon switch';
+    const synchronizedSwitch = waitForEvent(
+      host,
+      EVENTS.WEAPON_UPDATE,
+      (data) => data.playerId === guest.id && data.weaponId === 'SNIPER',
+    );
+    guest.emit(EVENTS.WEAPON_SWITCH, { weaponId: 'SNIPER' });
+    const switchData = await synchronizedSwitch;
+    assert.equal(switchData.bundleId, 'GHOST');
+
+    phase = 'broadcast accepted shots to the room';
+    const synchronizedShot = waitForEvent(host, EVENTS.WEAPON_FIRED, (data) => data.playerId === guest.id);
+    guest.emit(EVENTS.SHOOT);
+    const shotData = await synchronizedShot;
+    assert.equal(shotData.weaponId, 'SNIPER');
+    assert.equal(shotData.bundleId, 'GHOST');
+    assert.ok(Number.isFinite(shotData.origin.x) && Number.isFinite(shotData.direction.z));
+
+    const guestPosition = room.game.players.get(guest.id);
+    const initialX = guestPosition.x;
+    const initialZ = guestPosition.z;
+    const yawTowardCenter = Math.atan2(initialX, initialZ);
+    phase = 'server movement';
+    const movedStatePromise = waitForEvent(host, EVENTS.GAME_STATE_UPDATE, (state) => {
+      const player = state.players.find((entry) => entry.id === guest.id);
+      return player && Math.hypot(player.x - initialX, player.z - initialZ) > 0.12;
+    });
+    guest.emit(EVENTS.PLAYER_INPUT, {
+      seq: 1,
+      forward: 1,
+      strafe: 0,
+      jump: false,
+      yaw: yawTowardCenter,
+      pitch: 0,
+    });
+    const movedState = await movedStatePromise;
+    assert.equal(movedState.players.find((player) => player.id === guest.id).currentWeaponId, 'SNIPER');
+    assert.equal(liveRoom.state, ROOM_STATES.PLAYING);
+
+    phase = 'mark disconnected player';
+    const offlineRoomPromise = waitForEvent(host, EVENTS.ROOM_STATE, (state) => state.players.some((player) => player.id === guestId && player.connected === false));
+    guest.disconnect();
+    await offlineRoomPromise;
+    const positionBeforeResume = { x: guestPosition.x, z: guestPosition.z, kills: guestPosition.kills };
+
+    phase = 'resume disconnected player';
+    resumedGuest = await connectSocket(server.url, 'https://guest.example');
+    const resumedRoomPromise = waitForEvent(resumedGuest, EVENTS.ROOM_STATE, (state) => state.state === ROOM_STATES.PLAYING
+      && state.players.some((player) => player.id === resumedGuest.id && player.connected === true));
+    const rotatedSessionPromise = waitForEvent(resumedGuest, EVENTS.ROOM_SESSION);
+    resumedGuest.emit(EVENTS.PROFILE_REQUEST, { profileId: guestProfileId, callsign: 'LiveGuest' });
+    resumedGuest.emit(EVENTS.ROOM_RESUME, guestSession);
+    const [resumedRoom, rotatedSession] = await Promise.all([resumedRoomPromise, rotatedSessionPromise]);
+    const resumedPlayer = resumedRoom.players.find((player) => player.id === resumedGuest.id);
+    const resumedGamePlayer = room.game.players.get(resumedGuest.id);
+    assert.equal(resumedPlayer.currentWeaponId, 'SNIPER');
+    assert.ok(resumedGamePlayer);
+    assert.equal(resumedGamePlayer.kills, positionBeforeResume.kills);
+    assert.equal(rotatedSession.roomCode, lobby.code);
+    assert.notEqual(rotatedSession.resumeToken, guestSession.resumeToken);
+    assert.ok(Math.hypot(resumedGamePlayer.x - positionBeforeResume.x, resumedGamePlayer.z - positionBeforeResume.z) < 0.1);
+
+    phase = 'leave room';
+    const hostRoomAfterLeave = waitForEvent(host, EVENTS.ROOM_STATE, (state) => state.players.length === 1);
+    const leftRoom = waitForEvent(resumedGuest, EVENTS.ROOM_LEFT);
+    resumedGuest.emit(EVENTS.LEAVE_ROOM);
+    await Promise.all([hostRoomAfterLeave, leftRoom]);
+    assert.equal(server.roomManager.rooms.get(lobby.code).players.has(resumedGuest.id), false);
+  } catch (error) {
+    error.message = `${phase}: ${error.message}`;
+    throw error;
+  } finally {
+    host.disconnect();
+    guest.disconnect();
+    resumedGuest?.disconnect();
     await server.close();
   }
 });

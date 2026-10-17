@@ -10,7 +10,7 @@ import { BUNDLE_LOADOUTS, WEAPONS } from '../server/weaponConfig.js';
 import { createMemoryProfileStore, PlayerProfileStore } from '../server/profiles.js';
 import { GameState } from '../server/gameState.js';
 import { castShot } from '../server/hitDetection.js';
-import { RoomManager } from '../server/rooms.js';
+import { ROOM_RECONNECT_GRACE_MS, RoomManager } from '../server/rooms.js';
 
 function makeRoom() {
   return {
@@ -90,6 +90,23 @@ test('rooms issue unique six-character codes and keep room broadcasts isolated',
   assert.equal(rooms.startGame(hostA).room, first);
   assert.equal(first.state, ROOM_STATES.PLAYING);
   assert.equal(rooms.startGame(hostB).error, 'At least two players are needed to start.');
+});
+
+test('disconnected lobby players reserve their room briefly before cleanup', () => {
+  const io = new FakeIO();
+  const rooms = new RoomManager(io);
+  const host = new FakeSocket('reconnecting-host');
+  const room = rooms.createRoom(host, 'ReconnectHost');
+  const session = host.events.find((event) => event.event === EVENTS.ROOM_SESSION)?.data;
+  assert.ok(session?.resumeToken);
+
+  rooms.handleDisconnect(host, 10_000);
+  assert.equal(room.players.get(host.id).connected, false);
+  assert.equal(rooms.rooms.get(room.code), room);
+  rooms.expireDisconnectedPlayers(10_000 + ROOM_RECONNECT_GRACE_MS);
+  assert.equal(rooms.rooms.get(room.code), room, 'the resume window includes the exact grace boundary');
+  rooms.expireDisconnectedPlayers(10_001 + ROOM_RECONNECT_GRACE_MS);
+  assert.equal(rooms.rooms.has(room.code), false);
 });
 
 test('server input is bounded and movement is simulated with server time', () => {

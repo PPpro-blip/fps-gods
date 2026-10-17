@@ -47,6 +47,7 @@ export class GameUI {
       copyCode: document.querySelector('#copy-room-code-button'),
       playerList: document.querySelector('#lobby-player-list'),
       playerCount: document.querySelector('#player-count'),
+      leaveRoom: document.querySelector('#leave-room-button'),
       ready: document.querySelector('#ready-button'),
       start: document.querySelector('#start-button'),
       lobbyHint: document.querySelector('#lobby-hint'),
@@ -250,6 +251,7 @@ export class GameUI {
       this.elements.roomCodeInput.value = this.elements.roomCodeInput.value.toUpperCase().replace(/[^A-Z2-9]/g, '').slice(0, 6);
       this.clearError();
     });
+    this.elements.leaveRoom.addEventListener('click', () => this.handlers.onLeaveRoom?.());
     this.elements.ready.addEventListener('click', () => {
       const self = this.room?.players.find((player) => player.id === this.selfId);
       this.handlers.onReady?.(!(self?.ready ?? false));
@@ -380,12 +382,15 @@ export class GameUI {
 
     const isHost = room.hostId === selfId;
     const self = room.players.find((player) => player.id === selfId);
-    const everyoneReady = room.players.length >= room.minPlayers && room.players.every((player) => player.ready);
-    const waitingCount = room.players.filter((player) => !player.ready).length;
+    const connectedPlayers = room.players.filter((player) => player.connected !== false);
+    const offlineCount = room.players.length - connectedPlayers.length;
+    const everyoneReady = connectedPlayers.length >= room.minPlayers && offlineCount === 0
+      && room.players.every((player) => player.ready);
+    const waitingCount = room.players.filter((player) => player.connected === false || !player.ready).length;
 
     for (const player of room.players) {
       const row = document.createElement('li');
-      row.className = 'lobby-player-row';
+      row.className = `lobby-player-row${player.connected === false ? ' is-offline' : ''}`;
 
       const swatch = document.createElement('span');
       swatch.className = 'player-color-swatch';
@@ -416,12 +421,12 @@ export class GameUI {
       }
 
       const ready = document.createElement('span');
-      ready.className = `player-ready-status${player.ready ? ' is-ready' : ''}`;
+      ready.className = `player-ready-status${player.ready ? ' is-ready' : ''}${player.connected === false ? ' is-offline' : ''}`;
       const check = document.createElement('span');
       check.className = 'status-check';
-      check.textContent = player.ready ? '✓' : '·';
+      check.textContent = player.connected === false ? '↻' : player.ready ? '✓' : '·';
       const status = document.createElement('span');
-      status.textContent = player.ready ? 'READY' : 'NOT READY';
+      status.textContent = player.connected === false ? 'RECONNECTING' : player.ready ? 'READY' : 'NOT READY';
       ready.append(check, status);
       row.append(ready);
       this.elements.playerList.append(row);
@@ -444,8 +449,10 @@ export class GameUI {
     this.elements.start.append(startArrow);
     this.elements.start.parentElement.classList.toggle('is-host', isHost);
 
-    if (room.players.length < room.minPlayers) {
-      this.elements.lobbyHint.textContent = 'Waiting for one more operator. At least 2 players are required.';
+    if (offlineCount > 0) {
+      this.elements.lobbyHint.textContent = `${offlineCount} operator${offlineCount === 1 ? ' is' : 's are'} reconnecting. The room is reserved for 45 seconds.`;
+    } else if (connectedPlayers.length < room.minPlayers) {
+      this.elements.lobbyHint.textContent = 'Waiting for one more operator. At least 2 connected players are required.';
     } else if (everyoneReady) {
       this.elements.lobbyHint.textContent = isHost ? 'All operators ready. Launch when you are.' : 'All operators ready. The host can launch the match.';
     } else {
@@ -653,8 +660,8 @@ export class GameUI {
       const deaths = document.createElement('span');
       deaths.textContent = String(player.deaths ?? 0);
       const status = document.createElement('span');
-      status.className = `scoreboard-status${player.alive === false ? ' is-down' : ''}`;
-      status.textContent = player.alive === false ? 'DOWN' : 'ACTIVE';
+      status.className = `scoreboard-status${player.connected === false ? ' is-offline' : player.alive === false ? ' is-down' : ''}`;
+      status.textContent = player.connected === false ? 'OFFLINE' : player.alive === false ? 'DOWN' : 'ACTIVE';
       row.append(identity, kills, deaths, status);
       this.elements.scoreboardBody.append(row);
     });

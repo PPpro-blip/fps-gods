@@ -7,7 +7,7 @@ import { EVENTS, ROOM_STATES } from '../shared/events.js';
 import { PLAYER } from '../shared/gameConfig.js';
 import { GameState } from './gameState.js';
 import { PlayerProfileStore } from './profiles.js';
-import { RoomManager } from './rooms.js';
+import { ROOM_RECONNECT_GRACE_MS, RoomManager } from './rooms.js';
 
 // Fixed 20 Hz simulation and state broadcast. The server derives its own delta
 // time and caps long pauses so clients can never supply movement speed or dt.
@@ -35,6 +35,10 @@ export function createGameServer(options = {}) {
     pingInterval: 25_000,
     pingTimeout: 20_000,
     maxHttpBufferSize: 16_384,
+    connectionStateRecovery: {
+      maxDisconnectionDuration: ROOM_RECONNECT_GRACE_MS,
+      skipMiddlewares: true,
+    },
   });
   const roomManager = new RoomManager(io, profileStore);
 
@@ -56,6 +60,18 @@ export function createGameServer(options = {}) {
 
   // Socket handlers validate room membership before any input can reach a game.
   io.on('connection', (socket) => {
+    if (socket.recovered && socket.data.roomCode && !roomManager.recoverSocket(socket)) {
+      socket.emit(EVENTS.ROOM_RESUME_FAILED, { message: 'That room session has expired. Join the room again with its code.' });
+    }
+
+    socket.on(EVENTS.ROOM_RESUME, (payload = {}) => {
+      roomManager.resumeRoom(socket, payload);
+    });
+
+    socket.on(EVENTS.LEAVE_ROOM, () => {
+      roomManager.leaveRoom(socket);
+    });
+
     socket.on(EVENTS.PROFILE_REQUEST, (payload = {}) => {
       const profile = profileStore.getOrCreate(payload.profileId, payload.callsign ?? payload.name);
       socket.data.profileId = profile.profileId;
@@ -119,10 +135,15 @@ export function createGameServer(options = {}) {
   });
 
   let lastTick = Date.now();
+  let lastRoomCleanup = 0;
   const simulationTimer = setInterval(() => {
     const now = Date.now();
     const delta = Math.min((now - lastTick) / 1_000, 0.1);
     lastTick = now;
+    if (now - lastRoomCleanup >= 1_000) {
+      roomManager.expireDisconnectedPlayers(now);
+      lastRoomCleanup = now;
+    }
 
     for (const room of roomManager.rooms.values()) {
       if (room.state !== ROOM_STATES.PLAYING || !room.game) continue;

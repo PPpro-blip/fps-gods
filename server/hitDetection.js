@@ -175,7 +175,7 @@ export function castShot({
   let headshot = false;
 
   for (const target of players.values()) {
-    if (target.id === shooterId || !target.alive) continue;
+    if (target.id === shooterId || !target.alive || target.connected === false) continue;
 
     const headBottom = target.y + PLAYER.height * 0.8;
     const headDistance = rayCylinderDistance(

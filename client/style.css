@@ -167,10 +167,14 @@ button:focus-visible, input:focus-visible, a:focus-visible { outline: 2px solid 
 .player-host-tag { padding: 4px 6px; border: 1px solid rgba(255, 200, 87, .22); color: #ffc857; font: 8px var(--mono); letter-spacing: .08em; }
 .player-ready-status { min-width: 61px; display: flex; justify-content: flex-end; align-items: center; gap: 5px; color: #68778c; font: 8px var(--mono); letter-spacing: .04em; }
 .player-ready-status.is-ready { color: var(--green); }
+.player-ready-status.is-offline { color: var(--orange); }
+.lobby-player-row.is-offline { opacity: .72; }
 .player-ready-status .status-check { font-size: 11px; }
-.lobby-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin-top: 15px; }
-.lobby-actions:not(.is-host) { grid-template-columns: 1fr; }
-.ready-button, .start-button { width: 100%; }
+.lobby-actions { display: grid; grid-template-columns: .72fr 1fr 1fr; gap: 9px; margin-top: 15px; }
+.lobby-actions:not(.is-host) { grid-template-columns: .8fr 1fr; }
+.ready-button, .start-button, .leave-room-button { width: 100%; }
+.leave-room-button { color: #c2ccda; }
+.leave-room-button span { color: var(--red); font-size: 15px; }
 .ready-button span { color: var(--green); font-size: 14px; }
 .ready-button.is-ready { border-color: rgba(101, 227, 168, .44); color: var(--green); background: rgba(101, 227, 168, .08); }
 .start-button span { font-size: 14px; }
@@ -211,6 +215,8 @@ button:focus-visible, input:focus-visible, a:focus-visible { outline: 2px solid 
 .name-tag-name::before { content: ''; display: inline-block; width: 5px; height: 5px; margin: 0 6px 1px 0; background: var(--player-color); box-shadow: 0 0 7px var(--player-color); }
 .name-tag-weapon { display: inline-block; margin-left: 7px; padding-left: 7px; border-left: 1px solid rgba(173, 198, 229, .22); color: var(--cyan); font: 7px var(--mono); letter-spacing: .07em; }
 .name-tag.is-protected { border-color: rgba(89, 216, 255, .45); }
+.name-tag.is-offline { border-color: rgba(255, 152, 88, .4); opacity: .72; }
+.name-tag.is-offline .name-tag-weapon { color: var(--orange); }
 .crosshair { position: absolute; left: 50%; top: 50%; width: 12px; height: 12px; transform: translate(-50%, -50%); display: grid; place-items: center; }
 .crosshair span { width: 2px; height: 2px; border-radius: 50%; background: rgba(236, 248, 255, .95); box-shadow: 0 0 5px rgba(89, 216, 255, .48); }
 .crosshair::before, .crosshair::after, .crosshair span::before, .crosshair span::after { content: ''; position: absolute; display: block; background: rgba(236, 248, 255, .93); box-shadow: 0 0 5px rgba(89, 216, 255, .48); }
@@ -308,6 +314,7 @@ kbd { min-width: 15px; height: 15px; display: inline-grid; place-items: center; 
 .scoreboard-row > span:not(:first-child) { text-align: center; font-family: var(--mono); }
 .scoreboard-status { color: var(--green); font: 8px var(--mono); text-align: center !important; }
 .scoreboard-status.is-down { color: var(--red); }
+.scoreboard-status.is-offline { color: var(--orange); }
 
 .end-panel { z-index: 14; width: min(500px, calc(100vw - 32px)); padding: 25px 30px 24px; }
 .end-kicker { display: flex; justify-content: center; align-items: center; gap: 10px; margin: 0 0 18px; color: var(--cyan); font: 9px var(--mono); letter-spacing: .19em; }

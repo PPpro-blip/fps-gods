@@ -47,26 +47,28 @@ Eliminated players respawn after three seconds and are invulnerable for two seco
 ## Game features
 
 - **Deathmatch FFA:** first player to 30 kills wins; 2–16 connected players per room.
-- **Private room lifecycle:** `LOBBY → PLAYING → ENDED → LOBBY`, six-character invite codes, host controls, and a ready-up lobby.
+- **Private room lifecycle:** `LOBBY → PLAYING → ENDED → LOBBY`, six-character invite codes, host migration, a leave-room action, and a ready-up lobby. A disconnected player reserves their seat for up to 45 seconds and can resume their room from the same browser session.
 - **Server-owned simulation:** 20 authoritative simulation/state ticks per second. The client sends movement/aim input and renders server snapshots; it does not decide position, damage, hits, health, or score.
 - **Solo bot mode:** Play Now starts a `SOLO_VS_BOTS` match with GOD_BOT_01–GOD_BOT_05. Their server-side 10 Hz brains patrol random map waypoints, aim at the nearest human, fire only with line of sight, miss 30% of shots with random spread, and respawn after three seconds.
 - **Server-side combat:** per-weapon fire cadence, magazines and reloads; ray/cylinder hitboxes; headshots; smoke occlusion; destructible cover; frontal shields; spawn protection; kill feed; score updates; and victory checks. Bots use the same authoritative damage and scoring path as human players.
 - **Weapon bundles:** all four bundles are server-validated; GODS TIER unlocks from the server-owned lifetime-kill profile. Bots randomly receive a bundle. Weapon switches broadcast to the whole room.
 - **Arena:** a medium enclosed map with flat ground, boundary walls, destructible cover cubes, and eight fixed perimeter spawn points.
-- **Presentation:** Three.js camera, pointer lock, mouse-direction Q weapon wheel, remote weapon name tags, weapon icon and ammunition HUD, smoke clouds, visual tracers (the Pistol has none), fading kill feed, and a Tab scoreboard.
+- **Presentation:** GLTFLoader loads all seven supplied weapon GLBs. The local camera shows only the selected gun and hands; moving bobs the weapon, R animates a reload, shots flash at the muzzle, and weapon changes transition smoothly. Remote operators use procedural low-poly bodies with visible faces and attached weapon GLBs; weapon switches, muzzle flashes, and bundle-colored tracers synchronize across the room.
+- **Multiplayer resilience:** independent clients can create and join live rooms, ready up, move, and switch weapons. Socket.IO recovery handles short network interruptions; a rotating server-issued room token also supports page reloads for 45 seconds. Host migration and room seat expiration are server-managed.
 - **Room isolation:** game snapshots and gameplay events are emitted only to the Socket.IO room that owns the match.
 
 ## Project layout
 
 ```text
 client/                 Vanilla HTML, CSS, and browser JavaScript
+  assets/weapons/        Seven first- and third-person weapon GLB assets
   index.html             Callsign, bundle select, room menu, HUD, and overlays
   style.css              Responsive game and weapon-wheel UI
   main.js                Three.js renderer, controls, and app orchestration
   network.js             Socket.IO client adapter
-  player.js              Input, interpolation, and remote operator presentation
+  player.js              Input, interpolation, procedural operators, and remote gun rigs
   world.js               Arena visuals and destructible cover presentation
-  weapons.js             First-person presentation, tracers, and smoke clouds
+  weapons.js             GLTFLoader weapon rigs, animations, tracers, and smoke clouds
   ui.js                  Bundle selection, lobby, scoreboard, and HUD
 server/
   index.js               Express health route, Socket.IO handlers, 20 Hz loop
@@ -181,8 +183,8 @@ Serve the static build and proxy `/socket.io` (including WebSocket upgrades) to 
 ## Development notes
 
 - `npm run dev` uses Node's watch mode for the game server and Vite's hot reload for the browser code.
-- `npm test` runs the built-in Node test suite for room isolation, input validation, bundle selection, authoritative weapon behavior, profile progression, combat, bot behavior, cover raycasts, scoring, respawns, CORS, and Socket.IO.
+- `npm test` runs the built-in Node test suite for room isolation, input validation, bundle selection, authoritative weapon behavior, profile progression, combat, bot behavior, cover raycasts, scoring, respawns, CORS, and live two-client join/play/weapon-sync/reconnect flows.
 - Shared map and movement constants keep server collision dimensions and rendered arena geometry aligned; weapon combat stats stay in `server/weaponConfig.js`.
 - Rooms, match scores, and live matches are held in memory. Lifetime kills are persisted separately to `.data/profiles.json` (or `FPS_GODS_PROFILE_PATH`); production hosts should point that variable at persistent storage if progression must survive redeploys.
-- A match cannot start until every connected player is ready. If a host disconnects, the oldest remaining player becomes host.
+- A match cannot start until every player is connected and ready. If a host disconnects or leaves, the oldest connected player becomes host; disconnected seats expire after 45 seconds.
 - Socket.IO CORS is configured for every origin (`*`) in development and production. CORS is not authentication; gameplay rules are validated server-side.

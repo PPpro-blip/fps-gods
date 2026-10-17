@@ -18,7 +18,7 @@ export class GameNetwork {
       timeout: 10_000,
     });
 
-    this.socket.on('connect', () => this.handlers.onConnect?.(this.socket.id));
+    this.socket.on('connect', () => this.handlers.onConnect?.(this.socket.id, this.socket.recovered));
     this.socket.on('disconnect', (reason) => {
       if (reason !== 'io client disconnect') console.error('[FPS GODS] Socket disconnected:', reason);
       this.handlers.onDisconnect?.(reason);
@@ -36,6 +36,9 @@ export class GameNetwork {
 
     this.socket.on(EVENTS.ROOM_STATE, (state) => this.handlers.onRoomState?.(state));
     this.socket.on(EVENTS.ROOM_ERROR, (error) => this.handlers.onRoomError?.(error));
+    this.socket.on(EVENTS.ROOM_SESSION, (session) => this.handlers.onRoomSession?.(session));
+    this.socket.on(EVENTS.ROOM_RESUME_FAILED, (error) => this.handlers.onRoomResumeFailed?.(error));
+    this.socket.on(EVENTS.ROOM_LEFT, (data) => this.handlers.onRoomLeft?.(data));
     this.socket.on(EVENTS.GAME_START, (data) => this.handlers.onGameStart?.(data));
     this.socket.on(EVENTS.GAME_STATE_UPDATE, (state) => this.handlers.onGameState?.(state));
     this.socket.on(EVENTS.GAME_END, (data) => this.handlers.onGameEnd?.(data));
@@ -49,6 +52,7 @@ export class GameNetwork {
     this.socket.on(EVENTS.HEALTH_UPDATE, (data) => this.handlers.onHealthUpdate?.(data));
     this.socket.on(EVENTS.WEAPON_UPDATE, (data) => this.handlers.onWeaponUpdate?.(data));
     this.socket.on(EVENTS.WEAPON_OVERHEATED, (data) => this.handlers.onWeaponOverheated?.(data));
+    this.socket.on(EVENTS.WEAPON_FIRED, (data) => this.handlers.onWeaponFired?.(data));
     this.socket.on(EVENTS.PROFILE_UPDATE, (data) => this.handlers.onProfileUpdate?.(data));
     this.socket.on(EVENTS.SMOKE_UPDATE, (data) => this.handlers.onSmokeUpdate?.(data));
     this.socket.on(EVENTS.COVER_DESTROYED, (data) => this.handlers.onCoverDestroyed?.(data));
@@ -64,6 +68,15 @@ export class GameNetwork {
 
   requestProfile(profileId, callsign) {
     this.socket.emit(EVENTS.PROFILE_REQUEST, { profileId, callsign });
+  }
+
+  resumeRoom(session) {
+    if (!session?.roomCode || !session?.resumeToken) return;
+    this.socket.emit(EVENTS.ROOM_RESUME, session);
+  }
+
+  leaveRoom() {
+    this.socket.emit(EVENTS.LEAVE_ROOM);
   }
 
   createRoom(name, bundleId, profileId) {

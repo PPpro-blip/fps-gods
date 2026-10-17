@@ -114,6 +114,7 @@ function makeGamePlayer(record, spawn, now) {
     name: record.name,
     color: record.color,
     isBot: record.isBot === true,
+    connected: record.isBot === true || record.connected !== false,
     botBrain: record.isBot === true ? {
       waypoint: randomBotWaypoint(),
       nextWaypointAt: now + botWaypointDuration(),
@@ -195,7 +196,7 @@ export class GameState {
 
   setInput(playerId, payload, now = Date.now()) {
     const player = this.players.get(playerId);
-    if (!player || !payload || typeof payload !== 'object') return;
+    if (!player || !player.connected || !payload || typeof payload !== 'object') return;
     if (Number.isSafeInteger(payload.seq) && payload.seq <= player.lastInputSequence) return;
     if (Number.isSafeInteger(payload.seq)) player.lastInputSequence = payload.seq;
 
@@ -222,6 +223,15 @@ export class GameState {
     if (this.smokeClouds.length !== previousSmokeCount) this.emitSmokeState();
 
     for (const player of this.players.values()) {
+      if (!player.connected) {
+        player.input.forward = 0;
+        player.input.strafe = 0;
+        player.input.jump = false;
+        player.vx = 0;
+        player.vy = 0;
+        player.vz = 0;
+        continue;
+      }
       if (!player.alive) {
         if (player.respawnAt !== null && now >= player.respawnAt) this.respawn(player, now);
         else if (delta > 0 && (Math.abs(player.knockbackVX) + Math.abs(player.knockbackVZ) > 0.05)) {
@@ -262,7 +272,7 @@ export class GameState {
   }
 
   updateBots(now) {
-    const humanPlayers = [...this.players.values()].filter((player) => !player.isBot && player.alive);
+    const humanPlayers = [...this.players.values()].filter((player) => !player.isBot && player.connected && player.alive);
     const humanTargets = new Map(humanPlayers.map((player) => [player.id, player]));
 
     for (const bot of this.players.values()) {
@@ -414,7 +424,7 @@ export class GameState {
   switchWeapon(playerId, weaponId, now = Date.now()) {
     if (this.finished || typeof weaponId !== 'string') return false;
     const player = this.players.get(playerId);
-    if (!player || !player.alive || !player.weaponStates[weaponId]) return false;
+    if (!player || !player.connected || !player.alive || !player.weaponStates[weaponId]) return false;
     if (player.currentWeaponId === weaponId) return true;
 
     player.currentWeaponId = weaponId;
@@ -434,7 +444,7 @@ export class GameState {
   shoot(playerId, now = Date.now()) {
     if (this.finished) return;
     const shooter = this.players.get(playerId);
-    if (!shooter || !shooter.alive) return;
+    if (!shooter || !shooter.connected || !shooter.alive) return;
     const weapon = getWeapon(shooter.currentWeaponId);
     const weaponState = shooter.weaponStates[shooter.currentWeaponId];
     if (!weapon || !weaponState || weapon.behavior === 'shield') return;
@@ -487,6 +497,14 @@ export class GameState {
         + Math.random() * (BOT.maximumMissAngleRadians - BOT.minimumMissAngleRadians);
       direction = aimDirection(wrapAngle(shooter.yaw + side * missAngle), shooter.pitch);
     }
+
+    this.emitRoom(EVENTS.WEAPON_FIRED, {
+      playerId: shooter.id,
+      weaponId: weapon.id,
+      bundleId: shooter.bundleId,
+      origin,
+      direction,
+    });
 
     if (weapon.behavior === 'smoke') {
       this.throwSmoke(shooter, weapon, origin, applySpread(direction, weapon.spread), now);
@@ -576,7 +594,7 @@ export class GameState {
 
     const hits = [];
     for (const target of this.players.values()) {
-      if (target.id === shooter.id || !target.alive) continue;
+      if (target.id === shooter.id || !target.connected || !target.alive) continue;
       const distance = Math.hypot(target.x - impactPoint.x, target.y + PLAYER.height / 2 - impactPoint.y, target.z - impactPoint.z);
       if (distance > weapon.splashRadius) continue;
       const splash = weapon.splashDamage * Math.max(0, 1 - distance / weapon.splashRadius);
@@ -687,7 +705,7 @@ export class GameState {
 
   reload(playerId, now = Date.now()) {
     const player = this.players.get(playerId);
-    if (!player || !player.alive) return;
+    if (!player || !player.connected || !player.alive) return;
     const weapon = getWeapon(player.currentWeaponId);
     const state = player.weaponStates[player.currentWeaponId];
     if (!weapon || !state || weapon.magSize <= 0 || weapon.unlimitedAmmo || state.reloadUntil !== null) return;
@@ -830,6 +848,49 @@ export class GameState {
     return bestSpawn;
   }
 
+  setPlayerConnected(playerId, connected, now = Date.now()) {
+    const player = this.players.get(playerId);
+    if (!player) return false;
+    player.connected = Boolean(connected);
+    player.lastInputAt = now;
+    if (!player.connected) {
+      player.input.forward = 0;
+      player.input.strafe = 0;
+      player.input.jump = false;
+      player.vx = 0;
+      player.vy = 0;
+      player.vz = 0;
+      player.wasJumping = false;
+    }
+    return true;
+  }
+
+  rebindPlayer(previousId, nextId, now = Date.now()) {
+    const player = this.players.get(previousId);
+    if (!player || player.isBot || this.players.has(nextId)) return false;
+    this.players.delete(previousId);
+    player.id = nextId;
+    player.connected = true;
+    player.lastInputAt = now;
+    player.lastInputSequence = -1;
+    player.input = { forward: 0, strafe: 0, jump: false };
+    player.vx = 0;
+    player.vy = 0;
+    player.vz = 0;
+    player.wasJumping = false;
+    this.players.set(nextId, player);
+    for (const cloud of this.smokeClouds) {
+      if (cloud.ownerId === previousId) cloud.ownerId = nextId;
+    }
+    for (const entry of this.feed) {
+      if (entry.killerId === previousId) entry.killerId = nextId;
+      if (entry.victimId === previousId) entry.victimId = nextId;
+    }
+    syncActiveWeapon(player, now);
+    this.sendAmmo(player, now);
+    return true;
+  }
+
   removePlayer(playerId) {
     this.players.delete(playerId);
     const previousCount = this.smokeClouds.length;
@@ -848,6 +909,7 @@ export class GameState {
         health: player.health,
         alive: player.alive,
         isBot: player.isBot,
+        connected: player.connected,
         bundleId: player.bundleId,
         currentWeaponId: player.currentWeaponId,
         currentWeaponName: player.currentWeaponName,
@@ -884,6 +946,7 @@ export class GameState {
           lifetimeKills: player.lifetimeKills,
           alive: player.alive,
           isBot: player.isBot,
+          connected: player.connected,
           bundleId: player.bundleId,
           currentWeaponId: player.currentWeaponId,
           currentWeaponName: player.currentWeaponName,
