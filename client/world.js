@@ -180,3 +180,79 @@ export class World {
     }
   }
 }
+
+// Smoke grenades resolve server-side; this only draws the clouds. Each cloud
+// is a cluster of soft grey spheres that billows out on deploy and thins away
+// when the server stops reporting it.
+export class SmokeClouds {
+  constructor(scene) {
+    this.scene = scene;
+    this.clouds = new Map();
+    this.geometry = new THREE.SphereGeometry(1, 14, 10);
+  }
+
+  createCloud(smoke) {
+    const group = new THREE.Group();
+    const puffs = [];
+    const puffCount = 7;
+    for (let index = 0; index < puffCount; index += 1) {
+      const material = new THREE.MeshBasicMaterial({
+        color: index % 2 === 0 ? '#9aa7b4' : '#7d8b99',
+        transparent: true,
+        opacity: 0,
+        depthWrite: false,
+      });
+      const puff = new THREE.Mesh(this.geometry, material);
+      const angle = (index / puffCount) * Math.PI * 2;
+      const spread = index === 0 ? 0 : 0.45 + Math.random() * 0.35;
+      puff.position.set(
+        Math.cos(angle) * spread * smoke.radius * 0.42,
+        (Math.random() - 0.35) * smoke.radius * 0.3,
+        Math.sin(angle) * spread * smoke.radius * 0.42,
+      );
+      const size = smoke.radius * (index === 0 ? 0.52 : 0.3 + Math.random() * 0.16);
+      puff.scale.setScalar(0.01);
+      puff.userData.targetScale = size;
+      group.add(puff);
+      puffs.push(puff);
+    }
+    group.position.set(smoke.x, smoke.y, smoke.z);
+    this.scene.add(group);
+    const record = { group, puffs, bornAt: performance.now(), expiresAt: smoke.expiresAt };
+    this.clouds.set(smoke.id, record);
+    return record;
+  }
+
+  sync(smokes, now = Date.now()) {
+    const alive = new Set(smokes.map((smoke) => smoke.id));
+    for (const [id, record] of this.clouds) {
+      if (!alive.has(id)) {
+        this.scene.remove(record.group);
+        for (const puff of record.puffs) puff.material.dispose();
+        this.clouds.delete(id);
+      }
+    }
+    for (const smoke of smokes) {
+      if (!this.clouds.has(smoke.id)) this.createCloud(smoke);
+    }
+    this.latestServerNow = now;
+  }
+
+  update(now = performance.now()) {
+    for (const record of this.clouds.values()) {
+      const age = (now - record.bornAt) / 1_000;
+      const grow = Math.min(1, age / 0.9);
+      // Server timestamps are wall clock while rAF is performance.now(); only
+      // the shape of the fade matters here, so compare against the wall clock
+      // saved during the last sync plus the elapsed frame time.
+      const fade = record.expiresAt && this.latestServerNow
+        ? Math.min(1, (record.expiresAt - this.latestServerNow) / 1_200)
+        : 1;
+      for (const puff of record.puffs) {
+        const scale = puff.userData.targetScale * (0.35 + 0.65 * grow);
+        puff.scale.setScalar(scale);
+        puff.material.opacity = 0.82 * grow * Math.max(0, Math.min(1, fade));
+      }
+    }
+  }
+}

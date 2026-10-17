@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#070a12" />
-    <meta name="description" content="FPS GODS — server-authoritative free-for-all arena combat." />
+    <meta name="description" content="FPS GODS — server-authoritative free-for-all arena combat with solo bot mode and weapon bundles." />
     <title>FPS GODS — Deathmatch</title>
     <link rel="stylesheet" href="/style.css" />
   </head>
@@ -35,7 +35,7 @@
             <div class="feature-strip" aria-label="Game features">
               <div class="feature-item"><strong>30</strong><span>KILLS TO WIN</span></div>
               <div class="feature-separator"></div>
-              <div class="feature-item"><strong>16</strong><span>PLAYERS MAX</span></div>
+              <div class="feature-item"><strong>5</strong><span>GOD BOTS</span></div>
               <div class="feature-separator"></div>
               <div class="feature-item"><strong>FFA</strong><span>NO TEAMS</span></div>
             </div>
@@ -44,7 +44,7 @@
           <section class="launch-card" aria-labelledby="launch-title">
             <div class="card-topline"><span class="card-index">01</span><span class="card-caption">DEPLOYMENT CONSOLE</span><span class="card-signal"></span></div>
             <h2 id="launch-title">Enter the fight</h2>
-            <p class="card-intro">Choose your callsign, then create a room or join your squad's code.</p>
+            <p class="card-intro">Pick your callsign, choose a bundle, then drop in solo or settle it with friends.</p>
 
             <label class="field-label" for="player-name">CALLSIGN</label>
             <div class="input-wrap name-input-wrap">
@@ -52,8 +52,13 @@
               <input id="player-name" name="player-name" maxlength="16" autocomplete="nickname" placeholder="Rookie" value="" />
             </div>
 
-            <button class="button button-primary create-button" id="create-room-button" type="button">
-              <span class="button-icon">＋</span><span>CREATE A ROOM</span><span class="button-arrow">↗</span>
+            <button class="button button-primary play-now-button" id="play-now-button" type="button">
+              <span class="button-icon">▶</span><span>PLAY NOW</span><span class="button-arrow">↗</span>
+            </button>
+            <p class="mode-note">SOLO VS 5 GOD BOTS · INSTANT DROP-IN</p>
+
+            <button class="button button-secondary create-button" id="create-room-button" type="button">
+              <span class="button-icon">＋</span><span>CREATE ROOM</span><span class="button-arrow">↗</span>
             </button>
 
             <div class="or-divider"><span></span><b>OR JOIN WITH CODE</b><span></span></div>
@@ -64,7 +69,7 @@
                 <span class="input-prefix">#</span>
                 <input id="room-code-input" name="room-code" maxlength="6" autocomplete="off" spellcheck="false" placeholder="A1B2C3" />
               </div>
-              <button class="button button-secondary join-button" id="join-room-button" type="submit" aria-label="Join room">JOIN <span>→</span></button>
+              <button class="button button-secondary join-button" id="join-room-button" type="submit" aria-label="Join room">JOIN ROOM <span>→</span></button>
             </form>
             <p class="inline-error" id="home-error" aria-live="polite" hidden></p>
             <p class="card-footnote"><span class="tiny-shield">◆</span> Matches are server-hosted and room-isolated.</p>
@@ -73,8 +78,39 @@
 
         <footer class="home-footer">
           <span>FPS GODS <b>·</b> BUILT FOR THE LAST ONE STANDING</span>
-          <span class="footer-right">WASD MOVE <i>·</i> MOUSE AIM <i>·</i> LMB FIRE</span>
+          <span class="footer-right">WASD MOVE <i>·</i> MOUSE AIM <i>·</i> LMB FIRE <i>·</i> Q WEAPON WHEEL</span>
         </footer>
+      </main>
+
+      <main class="screen bundle-screen" id="bundle-screen" hidden>
+        <header class="brand-header">
+          <a class="brand-lockup" href="#" aria-label="FPS GODS home">
+            <span class="brand-mark"><span></span><span></span><span></span></span>
+            <span class="brand-name">FPS <b>GODS</b></span>
+          </a>
+          <div class="season-chip"><span class="chip-pulse"></span> LOADOUT SELECT</div>
+        </header>
+
+        <div class="bundle-layout">
+          <section class="bundle-intro">
+            <p class="eyebrow"><span class="eyebrow-line"></span> STEP 02 / LOADOUT</p>
+            <h1>Pick your<br /><span>arsenal.</span></h1>
+            <p>Three weapons per bundle. Switch between them any time with the weapon wheel (<b>hold Q</b>).</p>
+            <div class="kills-progress-card">
+              <div><span class="field-label">LIFETIME KILLS</span><strong id="lifetime-kills-value">0</strong></div>
+              <div class="kills-progress-track"><span id="kills-progress-fill"></span></div>
+              <p id="kills-progress-hint">Reach 30 lifetime kills to unlock GODS TIER.</p>
+            </div>
+            <p class="inline-error" id="bundle-error" aria-live="polite" hidden></p>
+          </section>
+
+          <section class="bundle-cards" id="bundle-cards" aria-label="Weapon bundles"></section>
+        </div>
+
+        <div class="bundle-actions">
+          <button class="button button-secondary" id="bundle-back-button" type="button"><span>←</span> BACK</button>
+          <button class="button button-primary" id="bundle-confirm-button" type="button">DEPLOY WITH BUNDLE <span>↗</span></button>
+        </div>
       </main>
 
       <main class="screen lobby-screen" id="lobby-screen" hidden>
@@ -111,7 +147,7 @@
             <p class="lobby-hint" id="lobby-hint">At least 2 players. Everyone must be ready to launch.</p>
           </section>
         </div>
-        <footer class="home-footer"><span>DEATHMATCH <b>·</b> FIRST TO 30 ELIMINATIONS</span><span class="footer-right">JUMP SPACE <i>·</i> RELOAD R <i>·</i> SCOREBOARD TAB</span></footer>
+        <footer class="home-footer"><span>DEATHMATCH <b>·</b> FIRST TO 30 ELIMINATIONS</span><span class="footer-right">JUMP SPACE <i>·</i> RELOAD R <i>·</i> SCOREBOARD TAB <i>·</i> WHEEL Q</span></footer>
       </main>
 
       <section class="match-hud" id="match-hud" aria-label="Match HUD" hidden>
@@ -125,16 +161,31 @@
         <div class="name-tags" id="name-tags" aria-hidden="true"></div>
         <div class="crosshair" id="crosshair" aria-hidden="true"><span></span></div>
 
+        <div class="weapon-wheel" id="weapon-wheel" hidden aria-label="Weapon wheel">
+          <div class="weapon-wheel-ring"></div>
+          <div class="weapon-wheel-hub">
+            <span class="wheel-hub-label">SELECT</span>
+            <strong id="wheel-hub-name">WEAPON</strong>
+          </div>
+          <div class="weapon-wheel-slots" id="weapon-wheel-slots"></div>
+          <p class="weapon-wheel-hint">MOVE MOUSE TO SELECT · RELEASE Q TO EQUIP</p>
+        </div>
+
         <div class="hud-bottom">
           <div class="health-widget">
             <div class="widget-label"><span class="health-icon">+</span> VITALS <span class="widget-separator"></span><span id="health-value">100</span><span class="widget-muted">/ 100</span></div>
             <div class="health-track"><span id="health-fill"></span></div>
             <div class="health-foot"><span id="health-state">COMBAT READY</span><span class="health-pip"></span></div>
           </div>
-          <div class="center-controls-hint"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd><span>MOVE</span><span class="hint-divider"></span><kbd>SPACE</kbd><span>JUMP</span></div>
+          <div class="center-controls-hint"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd><span>MOVE</span><span class="hint-divider"></span><kbd>SPACE</kbd><span>JUMP</span><span class="hint-divider"></span><kbd>Q</kbd><span>WHEEL</span></div>
           <div class="ammo-widget">
-            <div class="ammo-label">SIDEARM <span class="widget-separator"></span><span id="ammo-status">READY</span></div>
+            <div class="weapon-identity">
+              <span class="weapon-icon-chip" id="weapon-icon">PST</span>
+              <span class="weapon-name" id="weapon-name">WRAITH PISTOL</span>
+            </div>
+            <div class="ammo-label">AMMO <span class="widget-separator"></span><span id="ammo-status">READY</span></div>
             <div class="ammo-count"><strong id="ammo-value">12</strong><span class="ammo-divider">/</span><span id="ammo-max">12</span></div>
+            <div class="heat-track" id="heat-track" hidden><span id="heat-fill"></span></div>
             <div class="ammo-foot"><span id="reload-hint">R TO RELOAD</span><span class="ammo-bars"><i></i><i></i><i></i></span></div>
           </div>
         </div>
