@@ -1,355 +1,381 @@
 import * as THREE from 'three';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-import { getWeapon, WEAPONS } from '../shared/weapons.js';
+import smgUrl from './assets/weapons/smg.glb?url';
+import shotgunUrl from './assets/weapons/shotgun.glb?url';
+import sniperUrl from './assets/weapons/sniper.glb?url';
+import pistolUrl from './assets/weapons/pistol.glb?url';
+import lmgUrl from './assets/weapons/lmg.glb?url';
+import rocketUrl from './assets/weapons/rocket.glb?url';
+import knifeUrl from './assets/weapons/knife.glb?url';
 
-// First-person viewmodels and weapon feedback. Purely visual: the server
-// independently resolves every shot, hit and reload. The seven GLB files in
-// /assets/weapons are normalized into a common frame (barrel down -Z, length
-// along Z, centered at the origin) so every gun sits correctly in the
-// bottom-right of the camera view.
-
-const MODEL_FILES = Object.freeze({
-  smg: '/assets/weapons/smg.glb',
-  shotgun: '/assets/weapons/shotgun.glb',
-  sniper: '/assets/weapons/sniper.glb',
-  pistol: '/assets/weapons/pistol.glb',
-  lmg: '/assets/weapons/lmg.glb',
-  rocket: '/assets/weapons/rocket.glb',
-  knife: '/assets/weapons/knife.glb',
+const MODEL_URLS = Object.freeze({
+  'smg.glb': smgUrl,
+  'shotgun.glb': shotgunUrl,
+  'sniper.glb': sniperUrl,
+  'pistol.glb': pistolUrl,
+  'lmg.glb': lmgUrl,
+  'rocket.glb': rocketUrl,
+  'knife.glb': knifeUrl,
 });
 
-// The source meshes are authored with the barrel along +X and the profile in
-// the XZ plane. This basis maps: model +X → camera -Z (forward), model +Y →
-// camera -X (left/right width), model +Z → camera +Y (up).
-const MODEL_ROTATION = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(
-  new THREE.Vector3(0, 0, -1),
-  new THREE.Vector3(-1, 0, 0),
-  new THREE.Vector3(0, 1, 0),
-));
-
-// Per-weapon first-person placement inside the camera frame.
-const VIEW_LAYOUT = Object.freeze({
-  smg: { position: [0.3, -0.27, -0.52], rotation: [-0.04, 0.1, 0.02], hands: 'two', targetLength: 0.58 },
-  shotgun: { position: [0.31, -0.28, -0.58], rotation: [-0.05, 0.12, 0.02], hands: 'two', targetLength: 0.66 },
-  knife: { position: [0.3, -0.3, -0.42], rotation: [-0.15, 0.55, -0.35], hands: 'one', targetLength: 0.42 },
-  pistol: { position: [0.28, -0.26, -0.5], rotation: [-0.03, 0.09, 0.02], hands: 'one', targetLength: 0.42 },
-  sniper: { position: [0.32, -0.28, -0.62], rotation: [-0.04, 0.13, 0.02], hands: 'two', targetLength: 0.78 },
-  smoke: { position: [0.3, -0.28, -0.45], rotation: [-0.1, 0.2, 0], hands: 'one', targetLength: 0.3 },
-  lmg: { position: [0.32, -0.29, -0.6], rotation: [-0.04, 0.12, 0.02], hands: 'two', targetLength: 0.7 },
-  rocket: { position: [0.31, -0.3, -0.6], rotation: [-0.06, 0.14, 0.02], hands: 'two', targetLength: 0.7 },
-  shield: { position: [0.26, -0.32, -0.6], rotation: [-0.02, 0.18, 0.04], hands: 'one', targetLength: 0.6 },
-  railgun: { position: [0.3, -0.28, -0.58], rotation: [-0.04, 0.12, 0.02], hands: 'two', targetLength: 0.72 },
-  minigun: { position: [0.33, -0.3, -0.62], rotation: [-0.05, 0.13, 0.02], hands: 'two', targetLength: 0.72 },
-  fist: { position: [0.3, -0.28, -0.45], rotation: [-0.12, 0.35, -0.1], hands: 'one', targetLength: 0.38 },
+const WEAPON_MODEL = Object.freeze({
+  SMG: 'smg.glb',
+  SHOTGUN: 'shotgun.glb',
+  KNIFE: 'knife.glb',
+  PISTOL: 'pistol.glb',
+  SNIPER: 'sniper.glb',
+  SMOKE_GRENADE: 'pistol.glb',
+  LMG: 'lmg.glb',
+  ROCKET: 'rocket.glb',
+  COMBAT_SHIELD: 'shotgun.glb',
+  RAILGUN: 'lmg.glb',
+  MINIGUN: 'lmg.glb',
+  GOD_FIST: 'knife.glb',
 });
 
-function gloveMaterial() {
-  return new THREE.MeshStandardMaterial({ color: '#161d29', roughness: 0.85, metalness: 0.12 });
-}
+const MODEL_LENGTH = Object.freeze({
+  'smg.glb': 0.73,
+  'shotgun.glb': 0.84,
+  'sniper.glb': 1.0,
+  'pistol.glb': 0.58,
+  'lmg.glb': 0.86,
+  'rocket.glb': 0.66,
+  'knife.glb': 0.52,
+});
 
-function makeHand(scale = 1) {
-  const hand = new THREE.Group();
-  const palm = new THREE.Mesh(new THREE.BoxGeometry(0.075, 0.1, 0.13), gloveMaterial());
-  const fingers = new THREE.Mesh(new THREE.BoxGeometry(0.068, 0.055, 0.1), gloveMaterial());
-  fingers.position.set(0, -0.01, -0.1);
-  const thumb = new THREE.Mesh(new THREE.BoxGeometry(0.028, 0.035, 0.075), gloveMaterial());
-  thumb.position.set(0.045, 0.02, -0.02);
-  const cuff = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.042, 0.05, 0.08, 8),
-    new THREE.MeshStandardMaterial({ color: '#223046', roughness: 0.7, metalness: 0.2 }),
+const BUNDLE_TRACER_COLOR = Object.freeze({
+  RUSHER: '#59d8ff',
+  GHOST: '#c18aff',
+  HEAVY: '#ff8b3d',
+  GODS_TIER: '#ffd45e',
+});
+
+const NO_TRACER = new Set(['PISTOL', 'KNIFE', 'GOD_FIST', 'SMOKE_GRENADE', 'COMBAT_SHIELD']);
+const NO_FLASH = new Set(['KNIFE', 'GOD_FIST', 'SMOKE_GRENADE', 'COMBAT_SHIELD']);
+const SWITCH_DURATION_MS = 230;
+
+function orientModel(scene, file) {
+  const model = scene.clone(true);
+  const oriented = new THREE.Group();
+  const rotation = new THREE.Matrix4().makeBasis(
+    new THREE.Vector3(0, 0, -1),
+    new THREE.Vector3(-1, 0, 0),
+    new THREE.Vector3(0, 1, 0),
   );
-  cuff.rotation.x = Math.PI / 2;
-  cuff.position.set(0, -0.01, 0.085);
-  hand.add(palm, fingers, thumb, cuff);
-  hand.scale.setScalar(scale);
-  return hand;
-}
+  oriented.quaternion.setFromRotationMatrix(rotation);
+  oriented.add(model);
+  oriented.updateMatrixWorld(true);
 
-function attachHands(anchor, mode, layout) {
-  const gripHand = makeHand(0.95);
-  gripHand.position.set(-0.015, -0.11, 0.16);
-  gripHand.rotation.set(0.22, 0, 0);
-  anchor.add(gripHand);
-  if (mode === 'two') {
-    const supportHand = makeHand(0.95);
-    supportHand.position.set(0.01, -0.13, -0.16);
-    supportHand.rotation.set(-0.35, Math.PI, 0);
-    anchor.add(supportHand);
-  }
-}
-
-// Normalized clone pipeline for the imported gun meshes.
-function normalizeModel(source, targetLength) {
-  const model = source.clone(true);
-  model.quaternion.copy(MODEL_ROTATION);
-  model.updateMatrixWorld(true);
-
-  let box = new THREE.Box3().setFromObject(model);
-  const size = box.getSize(new THREE.Vector3());
-  const scale = targetLength / Math.max(size.z, 1e-4);
-  model.scale.setScalar(scale);
-  model.updateMatrixWorld(true);
-
-  box = new THREE.Box3().setFromObject(model);
-  const center = box.getCenter(new THREE.Vector3());
-  model.position.sub(center);
-
-  model.traverse((child) => {
-    if (!child.isMesh) return;
-    child.castShadow = false;
-    child.receiveShadow = false;
-    if (child.material) {
-      // The uploaded meshes come with plain materials; give them a touch of
-      // metal response so they read under the arena lights.
-      child.material = child.material.clone();
-      if ('metalness' in child.material) child.material.metalness = Math.max(0.45, child.material.metalness ?? 0);
-      if ('roughness' in child.material) child.material.roughness = Math.min(0.62, child.material.roughness ?? 0.5);
+  const bounds = new THREE.Box3().setFromObject(oriented);
+  const size = bounds.getSize(new THREE.Vector3());
+  const center = bounds.getCenter(new THREE.Vector3());
+  const fitted = new THREE.Group();
+  const modelScale = MODEL_LENGTH[file] / Math.max(size.z, 0.001);
+  fitted.position.copy(center).multiplyScalar(-modelScale);
+  fitted.scale.setScalar(modelScale);
+  fitted.add(oriented);
+  fitted.userData.normalizedLength = 1;
+  fitted.traverse((part) => {
+    if (part.isMesh) {
+      part.castShadow = false;
+      part.receiveShadow = false;
     }
   });
-
-  return { model, box };
+  return fitted;
 }
 
-// Weapons without a GLB (GODS TIER items, shield, smoke) get complete
-// procedural viewmodels so the wheel and HUD never show an empty slot.
-function buildProcedural(weaponId) {
-  const anchor = new THREE.Group();
-  const dark = new THREE.MeshStandardMaterial({ color: '#202b3d', roughness: 0.42, metalness: 0.72 });
-  const glow = new THREE.MeshBasicMaterial({ color: '#59d8ff' });
-  let muzzleZ = -0.4;
-
-  if (weaponId === 'railgun') {
-    const body = new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.13, 0.62), dark);
-    const core = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.5, 10), glow);
-    core.rotation.x = Math.PI / 2;
-    core.position.set(0, 0.02, -0.1);
-    const coil1 = new THREE.Mesh(new THREE.TorusGeometry(0.075, 0.018, 8, 16), glow);
-    coil1.position.set(0, 0.02, -0.18);
-    const coil2 = coil1.clone();
-    coil2.position.z = -0.32;
-    const grip = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.19, 0.11), dark);
-    grip.position.set(0, -0.15, 0.14);
-    grip.rotation.x = -0.2;
-    anchor.add(body, core, coil1, coil2, grip);
-    muzzleZ = -0.42;
-  } else if (weaponId === 'minigun') {
-    const hub = new THREE.Mesh(new THREE.CylinderGeometry(0.115, 0.115, 0.42, 12), dark);
-    hub.rotation.x = Math.PI / 2;
-    hub.position.z = -0.18;
-    anchor.add(hub);
-    for (let index = 0; index < 6; index += 1) {
-      const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.024, 0.024, 0.5, 8), dark);
-      barrel.rotation.x = Math.PI / 2;
-      const angle = (index / 6) * Math.PI * 2;
-      barrel.position.set(Math.cos(angle) * 0.075, Math.sin(angle) * 0.075, -0.3);
-      anchor.add(barrel);
-    }
-    const housing = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.18, 0.24), dark);
-    housing.position.set(0, -0.02, 0.1);
-    const grip = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.2, 0.11), dark);
-    grip.position.set(0, -0.17, 0.12);
-    anchor.add(housing, grip);
-    muzzleZ = -0.56;
-  } else if (weaponId === 'fist') {
-    const knuckle = new THREE.Mesh(new THREE.BoxGeometry(0.17, 0.13, 0.15), dark);
-    const ridge = new THREE.Mesh(new THREE.BoxGeometry(0.17, 0.035, 0.028), glow);
-    ridge.position.set(0, 0.055, -0.072);
-    const wrist = new THREE.Mesh(new THREE.CylinderGeometry(0.065, 0.075, 0.14, 10), gloveMaterial());
-    wrist.rotation.x = Math.PI / 2;
-    wrist.position.z = 0.13;
-    for (let index = 0; index < 4; index += 1) {
-      const finger = new THREE.Mesh(new THREE.BoxGeometry(0.036, 0.05, 0.07), dark);
-      finger.position.set(-0.058 + index * 0.039, -0.075, -0.045);
-      anchor.add(finger);
-    }
-    anchor.add(knuckle, ridge, wrist);
-    muzzleZ = -0.12;
-  } else if (weaponId === 'shield') {
-    const panel = new THREE.Mesh(
-      new THREE.BoxGeometry(0.62, 0.86, 0.05),
-      new THREE.MeshStandardMaterial({ color: '#243248', roughness: 0.35, metalness: 0.75 }),
-    );
-    panel.position.z = -0.15;
-    const windowMesh = new THREE.Mesh(
-      new THREE.BoxGeometry(0.26, 0.18, 0.052),
-      new THREE.MeshBasicMaterial({ color: '#59d8ff', transparent: true, opacity: 0.55 }),
-    );
-    windowMesh.position.set(0, 0.16, -0.15);
-    const rim = new THREE.Mesh(new THREE.BoxGeometry(0.66, 0.045, 0.06), glow);
-    rim.position.set(0, 0.44, -0.15);
-    anchor.add(panel, windowMesh, rim);
-    muzzleZ = -0.2;
-  } else {
-    // Smoke canister and any future throwables.
-    const canister = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.055, 0.15, 10), dark);
-    const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.035, 8), glow);
-    cap.position.y = 0.09;
-    const band = new THREE.Mesh(new THREE.CylinderGeometry(0.058, 0.058, 0.03, 10), glow);
-    band.position.y = -0.01;
-    anchor.add(canister, cap, band);
-    muzzleZ = -0.1;
+// Loads and normalizes each supplied GLB once. Local and remote weapon rigs use
+// clones of the same real assets, so switches never trigger duplicate requests.
+export class WeaponModelLibrary {
+  constructor() {
+    this.models = new Map();
+    this.errors = new Map();
+    this.listeners = new Set();
+    this.settled = false;
+    this.ready = import('three/addons/loaders/GLTFLoader.js').then(({ GLTFLoader }) => {
+      const loader = new GLTFLoader();
+      return Promise.all(Object.entries(MODEL_URLS).map(async ([file, url]) => {
+        try {
+          const gltf = await loader.loadAsync(url);
+          this.models.set(file, orientModel(gltf.scene, file));
+        } catch (error) {
+          this.errors.set(file, error);
+          console.error(`[FPS GODS] Could not load ${file}:`, error);
+        }
+      }));
+    }).catch((error) => {
+      this.errors.set('GLTFLoader', error);
+      console.error('[FPS GODS] Could not initialize the weapon model loader:', error);
+    }).then(() => {
+      this.settled = true;
+      for (const listener of this.listeners) listener();
+      this.listeners.clear();
+      return this.errors.size === 0;
+    });
   }
 
-  const muzzle = new THREE.Object3D();
-  muzzle.position.set(0, 0.02, muzzleZ);
-  anchor.add(muzzle);
-  return { model: anchor, muzzle };
+  onReady(listener) {
+    if (this.settled) {
+      listener();
+      return () => {};
+    }
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  createModel(weaponId) {
+    const file = WEAPON_MODEL[weaponId];
+    const source = file ? this.models.get(file) : null;
+    if (!source) return null;
+    const model = source.clone(true);
+    model.userData.weaponId = weaponId;
+    model.userData.modelFile = file;
+    return model;
+  }
+
+  getLength(weaponId) {
+    return MODEL_LENGTH[WEAPON_MODEL[weaponId]] ?? MODEL_LENGTH['smg.glb'];
+  }
 }
 
-/**
- * Owns the first-person weapon: preloads every GLB, crossfades between them on
- * weapon switches, animates bob/recoil/reload, and fires muzzle flashes plus
- * tracers (unless the weapon definition says it is tracerless).
- */
-export class WeaponViewmodels {
-  constructor(camera, scene) {
-    this.camera = camera;
+function createHand(geometry, material, parent, position, scale, rotation = [0, 0, 0]) {
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.position.set(...position);
+  mesh.scale.set(...scale);
+  mesh.rotation.set(...rotation);
+  mesh.frustumCulled = false;
+  parent.add(mesh);
+  return mesh;
+}
+
+// First-person rendering is strictly a pair of hands and a GLB weapon attached
+// to the camera. The server independently resolves every shot and applies damage.
+export class WeaponEffects {
+  constructor(scene, camera, modelLibrary) {
     this.scene = scene;
-    this.holder = new THREE.Group();
-    this.camera.add(this.holder);
-
-    this.sources = new Map();
-    this.loaded = false;
-    this.currentWeaponId = null;
-    this.currentRoot = null;
-    this.currentMuzzle = null;
-    this.switching = null;
-
+    this.camera = camera;
+    this.modelLibrary = modelLibrary;
     this.tracers = [];
+    this.smokeMeshes = new Map();
+    this.smokeGeometry = new THREE.SphereGeometry(1, 20, 14);
+    this.weaponId = null;
+    this.bundleId = 'RUSHER';
+    this.movementAmount = 0;
+    this.reloadStartedAt = null;
+    this.reloadDuration = 900;
     this.flashUntil = 0;
-    this.kickZ = 0;
-    this.kickPitch = 0;
-    this.bobClock = 0;
-    this.reloadUntil = 0;
-    this.reloadDuration = 1;
+    this.switchTransition = null;
+    this.hands = [];
+    this.viewModel = new THREE.Group();
+    this.viewModel.position.set(0.29, -0.275, -0.62);
+    this.viewModel.rotation.set(-0.02, -0.05, 0);
+    camera.add(this.viewModel);
+    this.gun = this.viewModel;
+    this.buildHands();
+    this.buildFlash();
+    this.setWeapon('SMG', 'RUSHER', false);
+    this.modelLibrary.onReady(() => this.installActiveModel(performance.now()));
+  }
 
-    this.flashLight = new THREE.PointLight('#ffbd69', 0, 3.4, 2);
+  buildHands() {
+    const sleeve = new THREE.MeshStandardMaterial({ color: '#243142', roughness: 0.82, metalness: 0.16 });
+    const glove = new THREE.MeshStandardMaterial({ color: '#111821', roughness: 0.75, metalness: 0.2 });
+    const seam = new THREE.MeshStandardMaterial({ color: '#3a5367', roughness: 0.55, metalness: 0.45 });
+    const handMaterials = [sleeve, glove, seam];
+    const armGeometry = new THREE.CapsuleGeometry(0.052, 0.25, 3, 8);
+    const palmGeometry = new THREE.SphereGeometry(0.072, 10, 8);
+    const fingerGeometry = new THREE.CapsuleGeometry(0.018, 0.085, 2, 6);
+    const thumbGeometry = new THREE.CapsuleGeometry(0.019, 0.065, 2, 6);
+    const cuffGeometry = new THREE.CylinderGeometry(0.061, 0.056, 0.07, 8);
+
+    const leftArm = createHand(armGeometry, sleeve, this.viewModel, [-0.23, -0.43, -0.48], [1, 1, 1], [0.2, 0, -0.54]);
+    const rightArm = createHand(armGeometry, sleeve, this.viewModel, [0.34, -0.44, -0.46], [1, 1, 1], [0.2, 0, 0.43]);
+    const leftCuff = createHand(cuffGeometry, seam, this.viewModel, [-0.15, -0.35, -0.56], [1, 1, 1], [0.2, 0, -0.54]);
+    const rightCuff = createHand(cuffGeometry, seam, this.viewModel, [0.27, -0.36, -0.55], [1, 1, 1], [0.2, 0, 0.43]);
+    const leftPalm = createHand(palmGeometry, glove, this.viewModel, [-0.04, -0.285, -0.65], [1.15, 0.82, 0.8]);
+    const rightPalm = createHand(palmGeometry, glove, this.viewModel, [0.17, -0.29, -0.57], [1.05, 0.8, 0.8]);
+
+    for (let finger = 0; finger < 4; finger += 1) {
+      const offset = (finger - 1.5) * 0.034;
+      this.hands.push(createHand(fingerGeometry, glove, this.viewModel, [-0.04 + offset, -0.31, -0.69], [1, 1, 1], [0.28, 0, 0.12]));
+      this.hands.push(createHand(fingerGeometry, glove, this.viewModel, [0.17 + offset, -0.315, -0.59], [1, 1, 1], [0.16, 0, -0.08]));
+    }
+    this.hands.push(leftArm, rightArm, leftCuff, rightCuff, leftPalm, rightPalm);
+    this.handMaterials = handMaterials;
+    this.handGeometries = [armGeometry, palmGeometry, fingerGeometry, thumbGeometry, cuffGeometry];
+    const leftThumb = createHand(thumbGeometry, glove, this.viewModel, [-0.11, -0.29, -0.66], [1, 1, 1], [0.3, 0, -0.82]);
+    const rightThumb = createHand(thumbGeometry, glove, this.viewModel, [0.1, -0.27, -0.55], [1, 1, 1], [0.2, 0, 0.8]);
+    this.hands.push(leftThumb, rightThumb);
+  }
+
+  buildFlash() {
+    this.muzzle = new THREE.Object3D();
+    this.viewModel.add(this.muzzle);
+    this.flashMaterial = new THREE.MeshBasicMaterial({ color: '#ffe6a3', transparent: true, opacity: 0.95 });
+    this.flashMesh = new THREE.Mesh(new THREE.SphereGeometry(0.055, 10, 8), this.flashMaterial);
+    this.flashMesh.visible = false;
+    this.muzzle.add(this.flashMesh);
+    this.flashLight = new THREE.PointLight('#ffe0a0', 2.6, 2.8, 2);
     this.flashLight.visible = false;
-    this.camera.add(this.flashLight);
+    this.muzzle.add(this.flashLight);
   }
 
-  /** Load every GLB up front. Falls back to procedural models on any failure. */
-  async load() {
-    const loader = new GLTFLoader();
-    const entries = await Promise.all(Object.entries(MODEL_FILES).map(async ([weaponId, url]) => {
-      try {
-        const gltf = await loader.loadAsync(url);
-        return [weaponId, gltf.scene];
-      } catch (error) {
-        console.error(`[FPS GODS] Failed to load weapon model ${url}:`, error);
-        return [weaponId, null];
-      }
-    }));
-    for (const [weaponId, scene] of entries) {
-      if (scene) this.sources.set(weaponId, scene);
+  setWeapon(weaponId, bundleId = this.bundleId, animate = true) {
+    if (!weaponId) return;
+    const changed = weaponId !== this.weaponId;
+    const bundleChanged = bundleId && bundleId !== this.bundleId;
+    if (!changed && !bundleChanged) return;
+    this.weaponId = weaponId;
+    if (bundleId) this.bundleId = bundleId;
+    this.updateMuzzlePosition();
+    if (changed && animate) this.installActiveModel(performance.now());
+    else if (changed) this.installActiveModel(performance.now(), false);
+  }
+
+  updateMuzzlePosition() {
+    this.muzzle.position.set(0, 0.015, -this.modelLibrary.getLength(this.weaponId) / 2);
+  }
+
+  installActiveModel(now, animate = true) {
+    const next = this.modelLibrary.createModel(this.weaponId);
+    if (!next) return;
+    if (this.currentModel?.userData.weaponId === this.weaponId) return;
+
+    if (this.switchTransition) {
+      const { from, to } = this.switchTransition;
+      if (from && from !== this.currentModel) this.viewModel.remove(from);
+      if (to && to !== this.currentModel) this.viewModel.remove(to);
+      this.switchTransition = null;
     }
-    this.loaded = true;
-    return this;
-  }
 
-  buildRoot(weaponId, lengthOverride = null) {
-    const definition = getWeapon(weaponId);
-    const layout = VIEW_LAYOUT[weaponId] ?? VIEW_LAYOUT.pistol;
-    const anchor = new THREE.Group();
+    const from = this.currentModel;
+    if (from) {
+      from.scale.copy(from.userData.baseScale ?? from.scale);
+      from.position.set(0, 0, 0);
+      from.rotation.set(0, 0, 0);
+    }
+    next.userData.baseScale = next.scale.clone();
+    this.viewModel.add(next);
+    this.currentModel = next;
 
-    let model;
-    let muzzle;
-    const source = this.sources.get(weaponId);
-    if (source) {
-      const length = lengthOverride ?? layout.targetLength;
-      model = normalizeModel(source, length).model;
-      muzzle = new THREE.Object3D();
-      // The normalized model is centered at the origin and runs down -Z.
-      muzzle.position.set(0, 0.015, -length / 2 - 0.015);
+    if (animate && from) {
+      this.switchTransition = { from, to: next, startedAt: now, duration: SWITCH_DURATION_MS };
+    } else if (animate) {
+      this.switchTransition = { from: null, to: next, startedAt: now, duration: SWITCH_DURATION_MS };
     } else {
-      const procedural = buildProcedural(weaponId);
-      model = procedural.model;
-      muzzle = procedural.muzzle;
+      if (from) this.viewModel.remove(from);
+      next.scale.copy(next.userData.baseScale);
+      next.position.set(0, 0, 0);
     }
-
-    anchor.add(model);
-    attachHands(anchor, layout.hands, layout);
-    anchor.add(muzzle);
-    anchor.userData.definition = definition;
-    return { anchor, muzzle, layout };
   }
 
-  setWeapon(weaponId, { instant = false } = {}) {
-    if (weaponId === this.currentWeaponId && !this.switching) return;
-    const { anchor, muzzle, layout } = this.buildRoot(weaponId);
-    anchor.position.set(layout.position[0], layout.position[1], layout.position[2]);
-    anchor.rotation.set(layout.rotation[0], layout.rotation[1], layout.rotation[2]);
-
-    const previous = this.currentRoot;
-    if (previous && !instant) {
-      this.switching = {
-        outgoing: previous,
-        outgoingStart: performance.now(),
-        incoming: anchor,
-        baseY: layout.position[1],
-        startedAt: performance.now(),
-      };
-      this.holder.add(anchor);
-      this.currentRoot = anchor;
-      this.currentMuzzle = muzzle;
-    } else {
-      if (previous) this.holder.remove(previous);
-      this.holder.add(anchor);
-      this.currentRoot = anchor;
-      this.currentMuzzle = muzzle;
-      this.switching = null;
-    }
-    this.currentWeaponId = weaponId;
-    this.setVisible(true);
+  setMovementSpeed(speed) {
+    this.movementAmount = Math.max(0, Math.min(1, (Number(speed) || 0) / 7.2));
   }
 
-  setVisible(visible) {
-    this.holder.visible = Boolean(visible);
-    if (!visible) this.flashLight.visible = false;
+  startReload(duration = 900) {
+    this.reloadStartedAt = performance.now();
+    this.reloadDuration = Math.max(350, Math.min(4_000, Number(duration) || 900));
   }
 
-  /** Kick off the reload dip animation for the active weapon. */
-  startReload(reloadMs) {
-    this.reloadUntil = performance.now() + Math.max(300, reloadMs ?? 1_200);
-    this.reloadDuration = Math.max(300, reloadMs ?? 1_200);
-  }
-
-  fire(now = performance.now(), hitPoint = null) {
-    const definition = this.currentWeaponId ? getWeapon(this.currentWeaponId) : null;
-    this.kickZ = 0.045;
-    this.kickPitch = definition?.type === 'melee' ? 0.02 : 0.075;
-
-    if (definition?.type === 'melee' || definition?.type === 'shield') return;
-
-    this.flashUntil = now + 46;
-    this.flashLight.visible = true;
-    this.flashLight.intensity = 2.4;
-
-    if (definition && !definition.tracer) return; // pistol and silent tools
-
+  fire(now = performance.now(), weaponId = this.weaponId, bundleId = this.bundleId, authoritativeShot = null) {
+    this.setWeapon(weaponId, bundleId);
+    const noTracer = NO_TRACER.has(weaponId);
+    const noMuzzleFlash = NO_FLASH.has(weaponId);
     this.camera.updateMatrixWorld(true);
-    const start = this.currentMuzzle
-      ? this.currentMuzzle.getWorldPosition(new THREE.Vector3())
-      : this.camera.getWorldPosition(new THREE.Vector3());
-    const direction = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion).normalize();
-    const end = hitPoint
-      ? new THREE.Vector3(hitPoint.x, hitPoint.y, hitPoint.z)
-      : start.clone().addScaledVector(direction, 80);
+    this.viewModel.updateMatrixWorld(true);
+    const start = authoritativeShot?.origin
+      ? new THREE.Vector3(authoritativeShot.origin.x, authoritativeShot.origin.y, authoritativeShot.origin.z)
+      : this.muzzle.getWorldPosition(new THREE.Vector3());
+    const direction = authoritativeShot?.direction
+      ? new THREE.Vector3(authoritativeShot.direction.x, authoritativeShot.direction.y, authoritativeShot.direction.z).normalize()
+      : new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion).normalize();
 
+    if (!noTracer) {
+      const end = start.clone().addScaledVector(direction, weaponId === 'ROCKET' ? 34 : 58);
+      const geometry = new THREE.BufferGeometry().setFromPoints([start, end]);
+      const material = new THREE.LineBasicMaterial({
+        color: BUNDLE_TRACER_COLOR[this.bundleId] ?? BUNDLE_TRACER_COLOR.RUSHER,
+        transparent: true,
+        opacity: 0.92,
+        depthWrite: false,
+      });
+      const line = new THREE.Line(geometry, material);
+      line.frustumCulled = false;
+      this.scene.add(line);
+      this.tracers.push({ line, expiresAt: now + 100 });
+    }
+
+    if (!noMuzzleFlash) {
+      const flashColor = BUNDLE_TRACER_COLOR[this.bundleId] ?? BUNDLE_TRACER_COLOR.RUSHER;
+      this.flashMaterial.color.set(flashColor);
+      this.flashLight.color.set(flashColor);
+      this.flashUntil = now + 55;
+      this.flashMesh.visible = true;
+      this.flashLight.visible = true;
+      this.viewModel.position.y = -0.3;
+    }
+  }
+
+  showRemoteTracer({ origin, direction, weaponId, bundleId }, now = performance.now()) {
+    if (NO_TRACER.has(weaponId) || !origin || !direction) return;
+    const start = new THREE.Vector3(origin.x, origin.y, origin.z);
+    const ray = new THREE.Vector3(direction.x, direction.y, direction.z).normalize();
+    if (ray.lengthSq() < 0.5) return;
+    const end = start.clone().addScaledVector(ray, weaponId === 'ROCKET' ? 34 : 58);
     const geometry = new THREE.BufferGeometry().setFromPoints([start, end]);
     const material = new THREE.LineBasicMaterial({
-      color: definition?.id === 'railgun' ? '#9df3ff' : '#ffd67a',
+      color: BUNDLE_TRACER_COLOR[bundleId] ?? BUNDLE_TRACER_COLOR.RUSHER,
       transparent: true,
-      opacity: definition?.id === 'railgun' ? 1 : 0.85,
+      opacity: 0.82,
       depthWrite: false,
     });
     const line = new THREE.Line(geometry, material);
     line.frustumCulled = false;
     this.scene.add(line);
-    this.tracers.push({ line, expiresAt: now + (definition?.id === 'railgun' ? 160 : 100) });
+    this.tracers.push({ line, expiresAt: now + 100 });
   }
 
-  update(now = performance.now(), deltaSeconds = 0.016, { movingSpeed = 0 } = {}) {
+  updateSmokeClouds(clouds = []) {
+    const visibleIds = new Set(clouds.map((cloud) => cloud.id));
+    for (const [id, record] of this.smokeMeshes) {
+      if (visibleIds.has(id)) continue;
+      this.scene.remove(record.group);
+      for (const material of record.materials) material.dispose();
+      this.smokeMeshes.delete(id);
+    }
+
+    for (const cloud of clouds) {
+      let record = this.smokeMeshes.get(cloud.id);
+      if (!record) {
+        const group = new THREE.Group();
+        const radius = Math.max(1, Number(cloud.radius) || 4);
+        const materials = [0.28, 0.22, 0.18].map((opacity) => new THREE.MeshBasicMaterial({
+          color: '#8e9aa6',
+          transparent: true,
+          opacity,
+          depthWrite: false,
+          side: THREE.DoubleSide,
+        }));
+        const lobes = [
+          { x: 0, y: 0, z: 0, scale: [1, 0.78, 1] },
+          { x: -0.36, y: 0.1, z: 0.22, scale: [0.74, 0.66, 0.72] },
+          { x: 0.34, y: -0.05, z: -0.24, scale: [0.76, 0.69, 0.75] },
+        ];
+        lobes.forEach((lobe, index) => {
+          const mesh = new THREE.Mesh(this.smokeGeometry, materials[index]);
+          mesh.position.set(lobe.x * radius, lobe.y * radius, lobe.z * radius);
+          mesh.scale.set(radius * lobe.scale[0], radius * lobe.scale[1], radius * lobe.scale[2]);
+          group.add(mesh);
+        });
+        this.scene.add(group);
+        record = { group, materials };
+        this.smokeMeshes.set(cloud.id, record);
+      }
+      record.group.position.set(cloud.x, cloud.y, cloud.z);
+    }
+  }
+
+  update(now = performance.now()) {
     for (let index = this.tracers.length - 1; index >= 0; index -= 1) {
       const tracer = this.tracers[index];
       const remaining = tracer.expiresAt - now;
@@ -359,72 +385,47 @@ export class WeaponViewmodels {
         tracer.line.material.dispose();
         this.tracers.splice(index, 1);
       } else {
-        tracer.line.material.opacity = Math.min(1, remaining / 100);
+        tracer.line.material.opacity = Math.min(0.92, remaining / 100);
       }
     }
 
     const flashVisible = now < this.flashUntil;
+    this.flashMesh.visible = flashVisible;
     this.flashLight.visible = flashVisible;
-    if (!flashVisible) this.flashLight.intensity = 0;
+    const moving = this.movementAmount;
+    const bob = Math.sin(now * 0.012) * 0.014 * moving;
+    const sway = Math.cos(now * 0.006) * 0.008 * moving;
+    const reloadProgress = this.reloadStartedAt === null
+      ? 0
+      : Math.max(0, Math.min(1, (now - this.reloadStartedAt) / this.reloadDuration));
+    if (reloadProgress >= 1) this.reloadStartedAt = null;
+    const reloadDip = this.reloadStartedAt === null ? 0 : Math.sin(reloadProgress * Math.PI) * 0.14;
 
-    if (!this.currentRoot) return;
+    this.viewModel.position.x = 0.29 + sway;
+    this.viewModel.position.y = -0.275 + bob - reloadDip;
+    this.viewModel.position.z = -0.62 + reloadDip * 0.6;
+    this.viewModel.rotation.z = Math.sin(now * 0.006) * 0.018 * moving;
+    this.viewModel.rotation.x = -0.02 + reloadDip * 0.6;
 
-    // Smooth switch transition: old gun drops out, new gun rises into place.
-    if (this.switching) {
-      const { outgoing, incoming, outgoingStart, startedAt, baseY } = this.switching;
-      if (outgoing) {
-        const outProgress = Math.min(1, (now - outgoingStart) / 140);
-        outgoing.position.y -= 0.035;
-        outgoing.rotation.x += 0.11;
-        outgoing.visible = outProgress < 1;
-        if (outProgress >= 1) {
-          this.holder.remove(outgoing);
-          this.switching = { outgoing: null, incoming, startedAt, baseY };
-        }
+    if (this.switchTransition) {
+      const { from, to, startedAt, duration } = this.switchTransition;
+      const progress = Math.max(0, Math.min(1, (now - startedAt) / duration));
+      if (from) {
+        from.position.y = -progress * 0.19;
+        from.rotation.x = -progress * 0.16;
+        from.scale.copy(from.userData.baseScale).multiplyScalar(1 - progress * 0.12);
       }
-
-      const inProgress = Math.min(1, (now - startedAt - 120) / 200);
-      if (inProgress >= 0) {
-        const eased = 1 - Math.pow(1 - Math.max(0, inProgress), 3);
-        incoming.position.y = baseY - (1 - eased) * 0.34;
-        incoming.rotation.x = (1 - eased) * 0.85;
+      to.position.y = (1 - progress) * 0.19;
+      to.rotation.x = (1 - progress) * 0.16;
+      to.scale.copy(to.userData.baseScale).multiplyScalar(0.88 + progress * 0.12);
+      if (progress >= 1) {
+        if (from) this.viewModel.remove(from);
+        to.position.set(0, 0, 0);
+        to.rotation.set(0, 0, 0);
+        to.scale.copy(to.userData.baseScale);
+        this.switchTransition = null;
       }
-      if (inProgress >= 1) this.switching = null;
-      return;
     }
-
-    const layout = VIEW_LAYOUT[this.currentWeaponId] ?? VIEW_LAYOUT.pistol;
-
-    // Weapon bob grows with movement speed.
-    const speedFactor = Math.min(1, movingSpeed / 7.2);
-    this.bobClock += deltaSeconds * (4 + speedFactor * 7.5);
-    const bobX = Math.cos(this.bobClock) * 0.012 * speedFactor;
-    const bobY = Math.abs(Math.sin(this.bobClock)) * -0.013 * speedFactor;
-
-    // Recoil kick eases back to rest.
-    this.kickZ *= Math.pow(0.0015, deltaSeconds);
-    this.kickPitch *= Math.pow(0.0015, deltaSeconds);
-
-    // Reload: dip and roll the weapon down, then raise it again.
-    let reloadTilt = 0;
-    let reloadDrop = 0;
-    if (now < this.reloadUntil) {
-      const progress = 1 - (this.reloadUntil - now) / this.reloadDuration;
-      const curve = Math.sin(progress * Math.PI);
-      reloadTilt = curve * 1.05;
-      reloadDrop = curve * 0.16;
-    }
-
-    this.currentRoot.position.set(
-      layout.position[0] + bobX,
-      layout.position[1] + bobY - reloadDrop,
-      layout.position[2] + this.kickZ,
-    );
-    this.currentRoot.rotation.set(
-      layout.rotation[0] + this.kickPitch + reloadTilt,
-      layout.rotation[1],
-      layout.rotation[2] + reloadTilt * 0.35,
-    );
   }
 
   dispose() {
@@ -433,65 +434,16 @@ export class WeaponViewmodels {
       tracer.line.geometry.dispose();
       tracer.line.material.dispose();
     }
-    this.tracers = [];
-  }
-}
-
-/**
- * Compact world-space weapon carried by remote players so everyone can see
- * which gun each operator has equipped. Reuses the same normalized models.
- */
-export class RemoteWeaponModels {
-  constructor() {
-    this.loader = new GLTFLoader();
-    this.sources = new Map();
-    this.loadPromise = null;
-  }
-
-  load() {
-    if (this.loadPromise) return this.loadPromise;
-    this.loadPromise = Promise.all(Object.entries(MODEL_FILES).map(async ([weaponId, url]) => {
-      try {
-        const gltf = await this.loader.loadAsync(url);
-        this.sources.set(weaponId, gltf.scene);
-      } catch (error) {
-        console.error(`[FPS GODS] Failed to load remote weapon model ${url}:`, error);
-      }
-    }));
-    return this.loadPromise;
-  }
-
-  build(weaponId) {
-    const definition = WEAPONS[weaponId];
-    if (!definition) return null;
-    const source = this.sources.get(weaponId);
-    const group = new THREE.Group();
-    if (source) {
-      const normalized = normalizeModel(source, 0.85);
-      group.add(normalized.model);
-    } else if (weaponId === 'shield') {
-      const panel = new THREE.Mesh(
-        new THREE.BoxGeometry(0.55, 0.8, 0.05),
-        new THREE.MeshStandardMaterial({ color: '#243248', roughness: 0.4, metalness: 0.7, transparent: true, opacity: 0.92 }),
-      );
-      panel.position.set(0.28, 0.15, -0.45);
-      group.add(panel);
-      return group;
-    } else if (weaponId === 'fist' || weaponId === 'smoke') {
-      return null; // fists and canisters read fine without a world prop
-    } else {
-      // Procedural stand-ins for the GODS TIER guns.
-      const body = new THREE.Mesh(
-        new THREE.BoxGeometry(0.1, 0.12, weaponId === 'railgun' ? 0.85 : 0.6),
-        new THREE.MeshStandardMaterial({ color: '#26334a', roughness: 0.4, metalness: 0.75 }),
-      );
-      body.position.z = -0.35;
-      group.add(body);
-      return group;
+    for (const record of this.smokeMeshes.values()) {
+      this.scene.remove(record.group);
+      for (const material of record.materials) material.dispose();
     }
-
-    // The normalized model already points down -Z, which is the direction a
-    // player with yaw = 0 faces — just dock it at the hands.
-    return group;
+    this.smokeMeshes.clear();
+    this.smokeGeometry.dispose();
+    for (const geometry of this.handGeometries) geometry.dispose();
+    for (const material of this.handMaterials) material.dispose();
+    this.flashMesh.geometry.dispose();
+    this.flashMaterial.dispose();
+    this.camera.remove(this.viewModel);
   }
 }

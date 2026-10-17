@@ -1,6 +1,5 @@
 // Shared gameplay constants are consumed by both the authoritative server and
 // the Three.js renderer so collision geometry always matches what players see.
-// Weapon statistics live in shared/weapons.js.
 export const MAP = Object.freeze({
   halfWidth: 30,
   halfDepth: 24,
@@ -21,19 +20,20 @@ export const PLAYER = Object.freeze({
   targetKills: 30,
   minPlayers: 2,
   maxPlayers: 16,
+  shotRange: 140,
   inputTimeoutMs: 300,
 });
 
-// Solo drop-in configuration. Bots are simulated entirely on the server and
-// share the same shoot/hit pipeline as human players.
-export const BOTS = Object.freeze({
+export const BOT = Object.freeze({
   count: 5,
-  tickMs: 100,
-  namePrefix: 'GOD_BOT_',
+  thinkIntervalMs: 100,
   missChance: 0.3,
-  turnSpeed: 7.5,
-  waypointTimeoutMs: 6_500,
-  fireRangeBuffer: 0.9,
+  minimumMissAngleRadians: 0.28,
+  maximumMissAngleRadians: 0.48,
+  waypointReachDistance: 1.5,
+  minimumWaypointTimeMs: 2_500,
+  maximumWaypointTimeMs: 7_000,
+  stuckThinkCount: 12,
 });
 
 // Twelve solid waist-to-head-high cover blocks. Each is an AABB in X/Z with
@@ -63,24 +63,4 @@ export const SPAWN_POINTS = Object.freeze([
   Object.freeze({ x: 0, z: 20 }),
   Object.freeze({ x: -25, z: 19 }),
   Object.freeze({ x: -26, z: 0 }),
-]);
-
-// Open patrol waypoints for bot pathing: lane midpoints between the covers.
-export const BOT_WAYPOINTS = Object.freeze([
-  Object.freeze({ x: -24, z: -16 }),
-  Object.freeze({ x: -11, z: -17 }),
-  Object.freeze({ x: 0, z: -8 }),
-  Object.freeze({ x: 13, z: -17 }),
-  Object.freeze({ x: 24, z: -12 }),
-  Object.freeze({ x: 22, z: -2 }),
-  Object.freeze({ x: 11, z: 6 }),
-  Object.freeze({ x: 0, z: 8 }),
-  Object.freeze({ x: -11, z: 6 }),
-  Object.freeze({ x: -24, z: 2 }),
-  Object.freeze({ x: -14, z: 15 }),
-  Object.freeze({ x: -2, z: 17 }),
-  Object.freeze({ x: 13, z: 16 }),
-  Object.freeze({ x: 24, z: 10 }),
-  Object.freeze({ x: -27, z: -8 }),
-  Object.freeze({ x: 27, z: 8 }),
 ]);

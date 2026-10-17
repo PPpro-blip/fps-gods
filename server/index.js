@@ -3,11 +3,11 @@ import { createServer } from 'node:http';
 import { pathToFileURL } from 'node:url';
 import express from 'express';
 import { Server } from 'socket.io';
-import { EVENTS, ROOM_STATES, ROOM_TYPES } from '../shared/events.js';
+import { EVENTS, ROOM_STATES } from '../shared/events.js';
 import { PLAYER } from '../shared/gameConfig.js';
 import { GameState } from './gameState.js';
-import { RoomManager } from './rooms.js';
-import { socketCorsOptions } from './origins.js';
+import { PlayerProfileStore } from './profiles.js';
+import { ROOM_RECONNECT_GRACE_MS, RoomManager } from './rooms.js';
 
 // Fixed 20 Hz simulation and state broadcast. The server derives its own delta
 // time and caps long pauses so clients can never supply movement speed or dt.
@@ -18,7 +18,8 @@ const TICK_RATE_MS = 50;
  * port. Exported so deployment/integration tests can boot the real server on an
  * ephemeral port and shut the simulation timer down again.
  */
-export function createGameServer() {
+export function createGameServer(options = {}) {
+  const profileStore = options.profileStore ?? new PlayerProfileStore(options.profileStorePath);
   const app = express();
   app.disable('x-powered-by');
   app.get('/health', (_request, response) => {
@@ -27,45 +28,62 @@ export function createGameServer() {
 
   const httpServer = createServer(app);
   const io = new Server(httpServer, {
-    // Wildcard origin: any deployment of the static client can connect. This is
-    // what keeps fps-gods.vercel.app (and previews) off the CONNECTION LOST
-    // screen; the real safety net is that every gameplay rule runs here.
-    cors: socketCorsOptions(),
+    cors: {
+      origin: '*',
+      methods: ['GET', 'POST'],
+    },
     pingInterval: 25_000,
     pingTimeout: 20_000,
     maxHttpBufferSize: 16_384,
+    connectionStateRecovery: {
+      maxDisconnectionDuration: ROOM_RECONNECT_GRACE_MS,
+      skipMiddlewares: true,
+    },
   });
-  const roomManager = new RoomManager(io);
+  const roomManager = new RoomManager(io, profileStore);
 
-  function beginMatch(room) {
+  function launchRoom(room) {
     const now = Date.now();
     room.game = new GameState(room, {
       emitRoom: (event, data) => io.to(room.code).emit(event, data),
       emitPlayer: (playerId, event, data) => io.to(playerId).emit(event, data),
+      onHumanKill: (player) => profileStore.recordLifetimeKill(player.profileId),
     }, now);
     io.to(room.code).emit(EVENTS.GAME_START, {
       code: room.code,
-      type: room.type,
+      mode: room.mode,
       targetKills: PLAYER.targetKills,
-      playerCount: room.players.size,
+      playerCount: room.game.players.size,
     });
     roomManager.broadcastRoomState(room);
   }
 
   // Socket handlers validate room membership before any input can reach a game.
   io.on('connection', (socket) => {
+    if (socket.recovered && socket.data.roomCode && !roomManager.recoverSocket(socket)) {
+      socket.emit(EVENTS.ROOM_RESUME_FAILED, { message: 'That room session has expired. Join the room again with its code.' });
+    }
+
+    socket.on(EVENTS.ROOM_RESUME, (payload = {}) => {
+      roomManager.resumeRoom(socket, payload);
+    });
+
+    socket.on(EVENTS.LEAVE_ROOM, () => {
+      roomManager.leaveRoom(socket);
+    });
+
+    socket.on(EVENTS.PROFILE_REQUEST, (payload = {}) => {
+      const profile = profileStore.getOrCreate(payload.profileId, payload.callsign ?? payload.name);
+      socket.data.profileId = profile.profileId;
+      socket.emit(EVENTS.PROFILE_UPDATE, profile);
+    });
+
     socket.on(EVENTS.CREATE_ROOM, (payload = {}) => {
-      roomManager.createRoom(socket, payload.name, payload.bundle, payload.lifetimeKills);
+      roomManager.createRoom(socket, payload.name, payload);
     });
 
     socket.on(EVENTS.JOIN_ROOM, (payload = {}) => {
-      roomManager.joinRoom(socket, payload.code, payload.name, payload.bundle, payload.lifetimeKills);
-    });
-
-    socket.on(EVENTS.PLAY_SOLO, (payload = {}) => {
-      const result = roomManager.playSolo(socket, payload.name, payload.bundle, payload.lifetimeKills);
-      if (!result) return;
-      beginMatch(result.room);
+      roomManager.joinRoom(socket, payload.code, payload.name, payload);
     });
 
     socket.on(EVENTS.PLAYER_READY, (payload = {}) => {
@@ -78,7 +96,13 @@ export function createGameServer() {
         roomManager.emitError(socket, result.error);
         return;
       }
-      beginMatch(result.room);
+
+      launchRoom(result.room);
+    });
+
+    socket.on(EVENTS.PLAY_NOW, (payload = {}) => {
+      const room = roomManager.createSoloBotsRoom(socket, payload.name, payload);
+      if (room) launchRoom(room);
     });
 
     socket.on(EVENTS.PLAYER_INPUT, (payload) => {
@@ -96,11 +120,9 @@ export function createGameServer() {
       if (room?.state === ROOM_STATES.PLAYING) room.game?.reload(socket.id, Date.now());
     });
 
-    socket.on(EVENTS.SWITCH_WEAPON, (payload = {}) => {
+    socket.on(EVENTS.WEAPON_SWITCH, (payload = {}) => {
       const room = roomManager.getRoomForSocket(socket);
-      if (room?.state === ROOM_STATES.PLAYING) {
-        room.game?.switchWeapon(socket.id, Number(payload.slot), Date.now());
-      }
+      if (room?.state === ROOM_STATES.PLAYING) room.game?.switchWeapon(socket.id, payload.weaponId, Date.now());
     });
 
     socket.on(EVENTS.RETURN_TO_LOBBY, () => {
@@ -113,10 +135,15 @@ export function createGameServer() {
   });
 
   let lastTick = Date.now();
+  let lastRoomCleanup = 0;
   const simulationTimer = setInterval(() => {
     const now = Date.now();
     const delta = Math.min((now - lastTick) / 1_000, 0.1);
     lastTick = now;
+    if (now - lastRoomCleanup >= 1_000) {
+      roomManager.expireDisconnectedPlayers(now);
+      lastRoomCleanup = now;
+    }
 
     for (const room of roomManager.rooms.values()) {
       if (room.state !== ROOM_STATES.PLAYING || !room.game) continue;

@@ -1,47 +1,37 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
-import { EVENTS, ROOM_STATES, ROOM_TYPES } from '../shared/events.js';
-import { BOTS, PLAYER } from '../shared/gameConfig.js';
+import { EVENTS, ROOM_MODES, ROOM_STATES } from '../shared/events.js';
+import { BUNDLE_UNLOCK_KILLS } from '../shared/bundles.js';
+import { BOT, PLAYER } from '../shared/gameConfig.js';
+import { BUNDLE_LOADOUTS, WEAPONS } from '../server/weaponConfig.js';
+import { createMemoryProfileStore, PlayerProfileStore } from '../server/profiles.js';
 import { GameState } from '../server/gameState.js';
-import { castShot, hasLineOfSight } from '../server/hitDetection.js';
-import { RoomManager } from '../server/rooms.js';
+import { castShot } from '../server/hitDetection.js';
+import { ROOM_RECONNECT_GRACE_MS, RoomManager } from '../server/rooms.js';
 
-function makeRoom({ bots = 0, code = 'ABC234' } = {}) {
-  const players = new Map([
-    ['alpha', {
-      id: 'alpha', name: 'Alpha', color: '#57d6ff', ready: true, connectedAt: 1,
-      isBot: false, bundleId: 'ghost',
-    }],
-    ['bravo', {
-      id: 'bravo', name: 'Bravo', color: '#ff657a', ready: true, connectedAt: 2,
-      isBot: false, bundleId: 'ghost',
-    }],
-  ]);
-  for (let index = 0; index < bots; index += 1) {
-    const id = `bot-${index + 1}`;
-    players.set(id, {
-      id,
-      name: `${BOTS.namePrefix}${String(index + 1).padStart(2, '0')}`,
-      color: '#ffc857',
-      ready: true,
-      connectedAt: 3 + index,
-      isBot: true,
-      bundleId: 'ghost',
-    });
-  }
+function makeRoom() {
   return {
-    code,
-    type: bots > 0 ? ROOM_TYPES.SOLO_VS_BOTS : ROOM_TYPES.MULTIPLAYER,
+    code: 'ABC234',
     state: ROOM_STATES.PLAYING,
-    players,
+    players: new Map([
+      ['alpha', { id: 'alpha', name: 'Alpha', color: '#57d6ff', ready: true, bundleId: 'GHOST', profileId: 'profile-alpha', connectedAt: 1 }],
+      ['bravo', { id: 'bravo', name: 'Bravo', color: '#ff657a', ready: true, bundleId: 'GHOST', profileId: 'profile-bravo', connectedAt: 2 }],
+    ]),
   };
 }
 
-function makeGame(now = 1_000_000, options = {}) {
+function makeGame(now = 1_000_000, shooterBundle = 'GHOST', targetBundle = 'GHOST', onHumanKill = () => null) {
+  const room = makeRoom();
+  room.players.get('alpha').bundleId = shooterBundle;
+  room.players.get('bravo').bundleId = targetBundle;
   const emitted = [];
-  const game = new GameState(makeRoom(options), {
+  const game = new GameState(room, {
     emitRoom: (event, data) => emitted.push({ channel: 'room', event, data }),
     emitPlayer: (id, event, data) => emitted.push({ channel: id, event, data }),
+    onHumanKill,
   }, now);
   const [shooter, target] = [...game.players.values()];
   shooter.x = 0;
@@ -49,7 +39,6 @@ function makeGame(now = 1_000_000, options = {}) {
   shooter.z = 0;
   shooter.yaw = 0;
   shooter.pitch = 0;
-  shooter.spawnProtectionUntil = now - 1;
   target.x = 0;
   target.y = 0;
   target.z = -5;
@@ -85,13 +74,13 @@ test('rooms issue unique six-character codes and keep room broadcasts isolated',
   const hostA = new FakeSocket('host-a');
   const hostB = new FakeSocket('host-b');
   const guestA = new FakeSocket('guest-a');
-  const first = rooms.createRoom(hostA, 'Alpha', 'rusher');
-  const second = rooms.createRoom(hostB, 'Bravo', 'ghost');
+  const first = rooms.createRoom(hostA, 'Alpha');
+  const second = rooms.createRoom(hostB, 'Bravo');
 
   assert.match(first.code, /^[A-Z2-9]{6}$/);
   assert.notEqual(first.code, second.code);
   assert.deepEqual(hostA.joined, [first.code]);
-  rooms.joinRoom(guestA, first.code, 'Guest', 'heavy');
+  rooms.joinRoom(guestA, first.code, 'Guest');
   assert.equal(first.players.size, 2);
   assert.ok(io.events.filter((event) => event.room === first.code).every((event) => event.event === EVENTS.ROOM_STATE));
   assert.equal(io.events.some((event) => event.room === second.code && event.data.players.some((player) => player.id === 'guest-a')), false);
@@ -103,40 +92,21 @@ test('rooms issue unique six-character codes and keep room broadcasts isolated',
   assert.equal(rooms.startGame(hostB).error, 'At least two players are needed to start.');
 });
 
-test('PLAY NOW drops into a private SOLO_VS_BOTS room with five named bots', () => {
+test('disconnected lobby players reserve their room briefly before cleanup', () => {
   const io = new FakeIO();
   const rooms = new RoomManager(io);
-  const solo = new FakeSocket('solo-hero');
-  const result = rooms.playSolo(solo, 'Ranger', 'rusher', 12);
-  const room = result.room;
+  const host = new FakeSocket('reconnecting-host');
+  const room = rooms.createRoom(host, 'ReconnectHost');
+  const session = host.events.find((event) => event.event === EVENTS.ROOM_SESSION)?.data;
+  assert.ok(session?.resumeToken);
 
-  assert.equal(room.type, ROOM_TYPES.SOLO_VS_BOTS);
-  assert.equal(room.state, ROOM_STATES.PLAYING);
-  assert.equal(room.players.size, 1 + BOTS.count);
-
-  const bots = [...room.players.values()].filter((player) => player.isBot);
-  assert.equal(bots.length, 5);
-  assert.deepEqual(bots.map((bot) => bot.name), [
-    'GOD_BOT_01', 'GOD_BOT_02', 'GOD_BOT_03', 'GOD_BOT_04', 'GOD_BOT_05',
-  ]);
-
-  // Solo matches are private: nobody can join with the code.
-  const intruder = new FakeSocket('intruder');
-  rooms.joinRoom(intruder, room.code, 'Sneak', 'rusher');
-  assert.ok(intruder.events.some((event) => event.event === EVENTS.ROOM_ERROR));
-});
-
-test('GODS TIER is rejected below 30 lifetime kills and accepted after', () => {
-  const io = new FakeIO();
-  const rooms = new RoomManager(io);
-  const poor = new FakeSocket('poor');
-  rooms.createRoom(poor, 'Newblood', 'gods', 29);
-  assert.ok(poor.events.some((event) => event.event === EVENTS.ROOM_ERROR));
-  assert.equal(rooms.rooms.size, 0);
-
-  const rich = new FakeSocket('rich');
-  const room = rooms.createRoom(rich, 'Veteran', 'gods', 30);
-  assert.equal(room.players.get('rich').bundleId, 'gods');
+  rooms.handleDisconnect(host, 10_000);
+  assert.equal(room.players.get(host.id).connected, false);
+  assert.equal(rooms.rooms.get(room.code), room);
+  rooms.expireDisconnectedPlayers(10_000 + ROOM_RECONNECT_GRACE_MS);
+  assert.equal(rooms.rooms.get(room.code), room, 'the resume window includes the exact grace boundary');
+  rooms.expireDisconnectedPlayers(10_001 + ROOM_RECONNECT_GRACE_MS);
+  assert.equal(rooms.rooms.has(room.code), false);
 });
 
 test('server input is bounded and movement is simulated with server time', () => {
@@ -155,9 +125,8 @@ test('server input is bounded and movement is simulated with server time', () =>
   assert.notEqual(shooter.z, previousZ);
 });
 
-test('pistol headshots deal 50, a kill scores on the server, and respawn restores protection', () => {
+test('headshots deal 50 damage, a kill scores on the server, and respawn restores protection', () => {
   const { game, shooter, target, emitted, now } = makeGame();
-  assert.equal(game.getActiveSlot(shooter).weaponId, 'pistol');
   game.shoot(shooter.id, now + 10);
   assert.equal(target.health, 50);
   assert.equal(emitted.find((event) => event.event === EVENTS.HIT_CONFIRMED)?.data.headshot, true);
@@ -179,7 +148,7 @@ test('pistol headshots deal 50, a kill scores on the server, and respawn restore
   assert.equal(target.spawnProtectionUntil, respawnDeadline + 2_000);
 });
 
-test('body shots deal 25 and spawn protection absorbs the first volley', () => {
+test('spawn protection blocks damage and four confirmed body hits eliminate a player', () => {
   const { game, shooter, target, emitted, now } = makeGame();
   target.spawnProtectionUntil = now + 2_000;
   game.shoot(shooter.id, now + 10);
@@ -202,7 +171,7 @@ test('the thirtieth kill marks the game finished and awards a winner', () => {
   target.health = 25;
   game.shoot(shooter.id, now + 10);
   assert.equal(game.finished, true);
-  assert.deepEqual(game.winner, { id: shooter.id, name: shooter.name, kills: 30, isBot: false });
+  assert.deepEqual(game.winner, { id: shooter.id, name: shooter.name, kills: 30 });
   assert.deepEqual(game.update(0.05, now + 50), { winner: game.winner });
 });
 
@@ -240,278 +209,356 @@ test('raycast distinguishes head/body damage zones and blocks shots through cove
   assert.equal(blocked, null);
 });
 
-test('the railgun pierces walls and players along the beam', () => {
-  const { game, shooter, target, emitted, now } = makeGame();
-  shooter.bundleId = 'gods';
-  shooter.slots = [
-    { weaponId: 'railgun', ammo: 4, reloadUntil: null, nextShotAt: now },
-    { weaponId: 'minigun', ammo: Infinity, reloadUntil: null, nextShotAt: now },
-    { weaponId: 'fist', ammo: 0, reloadUntil: null, nextShotAt: now },
-  ];
-  shooter.x = -17;
-  shooter.pitch = -0.05;
-  target.x = -17;
-  target.z = -18;
-  game.shoot(shooter.id, now + 10);
-
-  const hit = emitted.find((event) => event.event === EVENTS.HIT_CONFIRMED && event.channel === shooter.id)?.data;
-  assert.equal(hit.hit, true);
-  assert.equal(hit.targetId, target.id);
-  assert.equal(hit.headshot, false);
-  assert.equal(target.health, 100 - 85, 'cover no longer stops the beam');
-});
-
-test('sniper headshots kill instantly and body shots leave 40 hp', () => {
-  const { game, shooter, target, now } = makeGame();
-  game.switchWeapon(shooter.id, 1, now); // ghost: pistol → sniper
-  assert.equal(game.getActiveSlot(shooter).weaponId, 'sniper');
-
-  game.shoot(shooter.id, now + 10);
-  assert.equal(target.alive, false, 'sniper headshot is a one-shot');
-  assert.equal(shooter.kills, 1);
-
-  const respawnAt = target.respawnAt;
-  game.update(0.05, respawnAt);
-  target.x = 0;
-  target.y = 0;
-  target.z = -5;
-  target.spawnProtectionUntil = now - 1;
-  shooter.pitch = -0.105;
-  game.shoot(shooter.id, respawnAt + 1_400);
-  assert.equal(target.health, 100 - 60, 'sniper body shot deals 60');
-});
-
-test('the knife is an instant-kill melee and the god fist knocks back', () => {
-  const { game, shooter, target, now } = makeGame();
-  shooter.bundleId = 'rusher';
-  shooter.slots = [
-    { weaponId: 'smg', ammo: 30, reloadUntil: null, nextShotAt: now },
-    { weaponId: 'shotgun', ammo: 6, reloadUntil: null, nextShotAt: now },
-    { weaponId: 'knife', ammo: 0, reloadUntil: null, nextShotAt: now },
-  ];
-  game.switchWeapon(shooter.id, 2, now);
-  target.z = -1.6;
-  game.shoot(shooter.id, now + 10);
-  assert.equal(target.alive, false, 'knife is instant kill');
-  assert.equal(shooter.kills, 1);
-
-  const respawnAt = target.respawnAt;
-  game.update(0.05, respawnAt);
-  target.spawnProtectionUntil = now - 1;
-  shooter.bundleId = 'gods';
-  shooter.slots = [
-    { weaponId: 'railgun', ammo: 4, reloadUntil: null, nextShotAt: now },
-    { weaponId: 'minigun', ammo: Infinity, reloadUntil: null, nextShotAt: now },
-    { weaponId: 'fist', ammo: 0, reloadUntil: null, nextShotAt: now },
-  ];
-  game.switchWeapon(shooter.id, 2, respawnAt);
-  shooter.x = 0;
-  shooter.z = 0;
-  target.x = 0;
-  target.z = -1.8;
-  game.shoot(shooter.id, respawnAt + 500);
-  assert.equal(target.alive, false, 'god fist is instant kill');
-  assert.notEqual(target.z, -1.8, 'huge knockback displaces the victim');
-  assert.ok(Math.abs(target.z) > 5, 'the body flies across the arena');
-});
-
-test('rockets splash anyone near the blast, including bystanders', () => {
-  const { game, shooter, target, emitted, now } = makeGame();
-  shooter.bundleId = 'heavy';
-  shooter.slots = [
-    { weaponId: 'lmg', ammo: 60, reloadUntil: null, nextShotAt: now },
-    { weaponId: 'rocket', ammo: 2, reloadUntil: null, nextShotAt: now },
-    { weaponId: 'shield', ammo: 0, reloadUntil: null, nextShotAt: now },
-  ];
-  game.switchWeapon(shooter.id, 1, now);
-
-  const bystander = {
-    id: 'bystander', name: 'Bystander', color: '#6be6a8', ready: true, connectedAt: 4,
-    isBot: false, bundleId: 'heavy',
+test('SOLO_VS_BOTS creates five named bots and runs their movement brain at 10 Hz', () => {
+  const now = 1_000_000;
+  const room = {
+    code: 'BOT234',
+    state: ROOM_STATES.PLAYING,
+    mode: ROOM_MODES.SOLO_VS_BOTS,
+    players: new Map([
+      ['human', { id: 'human', name: 'Human', color: '#57d6ff', ready: true, connectedAt: 1 }],
+    ]),
   };
-  game.players.set('bystander', {
-    ...bystander,
-    ...{
-      x: 1.6, y: 0, z: -4, vx: 0, vy: 0, vz: 0, yaw: 0, pitch: 0,
-      health: PLAYER.maxHealth, kills: 0, deaths: 0, alive: true, grounded: true,
-      input: { forward: 0, strafe: 0, jump: false }, lastInputAt: now, lastInputSequence: -1,
-      wasJumping: false, spawnProtectionUntil: now - 1, respawnAt: null,
-      slot: 0,
-      slots: [
-        { weaponId: 'lmg', ammo: 60, reloadUntil: null, nextShotAt: now },
-        { weaponId: 'rocket', ammo: 2, reloadUntil: null, nextShotAt: now },
-        { weaponId: 'shield', ammo: 0, reloadUntil: null, nextShotAt: now },
-      ],
-      heat: 0, overheatedUntil: null, lastHeatShotAt: 0,
-    },
-  });
+  const game = new GameState(room, { emitRoom() {}, emitPlayer() {} }, now);
+  const human = game.players.get('human');
+  const bots = [...game.players.values()].filter((player) => player.isBot);
+  const bot = bots[0];
 
-  game.shoot(shooter.id, now + 10);
-  assert.equal(game.projectiles.length, 1, 'rocket flies as a server projectile');
-
-  let time = now + 60;
-  for (let step = 0; step < 20 && game.projectiles.length > 0; step += 1) {
-    time += 50;
-    game.update(0.05, time);
-  }
-  assert.equal(game.projectiles.length, 0, 'rocket detonates on contact');
-  assert.ok(target.health < 100, 'direct target takes splash damage');
-  assert.ok(game.players.get('bystander').health < 100, 'bystander takes falloff damage');
-  assert.ok(emitted.some((event) => event.event === EVENTS.HIT_CONFIRMED && event.data.splash));
-});
-
-test('the combat shield blocks frontal hitscan but not back shots', () => {
-  const { game, shooter, target, emitted, now } = makeGame();
-  target.bundleId = 'heavy';
-  target.slots = [
-    { weaponId: 'lmg', ammo: 60, reloadUntil: null, nextShotAt: now },
-    { weaponId: 'rocket', ammo: 2, reloadUntil: null, nextShotAt: now },
-    { weaponId: 'shield', ammo: 0, reloadUntil: null, nextShotAt: now },
-  ];
-  game.switchWeapon(target.id, 2, now);
-  assert.equal(game.getPublicState(now).players.find((p) => p.id === target.id).shieldActive, true);
-
-  // Target at z=-5, shooter at the origin: facing +Z (yaw = π) is "frontal".
-  target.yaw = Math.PI;
-  game.shoot(shooter.id, now + 10);
-  assert.equal(target.health, 100, 'frontal hitscan is blocked');
-  assert.ok(
-    emitted.some((event) => event.event === EVENTS.HIT_CONFIRMED && event.data.blocked === true),
-    'the shooter sees a BLOCKED marker',
+  assert.equal(BOT.count, 5);
+  assert.equal(bots.length, 5);
+  assert.deepEqual(
+    bots.map((player) => player.name),
+    ['GOD_BOT_01', 'GOD_BOT_02', 'GOD_BOT_03', 'GOD_BOT_04', 'GOD_BOT_05'],
   );
 
-  target.yaw = 0; // turned around, shield useless
-  shooter.pitch = -0.105;
-  game.getActiveSlot(shooter).nextShotAt = now + 160;
-  game.shoot(shooter.id, now + 170);
-  assert.equal(target.health, 75, 'back shots land');
+  human.x = 0;
+  human.z = -10;
+  bot.x = 0;
+  bot.y = 0;
+  bot.z = 0;
+  bot.yaw = 0;
+  bot.botBrain.waypoint = { x: -8, z: 0 };
+  bot.botBrain.nextWaypointAt = now + 10_000;
+
+  game.update(0.05, now + 50);
+  assert.equal(game.lastBotThinkAt, now, 'bots do not think on the 20 Hz simulation half-tick');
+  game.update(0.05, now + 100);
+  assert.equal(game.lastBotThinkAt, now + 100);
+  assert.ok(Math.abs(bot.yaw) < 0.001, 'the bot faces its nearest human');
+  assert.ok(bot.input.strafe < 0, 'the bot strafes toward its patrol waypoint while aiming');
+  assert.ok(bot.x < 0, 'the bot moves toward the selected waypoint');
 });
 
-test('the minigun overheats after 5 seconds of continuous fire', () => {
-  const { game, shooter, now } = makeGame();
-  shooter.bundleId = 'gods';
-  shooter.slots = [
-    { weaponId: 'railgun', ammo: 4, reloadUntil: null, nextShotAt: now },
-    { weaponId: 'minigun', ammo: Infinity, reloadUntil: null, nextShotAt: now },
-    { weaponId: 'fist', ammo: 0, reloadUntil: null, nextShotAt: now },
-  ];
-  game.switchWeapon(shooter.id, 1, now);
-
-  for (let elapsed = 10; elapsed <= 7_000; elapsed += 55) {
-    game.shoot(shooter.id, now + elapsed);
-  }
-  assert.ok(shooter.overheatedUntil !== null, 'barrel eventually overheats');
-  assert.ok(shooter.overheatedUntil > now + 7_000, 'cooldown outlasts the test window');
-
-  const blockedAt = now + 7_100;
-  game.getActiveSlot(shooter).nextShotAt = now;
-  game.shoot(shooter.id, blockedAt);
-  assert.equal(game.getActiveSlot(shooter).nextShotAt, now, 'no shots while overheated');
-});
-
-test('weapon switches sync the active weapon into the public state', () => {
-  const { game, shooter, now } = makeGame();
-  game.switchWeapon(shooter.id, 1, now);
-  const state = game.getPublicState(now);
-  const me = state.players.find((player) => player.id === shooter.id);
-  assert.equal(me.weaponId, 'sniper');
-  assert.equal(me.slot, 1);
-  assert.equal(me.bundleId, 'ghost');
-
-  game.switchWeapon(shooter.id, 99, now + 1);
-  assert.equal(game.getActiveSlot(shooter).weaponId, 'sniper', 'out-of-range slots are ignored');
-});
-
-test('the pistol empties its magazine and reloads server-side', () => {
-  const { game, shooter, target, now } = makeGame();
-  shooter.pitch = -0.105;
-  target.health = 1_000_000;
-  target.maxHealth = 1_000_000;
-  for (let shot = 0; shot < 12; shot += 1) {
-    game.shoot(shooter.id, now + 10 + shot * 160);
-  }
-  const slot = game.getActiveSlot(shooter);
-  assert.equal(slot.ammo, 0);
-  assert.ok(slot.reloadUntil !== null, 'empty mag triggers the reload');
-
-  game.update(0.05, slot.reloadUntil);
-  assert.equal(slot.ammo, 12, 'reload restores the magazine');
-});
-
-test('smoke grenades deploy a server cloud that blocks line of sight', () => {
-  const { game, shooter, now } = makeGame();
-  game.switchWeapon(shooter.id, 2, now); // smoke
-  shooter.pitch = -0.12;
-  game.shoot(shooter.id, now + 10);
-  assert.equal(game.projectiles.length, 1);
-
-  let time = now + 60;
-  for (let step = 0; step < 30 && game.projectiles.length > 0; step += 1) {
-    time += 50;
-    game.update(0.05, time);
-  }
-  assert.equal(game.smokes.length, 1, 'grenade lands and deploys smoke');
-  assert.ok(game.smokes[0].radius > 3);
-
-  const eye = { x: 0, y: 1.53, z: 0 };
-  const far = { x: 0, y: 1.53, z: -20 };
-  assert.equal(hasLineOfSight(eye, far, []), true);
-  game.smokes[0].x = 0;
-  game.smokes[0].z = -10;
-  game.smokes[0].y = 1.4;
-  assert.equal(hasLineOfSight(eye, far, game.smokes), false, 'smoke blinds the sightline');
-
-  game.update(0.05, game.smokes[0].expiresAt + 1);
-  assert.equal(game.smokes.length, 0, 'clouds expire');
-});
-
-test('bots path, face the nearest human and fire through the shared shoot pipeline', () => {
-  const { game, shooter, target, emitted, now } = makeGame(1_000_000, { bots: 2 });
-  const bots = [...game.players.values()].filter((player) => player.isBot);
-  assert.equal(bots.length, 2);
-  assert.ok(game.bots, 'bot controller exists');
-
-  const bot = bots[0];
-  bot.x = 4.2;
-  bot.z = -2.2;
-  bot.spawnProtectionUntil = now - 1;
-  shooter.alive = false; // only 'bravo' (target) is a live human
-  target.spawnProtectionUntil = now - 1;
+test('bot shots use the player hit pipeline and introduce a random offset on 30 percent of shots', () => {
+  const now = 1_000_000;
+  const room = {
+    code: 'BOT234',
+    state: ROOM_STATES.PLAYING,
+    mode: ROOM_MODES.SOLO_VS_BOTS,
+    players: new Map([
+      ['human', { id: 'human', name: 'Human', color: '#57d6ff', ready: true, connectedAt: 1 }],
+    ]),
+  };
+  const emitted = [];
+  const game = new GameState(room, {
+    emitRoom: (event, data) => emitted.push({ channel: 'room', event, data }),
+    emitPlayer: (id, event, data) => emitted.push({ channel: id, event, data }),
+  }, now);
+  const human = game.players.get('human');
+  const [bot] = [...game.players.values()].filter((player) => player.isBot);
+  bot.x = 0;
+  bot.y = 0;
+  bot.z = 0;
+  bot.yaw = 0;
+  bot.pitch = 0;
+  human.x = 0;
+  human.y = 0;
+  human.z = -5;
+  human.spawnProtectionUntil = now - 1;
+  human.health = 1;
 
   const originalRandom = Math.random;
-  Math.random = () => 0.9; // never the 30% deliberate miss
   try {
-    for (let tick = 0; tick < 30; tick += 1) {
-      game.update(0.1, now + tick * 100);
-    }
+    Math.random = () => 0.5;
+    game.shoot(bot.id, now + 1);
   } finally {
     Math.random = originalRandom;
   }
+  assert.equal(human.alive, false);
+  assert.equal(bot.kills, 1);
+  assert.ok(emitted.some((event) => event.channel === bot.id && event.event === EVENTS.HIT_CONFIRMED));
+  const kill = emitted.find((event) => event.event === EVENTS.KILL_FEED_UPDATE);
+  assert.equal(kill?.data.killerName, 'GOD_BOT_01');
+  assert.equal(game.getScoreboard().find((player) => player.id === bot.id)?.isBot, true);
 
-  assert.notEqual(bot.yaw, 0, 'bot rotates toward the human');
-  assert.ok(
-    Math.abs(bot.input.forward) > 0 || Math.abs(bot.input.strafe) > 0,
-    'bot walks its waypoints',
-  );
-  assert.ok(
-    emitted.some((event) => event.event === EVENTS.HIT_CONFIRMED && event.channel === bot.id && event.data.hit),
-    'bot damage flows through HIT_CONFIRMED like a human',
-  );
-  assert.equal(target.alive, false, 'bot guns down the stationary human');
-  const scoreboard = game.getScoreboard();
-  const botRows = scoreboard.filter((row) => row.isBot);
-  assert.equal(botRows.length, 2);
-  assert.ok(botRows.reduce((sum, row) => sum + row.kills, 0) >= 1, 'bots score the kill');
+  const missGame = new GameState(room, { emitRoom() {}, emitPlayer() {} }, now);
+  const missHuman = missGame.players.get('human');
+  const missBot = [...missGame.players.values()].find((player) => player.isBot);
+  missBot.x = 0;
+  missBot.y = 0;
+  missBot.z = 0;
+  missBot.yaw = 0;
+  missBot.pitch = 0;
+  missHuman.x = 0;
+  missHuman.y = 0;
+  missHuman.z = -5;
+  missHuman.spawnProtectionUntil = now - 1;
+  const randomValues = [0.1, 0.1, 0.5];
+  try {
+    Math.random = () => randomValues.shift() ?? 0.5;
+    missGame.shoot(missBot.id, now + 1);
+  } finally {
+    Math.random = originalRandom;
+  }
+  assert.equal(missHuman.health, 100, 'the randomly offset shot misses the target');
 });
 
-test('bots respawn after three seconds like real players', () => {
-  const { game, target, now } = makeGame(1_000_000, { bots: 1 });
+test('bots respawn three seconds after being eliminated', () => {
+  const now = 1_000_000;
+  const room = {
+    code: 'BOT234',
+    state: ROOM_STATES.PLAYING,
+    mode: ROOM_MODES.SOLO_VS_BOTS,
+    players: new Map([
+      ['human', { id: 'human', name: 'Human', color: '#57d6ff', ready: true, connectedAt: 1 }],
+    ]),
+  };
+  const game = new GameState(room, { emitRoom() {}, emitPlayer() {} }, now);
   const bot = [...game.players.values()].find((player) => player.isBot);
-  game.killPlayer(target, bot, false, now + 10, 'pistol');
-  assert.equal(bot.alive, false);
-  assert.equal(bot.respawnAt, now + 10 + 3_000);
+  bot.alive = false;
+  bot.health = 0;
+  bot.respawnAt = now + PLAYER.respawnMs;
 
+  game.update(0.05, bot.respawnAt - 1);
+  assert.equal(bot.alive, false);
   game.update(0.05, bot.respawnAt);
   assert.equal(bot.alive, true);
-  assert.equal(bot.health, PLAYER.maxHealth);
+  assert.equal(bot.health, 100);
+  assert.equal(bot.respawnAt, null);
+});
+
+test('each authoritative weapon defines all six server stats and the required magazine sizes', () => {
+  const requiredStats = ['damage', 'fireRate', 'magSize', 'reloadTime', 'range', 'spread'];
+  const allWeapons = Object.values(BUNDLE_LOADOUTS).flat();
+  assert.equal(allWeapons.length, 12);
+  for (const weapon of allWeapons) {
+    for (const stat of requiredStats) assert.equal(Number.isFinite(weapon[stat]), true, `${weapon.id}.${stat}`);
+  }
+  assert.equal(WEAPONS.SMG.magSize, 30);
+  assert.equal(WEAPONS.LMG.magSize, 60);
+  assert.equal(WEAPONS.PISTOL.tracer, false);
+  assert.equal(WEAPONS.SNIPER.headshotDamage, PLAYER.maxHealth);
+  assert.equal(WEAPONS.RAILGUN.piercesCover, true);
+  assert.equal(WEAPONS.MINIGUN.unlimitedAmmo, true);
+  assert.equal(WEAPONS.MINIGUN.overheatsAfterMs, 5_000);
+});
+
+test('weapon switching is limited to the selected bundle and synchronizes the active weapon', () => {
+  const now = 1_000_000;
+  const { game, shooter, emitted } = makeGame(now, 'RUSHER', 'GHOST');
+  assert.equal(shooter.currentWeaponId, 'SMG');
+  assert.equal(shooter.ammo, 30);
+  assert.equal(game.switchWeapon(shooter.id, 'SHOTGUN', now + 1), true);
+  assert.equal(shooter.currentWeaponId, 'SHOTGUN');
+  assert.equal(shooter.ammo, 6);
+  assert.equal(shooter.maxAmmo, 6);
+  assert.equal(game.switchWeapon(shooter.id, 'PISTOL', now + 2), false);
+  const update = emitted.find((event) => event.event === EVENTS.WEAPON_UPDATE);
+  assert.equal(update?.data.playerId, shooter.id);
+  assert.equal(update?.data.weaponId, 'SHOTGUN');
+  const publicPlayer = game.getPublicState(now + 3).players.find((player) => player.id === shooter.id);
+  assert.equal(publicPlayer?.currentWeaponId, 'SHOTGUN');
+  assert.equal(publicPlayer?.bundleId, 'RUSHER');
+});
+
+test('SMG fire rate and ammunition are enforced by the server', () => {
+  const now = 1_000_000;
+  const { game, shooter, target } = makeGame(now, 'RUSHER', 'GHOST');
+  target.spawnProtectionUntil = now - 1;
+  game.shoot(shooter.id, now + 1);
+  const ammoAfterFirstShot = shooter.ammo;
+  game.shoot(shooter.id, now + 50);
+  assert.equal(shooter.ammo, ammoAfterFirstShot, 'an early second shot is rejected');
+  game.shoot(shooter.id, now + 91);
+  assert.equal(shooter.ammo, ammoAfterFirstShot - 1);
+});
+
+test('railgun hitscan ignores arena cover while ordinary weapons remain blocked', () => {
+  const now = 1_000_000;
+  const { game, shooter, target } = makeGame(now, 'GODS_TIER', 'GHOST');
+  shooter.x = -17;
+  shooter.z = 0;
+  shooter.yaw = 0;
+  shooter.pitch = 0;
+  target.x = -17;
+  target.z = -18;
+  target.spawnProtectionUntil = now - 1;
+  assert.ok(game.cover.some((block) => block.id === 0));
+
+  game.shoot(shooter.id, now + 1);
+  assert.equal(target.alive, false);
+  assert.ok(game.cover.some((block) => block.id === 0), 'the railgun pierces but does not destroy cover');
+});
+
+test('rocket splash damages nearby players and destroys the first cover block it hits', () => {
+  const now = 1_000_000;
+  const { game, shooter, target, emitted } = makeGame(now, 'HEAVY', 'RUSHER');
+  shooter.x = -17;
+  shooter.z = 0;
+  shooter.yaw = 0;
+  shooter.pitch = 0;
+  target.x = -13;
+  target.z = -11;
+  target.spawnProtectionUntil = now - 1;
+  assert.ok(game.cover.some((block) => block.id === 0));
+  assert.equal(game.switchWeapon(shooter.id, 'ROCKET', now), true);
+
+  game.shoot(shooter.id, now + 1);
+  assert.equal(game.cover.some((block) => block.id === 0), false);
+  assert.ok(target.health < PLAYER.maxHealth, 'the explosion applies server-calculated splash damage');
+  assert.ok(emitted.some((event) => event.event === EVENTS.COVER_DESTROYED && event.data.blockId === 0));
+});
+
+test('combat shield blocks frontal damage and leaves its rear arc vulnerable', () => {
+  const now = 1_000_000;
+  const { game, shooter, target, emitted } = makeGame(now, 'GHOST', 'HEAVY');
+  shooter.x = 0;
+  shooter.z = -10;
+  shooter.yaw = Math.PI;
+  target.x = 0;
+  target.z = -5;
+  target.yaw = 0;
+  target.spawnProtectionUntil = now - 1;
+  assert.equal(game.switchWeapon(target.id, 'COMBAT_SHIELD', now), true);
+
+  game.shoot(shooter.id, now + 1);
+  assert.equal(target.health, PLAYER.maxHealth);
+  assert.ok(emitted.some((event) => event.event === EVENTS.HIT_CONFIRMED && event.data.blockedByShield));
+
+  target.yaw = Math.PI;
+  game.shoot(shooter.id, now + 151);
+  assert.equal(target.health, 50);
+});
+
+test('smoke grenade creates a vision-blocking cloud in the server hit pipeline', () => {
+  const now = 1_000_000;
+  const { game, shooter, target } = makeGame(now, 'GHOST', 'RUSHER');
+  shooter.x = 0;
+  shooter.z = 0;
+  shooter.yaw = 0;
+  shooter.pitch = 0;
+  target.x = 0;
+  target.z = -21.5;
+  target.spawnProtectionUntil = now - 1;
+  assert.equal(game.switchWeapon(shooter.id, 'SMOKE_GRENADE', now), true);
+
+  game.shoot(shooter.id, now + 1);
+  assert.equal(game.smokeClouds.length, 1);
+  const blocked = castShot({
+    origin: { x: shooter.x, y: shooter.y + 1.53, z: shooter.z },
+    direction: { x: 0, y: 0, z: -1 },
+    players: game.players,
+    shooterId: shooter.id,
+    maxDistance: 80,
+    cover: game.cover,
+    smokeClouds: game.smokeClouds,
+  });
+  assert.equal(blocked, null);
+});
+
+test('minigun has unlimited ammo and overheats after five seconds of continuous server fire', () => {
+  const now = 1_000_000;
+  const { game, shooter, target, emitted } = makeGame(now, 'GODS_TIER', 'GHOST');
+  target.x = 14;
+  target.z = -15;
+  assert.equal(game.switchWeapon(shooter.id, 'MINIGUN', now), true);
+  const firstShotAt = now + 1;
+  for (let at = firstShotAt; at < firstShotAt + 5_000; at += WEAPONS.MINIGUN.fireRate) {
+    game.shoot(shooter.id, at);
+  }
+  const overheatAt = firstShotAt + 5_000;
+  game.shoot(shooter.id, overheatAt);
+
+  assert.equal(shooter.weaponStates.MINIGUN.overheatedUntil, overheatAt + WEAPONS.MINIGUN.overheatCooldownMs);
+  assert.equal(shooter.unlimitedAmmo, true);
+  assert.equal(shooter.ammo, 0, 'unlimited ammunition does not use a magazine');
+  assert.ok(emitted.some((event) => event.event === EVENTS.WEAPON_OVERHEATED));
+});
+
+test('God Fist one-punch kills and applies a large knockback impulse', () => {
+  const now = 1_000_000;
+  const { game, shooter, target } = makeGame(now, 'GODS_TIER', 'RUSHER');
+  shooter.x = 0;
+  shooter.z = 0;
+  shooter.yaw = 0;
+  shooter.pitch = 0;
+  target.x = 0;
+  target.z = -2;
+  target.spawnProtectionUntil = now - 1;
+  assert.equal(game.switchWeapon(shooter.id, 'GOD_FIST', now), true);
+
+  game.shoot(shooter.id, now + 1);
+  assert.equal(target.alive, false);
+  assert.ok(Math.abs(target.knockbackVZ) >= 25);
+  const beforeKnockback = target.z;
+  game.update(0.05, now + 50);
+  assert.ok(target.z < beforeKnockback - 0.5, 'the server integrates the knockback impulse after the kill');
+});
+
+test('lifetime kills unlock GODS TIER at thirty and are advanced by server-confirmed kills', () => {
+  const profiles = createMemoryProfileStore();
+  profiles.getOrCreate('profile-alpha', 'Alpha');
+  const now = 1_000_000;
+  const { game, shooter, target } = makeGame(
+    now,
+    'GHOST',
+    'GHOST',
+    (player) => profiles.recordLifetimeKill(player.profileId),
+  );
+  target.health = 25;
+  target.spawnProtectionUntil = now - 1;
+  shooter.pitch = -0.105;
+  game.shoot(shooter.id, now + 1);
+  assert.equal(shooter.lifetimeKills, 1);
+  assert.equal(profiles.snapshot('profile-alpha').lifetimeKills, 1);
+
+  for (let kill = 1; kill < BUNDLE_UNLOCK_KILLS - 1; kill += 1) profiles.recordLifetimeKill('profile-alpha');
+  assert.equal(profiles.isBundleUnlocked('profile-alpha', 'GODS_TIER'), false);
+  profiles.recordLifetimeKill('profile-alpha');
+  assert.equal(profiles.snapshot('profile-alpha').lifetimeKills, BUNDLE_UNLOCK_KILLS);
+  assert.equal(profiles.isBundleUnlocked('profile-alpha', 'GODS_TIER'), true);
+});
+
+test('lifetime-kill profiles survive a server profile-store reload', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'fps-gods-profile-test-'));
+  const profilePath = join(directory, 'profiles.json');
+  try {
+    const firstStore = new PlayerProfileStore(profilePath);
+    firstStore.getOrCreate('profile-persistent', 'Persistent');
+    for (let kill = 0; kill < BUNDLE_UNLOCK_KILLS; kill += 1) firstStore.recordLifetimeKill('profile-persistent');
+
+    const reloadedStore = new PlayerProfileStore(profilePath);
+    assert.equal(reloadedStore.snapshot('profile-persistent').lifetimeKills, BUNDLE_UNLOCK_KILLS);
+    assert.equal(reloadedStore.isBundleUnlocked('profile-persistent', 'GODS_TIER'), true);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('room server rejects locked GODS TIER selection and accepts it after server profile progression', () => {
+  const io = new FakeIO();
+  const profiles = createMemoryProfileStore();
+  const rooms = new RoomManager(io, profiles);
+  const lockedPlayer = new FakeSocket('locked-player');
+  const selection = { profileId: 'profile-locked', bundleId: 'GODS_TIER' };
+
+  assert.equal(rooms.createRoom(lockedPlayer, 'Locked', selection), null);
+  assert.equal(rooms.rooms.size, 0);
+  assert.ok(lockedPlayer.events.some((event) => event.event === EVENTS.ROOM_ERROR));
+  for (let kill = 0; kill < BUNDLE_UNLOCK_KILLS; kill += 1) profiles.recordLifetimeKill('profile-locked');
+
+  const unlockedPlayer = new FakeSocket('unlocked-player');
+  const room = rooms.createRoom(unlockedPlayer, 'Unlocked', selection);
+  assert.equal(room.players.get(unlockedPlayer.id).bundleId, 'GODS_TIER');
+  assert.equal(io.events.at(-1).data.players[0].bundleId, 'GODS_TIER');
 });

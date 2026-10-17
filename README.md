@@ -1,6 +1,6 @@
 # FPS GODS
 
-A browser-based, server-authoritative 3D free-for-all FPS with instant solo bot matches, four weapon bundles, real GLB gun models, and a weapon wheel. Built with vanilla JavaScript, Three.js, Vite, Express, and Socket.IO — zero frameworks on the client.
+A browser-based, server-authoritative 3D free-for-all FPS built with vanilla JavaScript, Three.js, Vite, Express, and Socket.IO. Play instantly against server-driven bots or create/join a live multiplayer room. Choose one of four weapon bundles, use the supplied GLB weapon models, and race to 30 eliminations.
 
 ## Quick start
 
@@ -11,24 +11,19 @@ npm install
 npm run dev
 ```
 
-Open **http://localhost:5173**. `npm run dev` starts the Vite client and the Express/Socket.IO server together; the Vite dev server proxies Socket.IO traffic to port 3001. No environment file is needed for local play.
+Open **http://localhost:5173**. The development command starts the Vite client and the Express/Socket.IO server together; Vite proxies Socket.IO traffic to port 3001. No environment file is needed for local play.
 
 ```bash
-npm test        # 31 server/gameplay/weapons tests
+npm test        # Node test suite, including live two-client multiplayer coverage
 npm run build   # production client into dist/client
 ```
 
 ## How to play
 
-The main menu has three buttons:
-
-| Button | What it does |
-| --- | --- |
-| **PLAY NOW** | Instant solo drop-in against 5 server-side `GOD_BOT_01…05` bots. No room code. |
-| **CREATE ROOM** | Private multiplayer room with a six-character invite code (2–16 players). |
-| **JOIN ROOM** | Enter a friend's six-character code. |
-
-After entering your callsign and pressing a button you pick a **weapon bundle**, then deploy. First operator to **30 kills** wins. Eliminated players respawn after three seconds with two seconds of spawn protection.
+1. Enter a callsign and select a weapon bundle. GODS TIER unlocks at 30 server-recorded lifetime kills.
+2. Choose **PLAY NOW** for a solo bot match, **CREATE ROOM** for a private lobby, or **JOIN ROOM** with a six-character code.
+3. In a multiplayer lobby, every connected player marks ready; the host starts when all players are ready.
+4. Click **Enter Arena** and allow pointer lock. First player to 30 match eliminations wins.
 
 | Input | Action |
 | --- | --- |
@@ -37,91 +32,92 @@ After entering your callsign and pressing a button you pick a **weapon bundle**,
 | Left mouse button | Fire (hold for automatic weapons) |
 | `Space` | Jump |
 | `R` | Reload |
-| `Q` (hold) | Weapon wheel — move mouse to select, release to equip |
-| `1` `2` `3` | Direct weapon selection |
-| `Tab` | Scoreboard |
-| `Esc` | Release pointer lock |
+| `Q` (hold) | Weapon wheel — move the mouse to select, release to equip |
+| `Tab` | Toggle the scoreboard |
+| `Esc` | Release pointer lock; click the arena to resume |
+
+Eliminated operators respawn after three seconds with two seconds of spawn protection.
 
 ## Weapon bundles
 
-Every bundle carries three weapons. All stats — damage, fire rate, magazine, reload, range, spread — live in `shared/weapons.js` and are enforced **server-side**.
+Each bundle carries three server-validated weapons. Combat stats and damage are resolved by the server, not supplied by the browser.
 
 | Bundle | Slot 1 | Slot 2 | Slot 3 |
 | --- | --- | --- | --- |
-| **RUSHER** | Vortex SMG — fast fire, 30 mag | Harrow Shotgun — close-range 8-pellet blast | Tac Knife — instant kill melee |
-| **GHOST** | Wraith Pistol — medium damage, no tracer | Phantom Sniper — one-shot headshot | Smoke Grenade — vision-blocking cloud |
-| **HEAVY** | Titan LMG — high fire rate, 60 mag | Ravager Rocket — projectile with splash | Combat Shield — blocks frontal damage |
-| **GODS TIER** *(30 lifetime kills)* | God Railgun — hitscan through walls and players | God Minigun — unlimited ammo, overheats after 5 s | God Fist — one punch kill with huge knockback |
+| **RUSHER** | SMG | Shotgun | Knife |
+| **GHOST** | Pistol (no tracer) | Sniper | Smoke Grenade |
+| **HEAVY** | LMG | Rocket | Combat Shield |
+| **GODS TIER** *(30 lifetime kills)* | Railgun | Minigun | God Fist |
 
-- **Weapon wheel (`Q`)** — dark/cyan circular overlay showing all three weapons; mouse direction selects, release equips. The active weapon is highlighted in the wheel and in the bottom-right HUD (icon, name, ammo).
-- **Melee & shield** — knife and fist resolve as server-side cone checks; the shield blocks hitscan from the frontal arc (explosions wash around it at half damage).
-- **Rocket** — simulated server projectile, direct hits plus radius falloff splash that can hurt anyone, including the shooter.
-- **Smoke** — deploys a server-side cloud that blocks bot line-of-sight and any shot through it.
-- **GODS TIER unlock** — lifetime kills are stored in the browser and reconciled with server-side totals; the bundle select screen shows your progress.
+The seven supplied GLBs are loaded with Three.js `GLTFLoader` and shared by first- and third-person weapon rigs:
 
-## Solo bot mode (PLAY NOW)
+| Weapon | GLB |
+| --- | --- |
+| SMG | `smg.glb` |
+| Shotgun / Combat Shield | `shotgun.glb` |
+| Knife / God Fist | `knife.glb` |
+| Pistol / Smoke Grenade | `pistol.glb` |
+| Sniper | `sniper.glb` |
+| LMG / Railgun / Minigun | `lmg.glb` |
+| Rocket | `rocket.glb` |
 
-- Room type `SOLO_VS_BOTS`, private — nobody can join with a code.
-- Five bots (`GOD_BOT_01` … `GOD_BOT_05`) think at **10 Hz** on the server: waypoint pathing, rotation toward the nearest human, and fire only with line of sight.
-- Bots miss **30 %** of shots (random aim offset), respawn after three seconds, and pick a random bundle.
-- Bots are ordinary server players: they fire through the same `SHOOT`/`HIT` pipeline, appear with **[BOT]** tags on the scoreboard and nametags, and show up in the kill feed like anyone else.
+The local view shows the active gun and procedural hands at the bottom-right of the camera. Moving bobs the weapon; `R` animates reload; accepted shots flash at the muzzle; and weapon switches transition smoothly. Remote operators carry the matching room-synchronized weapon. Tracers use cyan for RUSHER, purple for GHOST, orange for HEAVY, and gold for GODS TIER. Player characters are procedural Three.js primitives with faces and armor details; no character GLBs are used.
 
-## Connection model
+## Multiplayer and reconnection
 
-- Server Socket.IO CORS is `origin: "*"` — any deployment origin connects.
-- Client connects to `import.meta.env.VITE_SOCKET_URL`, falling back to `window.location.origin` when unset.
-- HUD connection pill: green dot = connected, red dot = lost with **automatic retry every 3 seconds**.
-- Every connection/room error is logged to the browser console.
+- Multiplayer rooms are isolated Socket.IO rooms with six-character invite codes, a 2–16 player limit, a ready-up lobby, and host controls.
+- The server authoritatively simulates movement, hits, health, ammunition, reloads, weapon switches, projectiles, smoke, score, respawns, and victory checks at 20 Hz.
+- Weapon changes and accepted shots are broadcast to the room so other clients display the correct model and firing effects.
+- A short network interruption freezes the disconnected operator and reserves their seat for 45 seconds. Socket.IO recovery handles brief interruptions; a rotating, server-issued resume token supports a page reload. Rejoining preserves match state, then rotates the token.
+- The oldest connected operator becomes host if the current host leaves or disconnects. Disconnected seats expire after the grace period, and the lobby has a leave-room action.
+- Lifetime kills are stored server-side in `.data/profiles.json`; the browser keeps only an opaque profile ID. Set `FPS_GODS_PROFILE_PATH` to a durable mounted path on hosts where local files are ephemeral.
 
-## Game features
+## Solo bot mode
 
-- **Server-owned simulation:** 20 Hz authoritative ticks; the client sends input and renders snapshots. Damage, ammo, reloads, fire cadence, projectiles, smoke, and score never leave the server.
-- **Real gun models:** all seven `client/assets/weapons/*.glb` loaded with GLTFLoader — first-person gun + hands in the bottom-right, weapon bob while moving, reload dip animation, muzzle flash + tracers, smooth weapon-switch transitions. Remote players carry the matching world-space model.
-- **Arena:** enclosed map, twelve solid cover cubes, eight perimeter spawns; cover blocks shots server-side and visually.
-- **Room isolation:** snapshots and gameplay events only reach the Socket.IO room that owns the match.
+**PLAY NOW** starts a private `SOLO_VS_BOTS` match against five bots (`GOD_BOT_01`–`GOD_BOT_05`). Their 10 Hz server-side brains patrol waypoints, aim at the nearest human, fire only with line of sight, miss 30% of shots with randomized aim, select a bundle, and respawn after three seconds. Bots use the same authoritative damage and scoring pipeline as human operators.
 
 ## Project layout
 
 ```text
-client/                  Vanilla HTML, CSS, and browser JavaScript
-  index.html             Home, bundle select, lobby, match HUD, weapon wheel
-  style.css              Responsive game UI (dark/cyan)
-  main.js                Three.js renderer and app orchestration
-  network.js             Socket.IO client adapter (connection fix, retry)
-  player.js              Input, snapshot interpolation, remote capsules + weapons
-  world.js               Arena visuals and smoke clouds
-  weapons.js             GLB viewmodels, hands, bob/reload/flash/tracers
-  ui.js                  DOM menus, bundle select, weapon wheel, HUD
-  assets/weapons/*.glb   Real gun models (smg, shotgun, sniper, pistol, lmg, rocket, knife)
+client/
+  assets/weapons/        Seven supplied GLB weapon assets
+  index.html             Callsign, bundles, room menu, HUD, and overlays
+  main.js                Three.js renderer, controls, and app orchestration
+  network.js             Socket.IO client adapter and room-session resume
+  player.js              Input, interpolation, procedural operators, remote guns
+  world.js               Arena visuals and destructible cover presentation
+  weapons.js             GLTFLoader rigs, hands, animations, tracers, and smoke
+  ui.js                  Bundle selection, lobby, scoreboard, and HUD
 server/
-  index.js               Express + Socket.IO entrypoint (wildcard CORS)
-  rooms.js               Room + solo bot rooms, lifetime kills
-  gameState.js           Movement, weapons, damage, projectiles, smoke, scoring
-  bots.js                10 Hz server-side bot brains
-  hitDetection.js        Ray/cylinder hitboxes, LOS, smoke, wall tests
-  origins.js             Wildcard CORS policy
+  index.js               Express/Socket.IO server and 20 Hz simulation loop
+  rooms.js               Room lifecycle, recovery tokens, and host migration
+  gameState.js           Movement, bots, weapons, damage, and scoring
+  hitDetection.js        Server raycasts and damage-zone checks
+  profiles.js            Persistent lifetime-kill profiles and bundle unlocks
+  weaponConfig.js        Authoritative weapon definitions and loadouts
 shared/
-  events.js              Socket event contract
-  gameConfig.js          Map, player, and bot constants
-  weapons.js             Weapon + bundle catalog (server-authoritative stats)
-test/                    node:test suites (server, gameplay, weapons, origins)
+  bundles.js             Client-safe bundle presentation and weapon mapping data
+  events.js              Shared Socket.IO event contract
+  gameConfig.js          Map and player constants
 ```
 
-## Deployment (Vercel client + persistent Node host)
+## Deployment
 
-Vercel serves the static client; Socket.IO needs a persistent process (Railway/Render/Fly — a `render.yaml` blueprint is included).
+The client is a static Vite build; Socket.IO needs a persistent Node.js process. A Render blueprint is included in `render.yaml`.
 
-1. Deploy the Node host (`npm start`). Health checks use `GET /health`.
-2. On Vercel set `VITE_SOCKET_URL` to the Node host's public URL and redeploy — or leave it unset to connect to the page's own origin.
-3. CORS is wildcard, so no origin allowlist to maintain.
+1. Deploy the server with `npm start`; `GET /health` is available for host checks.
+2. Set `VITE_SOCKET_URL` to the public game-server URL before building the static client when the client and server use different origins. If it is unset, the browser uses `window.location.origin` (suitable for same-origin proxy deployments).
+3. Configure `FPS_GODS_PROFILE_PATH` on persistent storage if lifetime progression must survive server redeploys.
 
-See `.env.example` for every variable.
+Socket.IO accepts cross-origin connections. CORS is not authentication; gameplay and profile progression are validated server-side.
 
 ## Configuration
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `HOST` / `PORT` | `0.0.0.0` / `3001` | Game server listen address |
-| `GAME_SERVER_URL` | `http://127.0.0.1:3001` | Vite dev proxy target |
-| `VITE_PORT` | `5173` | Vite dev server port |
-| `VITE_SOCKET_URL` | *(unset → `window.location.origin`)* | Browser-facing game server URL, baked in at build time |
+| `HOST` | `0.0.0.0` | Game-server listen address |
+| `PORT` | `3001` | Game-server port (hosts may inject this) |
+| `GAME_SERVER_URL` | `http://127.0.0.1:3001` | Vite development proxy target |
+| `VITE_PORT` | `5173` | Vite development server port |
+| `VITE_SOCKET_URL` | Unset | Browser-facing Socket.IO server URL, baked into the client build |
+| `FPS_GODS_PROFILE_PATH` | `.data/profiles.json` | Persistent server profile store path |

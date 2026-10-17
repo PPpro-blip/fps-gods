@@ -1,19 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { io as ioClient } from 'socket.io-client';
-import { EVENTS, ROOM_STATES, ROOM_TYPES } from '../shared/events.js';
-import { BOTS } from '../shared/gameConfig.js';
+import { EVENTS, ROOM_MODES, ROOM_STATES } from '../shared/events.js';
+import { createMemoryProfileStore } from '../server/profiles.js';
 import { createGameServer } from '../server/index.js';
 
-// Deployment-facing checks for the Express/Socket.IO game server: the health
-// route used by host health checks, the wildcard CORS handshake that keeps
-// every Vercel deployment connected, and real Socket.IO flows for multiplayer
-// rooms plus the PLAY NOW solo bot mode.
-const PRODUCTION_ORIGIN = 'https://fps-gods.vercel.app';
-const PREVIEW_ORIGIN = 'https://fps-gods-6xb0b1zm3-pppro-blips-projects.vercel.app';
-
 async function startServer() {
-  const server = createGameServer();
+  const server = createGameServer({ profileStore: createMemoryProfileStore() });
   const port = await new Promise((resolve, reject) => {
     server.httpServer.once('error', reject);
     server.httpServer.listen(0, '127.0.0.1', () => resolve(server.httpServer.address().port));
@@ -32,19 +25,36 @@ async function handshake(url, path, origin) {
   };
 }
 
-function connectSocket(url, origin = PRODUCTION_ORIGIN) {
+async function connectSocket(url, origin) {
   const socket = ioClient(url, {
-    // Polling is the transport that carries Origin in Node, which is what the
-    // server's CORS policy inspects; browsers upgrade to websockets afterwards.
     transports: ['polling'],
     extraHeaders: { Origin: origin },
     reconnection: false,
     timeout: 5_000,
   });
-  return new Promise((resolve, reject) => {
-    socket.once('connect', () => resolve(socket));
+  await new Promise((resolve, reject) => {
+    socket.once('connect', resolve);
     socket.once('connect_error', reject);
     setTimeout(() => reject(new Error('socket.io did not connect within 5s')), 5_000).unref();
+  });
+  return socket;
+}
+
+function waitForEvent(socket, event, predicate = () => true, timeoutMs = 5_000) {
+  return new Promise((resolve, reject) => {
+    let lastData = null;
+    const timeout = setTimeout(() => {
+      socket.off(event, onData);
+      reject(new Error(`no ${event} event within ${timeoutMs}ms; last event was ${JSON.stringify(lastData)?.slice(0, 240) ?? 'none'}`));
+    }, timeoutMs);
+    const onData = (data) => {
+      lastData = data;
+      if (!predicate(data)) return;
+      clearTimeout(timeout);
+      socket.off(event, onData);
+      resolve(data);
+    };
+    socket.on(event, onData);
   });
 }
 
@@ -63,13 +73,17 @@ test('the health route reports ok for host health checks', async () => {
   }
 });
 
-test('socket.io handshakes answer Access-Control-Allow-Origin: * for any origin', async () => {
+test('Socket.IO CORS accepts every origin with a wildcard response', async () => {
   const server = await startServer();
   try {
-    for (const origin of [PRODUCTION_ORIGIN, PREVIEW_ORIGIN, 'https://evil.example', 'http://localhost:5173']) {
+    for (const origin of [
+      'https://fps-gods.vercel.app',
+      'https://fps-gods-6xb0b1zm3-pppro-blips-projects.vercel.app',
+      'https://any-origin.example',
+    ]) {
       const result = await handshake(server.url, '/socket.io/?EIO=4&transport=polling', origin);
       assert.equal(result.status, 200);
-      assert.equal(result.allowOrigin, '*', `${origin} must receive the wildcard header`);
+      assert.equal(result.allowOrigin, '*');
       assert.match(result.body, /"sid":"/);
       assert.match(result.body, /"upgrades":\["websocket"\]/);
     }
@@ -78,26 +92,26 @@ test('socket.io handshakes answer Access-Control-Allow-Origin: * for any origin'
   }
 });
 
-test('a browser client from the deployed origin connects and creates a room', async () => {
+test('a connected client creates an isolated multiplayer lobby', async () => {
   const server = await startServer();
-  const socket = await connectSocket(server.url);
+  const socket = await connectSocket(server.url, 'https://any-origin.example');
 
   try {
-    assert.ok(socket.id, 'the server should assign a socket id');
-
     const roomState = await new Promise((resolve, reject) => {
-      socket.once(EVENTS.ROOM_STATE, resolve);
+      const timeout = setTimeout(() => reject(new Error('no ROOM_STATE within 5s')), 5_000);
+      socket.once(EVENTS.ROOM_STATE, (state) => {
+        clearTimeout(timeout);
+        resolve(state);
+      });
       socket.once(EVENTS.ROOM_ERROR, (error) => reject(new Error(error.message)));
-      socket.emit(EVENTS.CREATE_ROOM, { name: 'DeployCheck', bundle: 'ghost', lifetimeKills: 3 });
-      setTimeout(() => reject(new Error('no ROOM_STATE within 5s')), 5_000).unref();
+      socket.emit(EVENTS.CREATE_ROOM, { name: 'DeployCheck' });
     });
 
     assert.match(roomState.code, /^[A-Z2-9]{6}$/);
     assert.equal(roomState.state, ROOM_STATES.LOBBY);
-    assert.equal(roomState.type, ROOM_TYPES.MULTIPLAYER);
+    assert.equal(roomState.mode, ROOM_MODES.MULTIPLAYER);
     assert.equal(roomState.players.length, 1);
     assert.equal(roomState.players[0].name, 'DeployCheck');
-    assert.equal(roomState.players[0].bundleId, 'ghost');
     assert.equal(server.roomManager.rooms.size, 1);
   } finally {
     socket.close();
@@ -105,92 +119,220 @@ test('a browser client from the deployed origin connects and creates a room', as
   }
 });
 
-test('PLAY NOW drops a player into a live SOLO_VS_BOTS match with five GOD BOTS', async () => {
+test('PLAY_NOW instantly starts SOLO_VS_BOTS with five named bots', async () => {
   const server = await startServer();
-  const socket = await connectSocket(server.url);
+  const socket = await connectSocket(server.url, 'https://any-origin.example');
 
   try {
-    const started = new Promise((resolve, reject) => {
-      socket.once(EVENTS.GAME_START, resolve);
+    const roomState = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('no playing ROOM_STATE within 5s')), 5_000);
+      socket.on(EVENTS.ROOM_STATE, (state) => {
+        if (state.state !== ROOM_STATES.PLAYING) return;
+        clearTimeout(timeout);
+        resolve(state);
+      });
       socket.once(EVENTS.ROOM_ERROR, (error) => reject(new Error(error.message)));
-      socket.emit(EVENTS.PLAY_SOLO, { name: 'LoneWolf', bundle: 'rusher', lifetimeKills: 0 });
-      setTimeout(() => reject(new Error('no GAME_START within 5s')), 5_000).unref();
+      socket.emit(EVENTS.PLAY_NOW, { name: 'SoloRanger' });
     });
-    const gameStart = await started;
-    assert.equal(gameStart.type, ROOM_TYPES.SOLO_VS_BOTS);
-    assert.equal(gameStart.playerCount, 1 + BOTS.count);
 
-    const soloRoom = [...server.roomManager.rooms.values()].find((room) => room.type === ROOM_TYPES.SOLO_VS_BOTS);
-    assert.ok(soloRoom, 'a solo room exists');
-    assert.equal(soloRoom.state, ROOM_STATES.PLAYING);
-    const bots = [...soloRoom.players.values()].filter((player) => player.isBot);
-    assert.equal(bots.length, 5);
-    assert.deepEqual(bots.map((bot) => bot.name), [
-      'GOD_BOT_01', 'GOD_BOT_02', 'GOD_BOT_03', 'GOD_BOT_04', 'GOD_BOT_05',
-    ]);
+    assert.match(roomState.code, /^[A-Z2-9]{6}$/);
+    assert.equal(roomState.state, ROOM_STATES.PLAYING);
+    assert.equal(roomState.mode, ROOM_MODES.SOLO_VS_BOTS);
+    assert.equal(roomState.players.length, 6);
+    assert.equal(roomState.players.find((player) => player.name === 'SoloRanger')?.isBot, false);
+    assert.deepEqual(
+      roomState.players.filter((player) => player.isBot).map((player) => player.name).sort(),
+      ['GOD_BOT_01', 'GOD_BOT_02', 'GOD_BOT_03', 'GOD_BOT_04', 'GOD_BOT_05'],
+    );
 
-    // A live snapshot arrives at 20 Hz and lists humans and bots alike.
-    const snapshot = await new Promise((resolve, reject) => {
-      socket.once(EVENTS.GAME_STATE_UPDATE, resolve);
-      setTimeout(() => reject(new Error('no GAME_STATE_UPDATE within 5s')), 5_000).unref();
-    });
-    assert.equal(snapshot.players.length, 1 + BOTS.count);
-    assert.equal(snapshot.players.filter((player) => player.isBot).length, 5);
-    assert.equal(snapshot.players.find((player) => player.id === socket.id).weaponId, 'smg');
+    const room = server.roomManager.rooms.get(roomState.code);
+    assert.equal(room?.game?.players.size, 6);
+    assert.equal(room?.game?.mode, ROOM_MODES.SOLO_VS_BOTS);
   } finally {
     socket.close();
     await server.close();
   }
 });
 
-test('weapon switches reach the server and AMMO_UPDATE reflects the new gun', async () => {
+test('two live clients join, ready, play, synchronize weapon switches, and resume a room session', async () => {
   const server = await startServer();
-  const socket = await connectSocket(server.url);
+  const host = await connectSocket(server.url, 'https://host.example');
+  const guest = await connectSocket(server.url, 'https://guest.example');
+  const guestId = guest.id;
+  let resumedGuest;
+  let phase = 'create room';
+  const guestProfileId = 'multiplayer-guest-profile';
 
   try {
-    await new Promise((resolve, reject) => {
-      socket.once(EVENTS.GAME_START, resolve);
-      socket.once(EVENTS.ROOM_ERROR, (error) => reject(new Error(error.message)));
-      socket.emit(EVENTS.PLAY_SOLO, { name: 'Switcher', bundle: 'rusher', lifetimeKills: 0 });
-      setTimeout(() => reject(new Error('no GAME_START within 5s')), 5_000).unref();
+    const hostSessionPromise = waitForEvent(host, EVENTS.ROOM_SESSION);
+    const hostRoomPromise = waitForEvent(host, EVENTS.ROOM_STATE, (state) => state.players.length === 1);
+    host.emit(EVENTS.CREATE_ROOM, {
+      name: 'LiveHost',
+      profileId: 'multiplayer-host-profile',
+      bundleId: 'RUSHER',
     });
+    const [hostSession, lobby] = await Promise.all([hostSessionPromise, hostRoomPromise]);
+    assert.equal(lobby.mode, ROOM_MODES.MULTIPLAYER);
+    assert.equal(lobby.players[0].name, 'LiveHost');
 
-    const ammoUpdate = new Promise((resolve) => {
-      socket.on(EVENTS.AMMO_UPDATE, (data) => {
-        if (data.weaponId === 'shotgun') resolve(data);
+    phase = 'join room';
+    const guestSessionPromise = waitForEvent(guest, EVENTS.ROOM_SESSION);
+    const joinedRoomPromise = waitForEvent(guest, EVENTS.ROOM_STATE, (state) => state.players.length === 2);
+    guest.emit(EVENTS.JOIN_ROOM, {
+      code: lobby.code,
+      name: 'LiveGuest',
+      profileId: guestProfileId,
+      bundleId: 'GHOST',
+    });
+    const [guestSession, joinedRoom] = await Promise.all([guestSessionPromise, joinedRoomPromise]);
+    assert.deepEqual(joinedRoom.players.map((player) => player.bundleId).sort(), ['GHOST', 'RUSHER']);
+    assert.equal(hostSession.roomCode, lobby.code);
+    assert.equal(guestSession.roomCode, lobby.code);
+
+    phase = 'ready both players';
+    const readyRoomPromise = waitForEvent(host, EVENTS.ROOM_STATE, (state) => state.players.length === 2 && state.players.every((player) => player.ready));
+    host.emit(EVENTS.PLAYER_READY, { ready: true });
+    guest.emit(EVENTS.PLAYER_READY, { ready: true });
+    await readyRoomPromise;
+
+    phase = 'start the match';
+    const liveRoomPromise = waitForEvent(host, EVENTS.ROOM_STATE, (state) => state.state === ROOM_STATES.PLAYING);
+    host.emit(EVENTS.START_GAME);
+    const liveRoom = await liveRoomPromise;
+    const room = server.roomManager.rooms.get(lobby.code);
+    const originalGuestState = room.game.players.get(guest.id);
+    assert.ok(originalGuestState);
+
+    phase = 'synchronize weapon switch';
+    const synchronizedSwitch = waitForEvent(
+      host,
+      EVENTS.WEAPON_UPDATE,
+      (data) => data.playerId === guest.id && data.weaponId === 'SNIPER',
+    );
+    guest.emit(EVENTS.WEAPON_SWITCH, { weaponId: 'SNIPER' });
+    const switchData = await synchronizedSwitch;
+    assert.equal(switchData.bundleId, 'GHOST');
+
+    phase = 'broadcast accepted shots to the room';
+    const synchronizedShot = waitForEvent(host, EVENTS.WEAPON_FIRED, (data) => data.playerId === guest.id);
+    guest.emit(EVENTS.SHOOT);
+    const shotData = await synchronizedShot;
+    assert.equal(shotData.weaponId, 'SNIPER');
+    assert.equal(shotData.bundleId, 'GHOST');
+    assert.ok(Number.isFinite(shotData.origin.x) && Number.isFinite(shotData.direction.z));
+
+    const guestPosition = room.game.players.get(guest.id);
+    const initialX = guestPosition.x;
+    const initialZ = guestPosition.z;
+    const yawTowardCenter = Math.atan2(initialX, initialZ);
+    phase = 'server movement';
+    const movedStatePromise = waitForEvent(host, EVENTS.GAME_STATE_UPDATE, (state) => {
+      const player = state.players.find((entry) => entry.id === guest.id);
+      return player && Math.hypot(player.x - initialX, player.z - initialZ) > 0.12;
+    });
+    guest.emit(EVENTS.PLAYER_INPUT, {
+      seq: 1,
+      forward: 1,
+      strafe: 0,
+      jump: false,
+      yaw: yawTowardCenter,
+      pitch: 0,
+    });
+    const movedState = await movedStatePromise;
+    assert.equal(movedState.players.find((player) => player.id === guest.id).currentWeaponId, 'SNIPER');
+    assert.equal(liveRoom.state, ROOM_STATES.PLAYING);
+
+    phase = 'mark disconnected player';
+    const offlineRoomPromise = waitForEvent(host, EVENTS.ROOM_STATE, (state) => state.players.some((player) => player.id === guestId && player.connected === false));
+    guest.disconnect();
+    await offlineRoomPromise;
+    const positionBeforeResume = { x: guestPosition.x, z: guestPosition.z, kills: guestPosition.kills };
+
+    phase = 'resume disconnected player';
+    resumedGuest = await connectSocket(server.url, 'https://guest.example');
+    const resumedRoomPromise = waitForEvent(resumedGuest, EVENTS.ROOM_STATE, (state) => state.state === ROOM_STATES.PLAYING
+      && state.players.some((player) => player.id === resumedGuest.id && player.connected === true));
+    const rotatedSessionPromise = waitForEvent(resumedGuest, EVENTS.ROOM_SESSION);
+    resumedGuest.emit(EVENTS.PROFILE_REQUEST, { profileId: guestProfileId, callsign: 'LiveGuest' });
+    resumedGuest.emit(EVENTS.ROOM_RESUME, guestSession);
+    const [resumedRoom, rotatedSession] = await Promise.all([resumedRoomPromise, rotatedSessionPromise]);
+    const resumedPlayer = resumedRoom.players.find((player) => player.id === resumedGuest.id);
+    const resumedGamePlayer = room.game.players.get(resumedGuest.id);
+    assert.equal(resumedPlayer.currentWeaponId, 'SNIPER');
+    assert.ok(resumedGamePlayer);
+    assert.equal(resumedGamePlayer.kills, positionBeforeResume.kills);
+    assert.equal(rotatedSession.roomCode, lobby.code);
+    assert.notEqual(rotatedSession.resumeToken, guestSession.resumeToken);
+    assert.ok(Math.hypot(resumedGamePlayer.x - positionBeforeResume.x, resumedGamePlayer.z - positionBeforeResume.z) < 0.1);
+
+    phase = 'leave room';
+    const hostRoomAfterLeave = waitForEvent(host, EVENTS.ROOM_STATE, (state) => state.players.length === 1);
+    const leftRoom = waitForEvent(resumedGuest, EVENTS.ROOM_LEFT);
+    resumedGuest.emit(EVENTS.LEAVE_ROOM);
+    await Promise.all([hostRoomAfterLeave, leftRoom]);
+    assert.equal(server.roomManager.rooms.get(lobby.code).players.has(resumedGuest.id), false);
+  } catch (error) {
+    error.message = `${phase}: ${error.message}`;
+    throw error;
+  } finally {
+    host.disconnect();
+    guest.disconnect();
+    resumedGuest?.disconnect();
+    await server.close();
+  }
+});
+
+test('server profile requests persist the player key and enforce bundle unlocks before room entry', async () => {
+  const server = await startServer();
+  const socket = await connectSocket(server.url, 'https://any-origin.example');
+
+  try {
+    const profile = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('no PROFILE_UPDATE within 5s')), 5_000);
+      socket.once(EVENTS.PROFILE_UPDATE, (data) => {
+        clearTimeout(timeout);
+        resolve(data);
+      });
+      socket.emit(EVENTS.PROFILE_REQUEST, { profileId: 'profile-integration', callsign: 'BundleTester' });
+    });
+    assert.equal(profile.profileId, 'profile-integration');
+    assert.equal(profile.lifetimeKills, 0);
+    assert.equal(profile.godsTierUnlocked, false);
+
+    const lockedError = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('no locked-bundle ROOM_ERROR within 5s')), 5_000);
+      socket.once(EVENTS.ROOM_ERROR, (error) => {
+        clearTimeout(timeout);
+        resolve(error);
+      });
+      socket.emit(EVENTS.CREATE_ROOM, {
+        name: 'BundleTester',
+        profileId: profile.profileId,
+        bundleId: 'GODS_TIER',
       });
     });
-    socket.emit(EVENTS.SWITCH_WEAPON, { slot: 1 });
+    assert.match(lockedError.message, /30 lifetime kills/i);
+    assert.equal(server.roomManager.rooms.size, 0);
 
-    const data = await Promise.race([
-      ammoUpdate,
-      new Promise((_, reject) => setTimeout(() => reject(new Error('no AMMO_UPDATE for the switched weapon')), 5_000)),
-    ]);
-    assert.equal(data.slot, 1);
-    assert.equal(data.weaponId, 'shotgun');
-    assert.equal(data.maxAmmo, 6);
+    for (let kill = 0; kill < 30; kill += 1) {
+      server.roomManager.profileStore.recordLifetimeKill(profile.profileId);
+    }
+    const roomState = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('no unlocked ROOM_STATE within 5s')), 5_000);
+      socket.once(EVENTS.ROOM_STATE, (state) => {
+        clearTimeout(timeout);
+        resolve(state);
+      });
+      socket.emit(EVENTS.CREATE_ROOM, {
+        name: 'BundleTester',
+        profileId: profile.profileId,
+        bundleId: 'GODS_TIER',
+      });
+    });
+    assert.equal(roomState.players[0].bundleId, 'GODS_TIER');
+    assert.equal(roomState.players[0].currentWeaponId, 'RAILGUN');
   } finally {
     socket.close();
     await server.close();
-  }
-});
-
-test('an unrestricted CLIENT_ORIGIN env var no longer blocks anyone (wildcard policy)', async () => {
-  process.env.CLIENT_ORIGIN = 'https://only-this.example';
-  try {
-    const server = createGameServer();
-    const port = await new Promise((resolve) => {
-      server.httpServer.listen(0, '127.0.0.1', () => resolve(server.httpServer.address().port));
-    });
-
-    try {
-      const result = await handshake(`http://127.0.0.1:${port}`, '/socket.io/?EIO=4&transport=polling', 'http://localhost:5173');
-      assert.equal(result.status, 200);
-      assert.equal(result.allowOrigin, '*');
-    } finally {
-      await server.close();
-    }
-  } finally {
-    delete process.env.CLIENT_ORIGIN;
   }
 });

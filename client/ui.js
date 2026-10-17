@@ -1,55 +1,39 @@
-import {
-  BUNDLES,
-  GODS_TIER_UNLOCK_KILLS,
-  getWeapon,
-  isBundleUnlocked,
-} from '../shared/weapons.js';
-
-const LIFETIME_KILLS_KEY = 'fps-gods-lifetime-kills';
-
-export function getLifetimeKills() {
-  const stored = Number.parseInt(localStorage.getItem(LIFETIME_KILLS_KEY) ?? '0', 10);
-  return Number.isFinite(stored) ? Math.max(0, stored) : 0;
-}
-
-export function addLifetimeKills(count) {
-  const total = getLifetimeKills() + Math.max(0, Math.trunc(Number(count) || 0));
-  localStorage.setItem(LIFETIME_KILLS_KEY, String(total));
-  return total;
-}
+import { BUNDLE_BY_ID, BUNDLE_INFO, BUNDLE_UNLOCK_KILLS, DEFAULT_BUNDLE_ID, WEAPON_PRESENTATION } from '../shared/bundles.js';
 
 // All presentation is plain DOM/CSS. Socket payloads are inserted with
 // textContent rather than HTML so player names never become markup.
 export class GameUI {
-  constructor() {
+  constructor({ profileId } = {}) {
     this.handlers = {};
     this.room = null;
+    this.profile = { profileId: profileId ?? null, lifetimeKills: 0, godsTierUnlocked: false };
+    const savedBundle = localStorage.getItem('fps-gods-bundle');
+    this.selectedBundleId = BUNDLE_BY_ID[savedBundle] ? savedBundle : DEFAULT_BUNDLE_ID;
+    this.wheelWeapons = [];
+    this.activeWheelWeaponId = null;
+    this.selectedWheelWeaponId = null;
     this.selfId = null;
     this.scoreboardOpen = false;
     this.toastTimeout = null;
     this.feedTimers = new Map();
     this.lastHudPlayer = null;
-    this.pendingAction = { action: null, code: null };
-    this.selectedBundleId = 'rusher';
-    this.wheelOpen = false;
-    this.wheelSelection = 0;
-    this.wheelVector = { x: 0, y: -1 };
-    this.wheelSlots = [];
 
     this.elements = {
-      home: document.querySelector('#home-screen'),
-      bundle: document.querySelector('#bundle-screen'),
-      bundleCards: document.querySelector('#bundle-cards'),
+      shell: document.querySelector('.app-shell'),
+      callsignScreen: document.querySelector('#callsign-screen'),
+      callsignContinue: document.querySelector('#callsign-continue-button'),
+      callsignError: document.querySelector('#callsign-error'),
+      bundleScreen: document.querySelector('#bundle-screen'),
+      bundleOptions: document.querySelector('#bundle-options'),
       bundleBack: document.querySelector('#bundle-back-button'),
-      bundleConfirm: document.querySelector('#bundle-confirm-button'),
+      bundleContinue: document.querySelector('#bundle-continue-button'),
       bundleError: document.querySelector('#bundle-error'),
-      lifetimeKillsValue: document.querySelector('#lifetime-kills-value'),
-      killsProgressFill: document.querySelector('#kills-progress-fill'),
-      killsProgressHint: document.querySelector('#kills-progress-hint'),
+      lifetimeKills: document.querySelector('#lifetime-kills'),
+      godsUnlockProgress: document.querySelector('#gods-unlock-progress'),
+      home: document.querySelector('#home-screen'),
       lobby: document.querySelector('#lobby-screen'),
       match: document.querySelector('#match-hud'),
       connection: document.querySelector('#connection-pill'),
-      connectionDot: document.querySelector('#connection-pill .connection-dot'),
       connectionLabel: document.querySelector('#connection-label'),
       name: document.querySelector('#player-name'),
       roomCodeInput: document.querySelector('#room-code-input'),
@@ -63,6 +47,7 @@ export class GameUI {
       copyCode: document.querySelector('#copy-room-code-button'),
       playerList: document.querySelector('#lobby-player-list'),
       playerCount: document.querySelector('#player-count'),
+      leaveRoom: document.querySelector('#leave-room-button'),
       ready: document.querySelector('#ready-button'),
       start: document.querySelector('#start-button'),
       lobbyHint: document.querySelector('#lobby-hint'),
@@ -73,18 +58,19 @@ export class GameUI {
       healthFill: document.querySelector('#health-fill'),
       healthTrack: document.querySelector('.health-track'),
       healthState: document.querySelector('#health-state'),
-      weaponIcon: document.querySelector('#weapon-icon'),
-      weaponName: document.querySelector('#weapon-name'),
       ammo: document.querySelector('#ammo-value'),
-      ammoMax: document.querySelector('#ammo-max'),
+      ammoTotal: document.querySelector('#ammo-total'),
       ammoStatus: document.querySelector('#ammo-status'),
       ammoWidget: document.querySelector('.ammo-widget'),
-      heatTrack: document.querySelector('#heat-track'),
-      heatFill: document.querySelector('#heat-fill'),
       reloadHint: document.querySelector('#reload-hint'),
+      weaponIcon: document.querySelector('#weapon-icon'),
+      weaponName: document.querySelector('#weapon-name'),
+      weaponBundle: document.querySelector('#weapon-bundle'),
       weaponWheel: document.querySelector('#weapon-wheel'),
-      weaponWheelSlots: document.querySelector('#weapon-wheel-slots'),
-      wheelHubName: document.querySelector('#wheel-hub-name'),
+      weaponWheelOptions: document.querySelector('#weapon-wheel-options'),
+      wheelCenterIcon: document.querySelector('#wheel-center-icon'),
+      wheelCenterName: document.querySelector('#wheel-center-name'),
+      wheelCenterState: document.querySelector('#wheel-center-state'),
       killFeed: document.querySelector('#kill-feed'),
       crosshair: document.querySelector('#crosshair'),
       pause: document.querySelector('#pause-panel'),
@@ -105,7 +91,123 @@ export class GameUI {
     };
 
     this.loadCallsign();
+    this.buildBundleOptions();
     this.bindControls();
+    this.showCallsign();
+  }
+
+  buildBundleOptions() {
+    this.elements.bundleOptions.replaceChildren();
+    const godsUnlocked = this.profile.godsTierUnlocked === true
+      || this.profile.lifetimeKills >= BUNDLE_UNLOCK_KILLS;
+
+    for (const bundle of BUNDLE_INFO) {
+      const locked = bundle.id === 'GODS_TIER' && !godsUnlocked;
+      const card = document.createElement('button');
+      card.type = 'button';
+      card.className = `bundle-card${locked ? ' is-locked' : ''}`;
+      card.setAttribute('role', 'radio');
+      card.setAttribute('aria-checked', String(this.selectedBundleId === bundle.id));
+      card.disabled = locked;
+      card.style.setProperty('--bundle-accent', bundle.accent);
+      card.dataset.bundleId = bundle.id;
+
+      const heading = document.createElement('span');
+      heading.className = 'bundle-card-heading';
+      const name = document.createElement('strong');
+      name.textContent = bundle.name;
+      const state = document.createElement('small');
+      state.textContent = locked ? 'LOCKED' : this.selectedBundleId === bundle.id ? 'SELECTED' : 'AVAILABLE';
+      heading.append(name, state);
+
+      const title = document.createElement('span');
+      title.className = 'bundle-card-title';
+      title.textContent = bundle.title;
+      const description = document.createElement('span');
+      description.className = 'bundle-card-description';
+      description.textContent = bundle.description;
+
+      const weaponList = document.createElement('span');
+      weaponList.className = 'bundle-weapon-list';
+      for (const weapon of bundle.weapons) {
+        const row = document.createElement('span');
+        row.className = 'bundle-weapon-row';
+        const icon = document.createElement('span');
+        icon.className = 'bundle-weapon-icon';
+        icon.textContent = weapon.icon;
+        const copy = document.createElement('span');
+        copy.className = 'bundle-weapon-copy';
+        const weaponName = document.createElement('strong');
+        weaponName.textContent = weapon.name;
+        const role = document.createElement('small');
+        role.textContent = weapon.role;
+        copy.append(weaponName, role);
+        row.append(icon, copy);
+        weaponList.append(row);
+      }
+
+      card.append(heading, title, description, weaponList);
+      if (locked) {
+        const unlock = document.createElement('span');
+        unlock.className = 'bundle-unlock-message';
+        const remaining = Math.max(0, BUNDLE_UNLOCK_KILLS - this.profile.lifetimeKills);
+        unlock.textContent = `${remaining} MORE LIFETIME KILLS TO UNLOCK`;
+        card.append(unlock);
+      }
+      card.addEventListener('click', () => this.selectBundle(bundle.id));
+      this.elements.bundleOptions.append(card);
+    }
+
+    this.updateBundleSelection();
+    this.elements.lifetimeKills.textContent = String(this.profile.lifetimeKills ?? 0);
+    this.elements.godsUnlockProgress.textContent = godsUnlocked
+      ? 'GODS TIER UNLOCKED'
+      : `${Math.max(0, BUNDLE_UNLOCK_KILLS - (this.profile.lifetimeKills ?? 0))} kills to GODS TIER`;
+  }
+
+  updateBundleSelection() {
+    for (const card of this.elements.bundleOptions.querySelectorAll('.bundle-card')) {
+      const selected = card.dataset.bundleId === this.selectedBundleId;
+      card.classList.toggle('is-selected', selected);
+      card.setAttribute('aria-checked', String(selected));
+      const label = card.querySelector('.bundle-card-heading small');
+      if (label && !card.disabled) label.textContent = selected ? 'SELECTED' : 'AVAILABLE';
+    }
+  }
+
+  selectBundle(bundleId) {
+    const bundle = BUNDLE_BY_ID[bundleId];
+    if (!bundle || (bundleId === 'GODS_TIER' && !this.isGodsTierUnlocked)) return false;
+    this.selectedBundleId = bundleId;
+    localStorage.setItem('fps-gods-bundle', bundleId);
+    this.updateBundleSelection();
+    this.clearError();
+    return true;
+  }
+
+  get isGodsTierUnlocked() {
+    return this.profile.godsTierUnlocked === true || this.profile.lifetimeKills >= BUNDLE_UNLOCK_KILLS;
+  }
+
+  get profileId() {
+    return this.profile.profileId;
+  }
+
+  get bundleId() {
+    return this.selectedBundleId;
+  }
+
+  setProfile(profile) {
+    if (!profile || typeof profile !== 'object') return;
+    const lifetimeKills = Math.max(0, Math.floor(Number(profile.lifetimeKills) || 0));
+    this.profile = {
+      profileId: typeof profile.profileId === 'string' ? profile.profileId : this.profile.profileId,
+      lifetimeKills,
+      godsTierUnlocked: profile.godsTierUnlocked === true || lifetimeKills >= BUNDLE_UNLOCK_KILLS,
+    };
+    if (this.profile.profileId) localStorage.setItem('fps-gods-profile-id', this.profile.profileId);
+    if (this.selectedBundleId === 'GODS_TIER' && !this.isGodsTierUnlocked) this.selectedBundleId = DEFAULT_BUNDLE_ID;
+    this.buildBundleOptions();
   }
 
   bindControls() {
@@ -113,15 +215,29 @@ export class GameUI {
       localStorage.setItem('fps-gods-callsign', this.elements.name.value.slice(0, 16));
       this.clearError();
     });
-
-    this.elements.playNow.addEventListener('click', () => {
-      if (!this.requireName()) return;
-      this.openBundleScreen('solo');
+    this.elements.callsignContinue.addEventListener('click', () => {
+      if (!this.playerName) {
+        this.elements.callsignError.textContent = 'Enter a callsign before choosing a weapon bundle.';
+        this.elements.callsignError.hidden = false;
+        this.elements.name.focus();
+        return;
+      }
+      this.elements.callsignError.hidden = true;
+      this.handlers.onCallsignContinue?.(this.playerName, this.profileId);
+      this.showBundleSelect();
     });
-    this.elements.create.addEventListener('click', () => {
-      if (!this.requireName()) return;
-      this.openBundleScreen('create');
+    this.elements.bundleBack.addEventListener('click', () => this.showCallsign());
+    this.elements.bundleContinue.addEventListener('click', () => {
+      if (!BUNDLE_BY_ID[this.selectedBundleId] || (this.selectedBundleId === 'GODS_TIER' && !this.isGodsTierUnlocked)) {
+        this.elements.bundleError.textContent = 'Choose an unlocked weapon bundle to continue.';
+        this.elements.bundleError.hidden = false;
+        return;
+      }
+      this.handlers.onBundleSelected?.(this.selectedBundleId);
+      this.showHome();
     });
+    this.elements.playNow.addEventListener('click', () => this.handlers.onPlayNow?.(this.playerName, this.selectedBundleId, this.profileId));
+    this.elements.create.addEventListener('click', () => this.handlers.onCreate?.(this.playerName, this.selectedBundleId, this.profileId));
     this.elements.joinForm.addEventListener('submit', (event) => {
       event.preventDefault();
       const code = this.elements.roomCodeInput.value.trim().toUpperCase();
@@ -129,20 +245,13 @@ export class GameUI {
         this.showError('Enter all six characters of the room code.');
         return;
       }
-      if (!this.requireName()) return;
-      this.openBundleScreen('join', code);
+      this.handlers.onJoin?.(this.playerName, code, this.selectedBundleId, this.profileId);
     });
     this.elements.roomCodeInput.addEventListener('input', () => {
       this.elements.roomCodeInput.value = this.elements.roomCodeInput.value.toUpperCase().replace(/[^A-Z2-9]/g, '').slice(0, 6);
       this.clearError();
     });
-
-    this.elements.bundleBack.addEventListener('click', () => {
-      this.pendingAction = { action: null, code: null };
-      this.showHome();
-    });
-    this.elements.bundleConfirm.addEventListener('click', () => this.confirmBundle());
-
+    this.elements.leaveRoom.addEventListener('click', () => this.handlers.onLeaveRoom?.());
     this.elements.ready.addEventListener('click', () => {
       const self = this.room?.players.find((player) => player.id === this.selfId);
       this.handlers.onReady?.(!(self?.ready ?? false));
@@ -160,13 +269,6 @@ export class GameUI {
     });
   }
 
-  requireName() {
-    if (this.playerName.length > 0) return true;
-    this.showError('Enter a callsign before deploying.');
-    this.elements.name.focus();
-    return false;
-  }
-
   get playerName() {
     return this.elements.name.value.trim().slice(0, 16);
   }
@@ -180,20 +282,15 @@ export class GameUI {
     this.handlers = { ...this.handlers, ...handlers };
   }
 
-  // ── Connection indicator ─────────────────────────────────────────────────
-  // Green dot = connected. Red dot = lost; the network layer retries every 3 s.
-
   setConnectionState(state, detail = '') {
     const connected = state === 'connected';
     const offline = state === 'offline';
     this.elements.connection.classList.toggle('is-connected', connected);
     this.elements.connection.classList.toggle('is-offline', offline);
-    this.elements.connectionDot.classList.toggle('is-connected', connected);
-    this.elements.connectionDot.classList.toggle('is-offline', offline);
     this.elements.connectionLabel.textContent = connected
       ? 'SERVER CONNECTED'
       : offline
-        ? 'CONNECTION LOST · RETRYING'
+        ? 'CONNECTION LOST'
         : 'CONNECTING TO SERVER';
     if (detail && !connected) this.showToast(detail);
   }
@@ -212,148 +309,62 @@ export class GameUI {
     }
   }
 
-  showHome() {
-    this.elements.home.hidden = false;
-    this.elements.bundle.hidden = true;
+  showCallsign() {
+    this.elements.shell.classList.remove('is-in-match');
+    this.elements.callsignScreen.hidden = false;
+    this.elements.bundleScreen.hidden = true;
+    this.elements.home.hidden = true;
     this.elements.lobby.hidden = true;
     this.elements.match.hidden = true;
     this.elements.end.hidden = true;
     this.elements.pause.hidden = true;
     this.elements.death.hidden = true;
     this.elements.scoreboard.hidden = true;
+    this.elements.weaponWheel.hidden = true;
     this.scoreboardOpen = false;
   }
 
-  // ── Bundle select screen ────────────────────────────────────────────────
-
-  openBundleScreen(action, code = null) {
-    this.pendingAction = { action, code };
+  showBundleSelect() {
+    if (this.selectedBundleId === 'GODS_TIER' && !this.isGodsTierUnlocked) this.selectedBundleId = DEFAULT_BUNDLE_ID;
+    this.buildBundleOptions();
+    this.elements.shell.classList.remove('is-in-match');
+    this.elements.callsignScreen.hidden = true;
+    this.elements.bundleScreen.hidden = false;
     this.elements.home.hidden = true;
-    this.elements.bundle.hidden = false;
     this.elements.lobby.hidden = true;
     this.elements.match.hidden = true;
     this.elements.end.hidden = true;
     this.elements.pause.hidden = true;
     this.elements.death.hidden = true;
-    this.elements.bundleError.hidden = true;
-    this.renderBundleCards();
-
-    const labels = {
-      solo: 'DEPLOY SOLO <span>↗</span>',
-      create: 'CREATE ROOM <span>↗</span>',
-      join: 'JOIN ROOM <span>↗</span>',
-    };
-    this.elements.bundleConfirm.innerHTML = labels[action] ?? labels.create;
+    this.elements.scoreboard.hidden = true;
+    this.elements.weaponWheel.hidden = true;
+    this.scoreboardOpen = false;
   }
 
-  renderBundleCards() {
-    const kills = getLifetimeKills();
-    this.elements.lifetimeKillsValue.textContent = String(kills);
-    this.elements.killsProgressFill.style.width = `${Math.min(100, (kills / GODS_TIER_UNLOCK_KILLS) * 100)}%`;
-    if (kills >= GODS_TIER_UNLOCK_KILLS) {
-      this.elements.killsProgressHint.textContent = 'GODS TIER unlocked. Choose your power.';
-    } else {
-      this.elements.killsProgressHint.textContent
-        = `Reach ${GODS_TIER_UNLOCK_KILLS} lifetime kills to unlock GODS TIER. ${GODS_TIER_UNLOCK_KILLS - kills} to go.`;
-    }
-
-    if (!isBundleUnlocked(this.selectedBundleId, kills)) this.selectedBundleId = 'rusher';
-    this.elements.bundleCards.replaceChildren();
-
-    for (const bundle of Object.values(BUNDLES)) {
-      const unlocked = isBundleUnlocked(bundle.id, kills);
-      const card = document.createElement('button');
-      card.type = 'button';
-      card.className = `bundle-card${this.selectedBundleId === bundle.id ? ' is-selected' : ''}${unlocked ? '' : ' is-locked'}`;
-      card.style.setProperty('--bundle-accent', bundle.accent);
-
-      const head = document.createElement('div');
-      head.className = 'bundle-card-head';
-      const title = document.createElement('strong');
-      title.textContent = bundle.name;
-      const lock = document.createElement('span');
-      lock.className = 'bundle-lock-chip';
-      lock.textContent = unlocked ? 'READY' : `LOCKED · ${bundle.unlockKills} KILLS`;
-      head.append(title, lock);
-
-      const tagline = document.createElement('p');
-      tagline.className = 'bundle-tagline';
-      tagline.textContent = bundle.tagline;
-
-      const list = document.createElement('ul');
-      list.className = 'bundle-weapon-list';
-      for (const weaponId of bundle.slots) {
-        const weapon = getWeapon(weaponId);
-        const item = document.createElement('li');
-
-        const icon = document.createElement('span');
-        icon.className = 'bundle-weapon-icon';
-        icon.textContent = weapon.icon;
-        const info = document.createElement('span');
-        info.className = 'bundle-weapon-info';
-        const weaponName = document.createElement('span');
-        weaponName.className = 'bundle-weapon-name';
-        weaponName.textContent = weapon.name;
-        const blurb = document.createElement('span');
-        blurb.className = 'bundle-weapon-blurb';
-        blurb.textContent = weapon.blurb;
-        info.append(weaponName, blurb);
-
-        const stats = document.createElement('span');
-        stats.className = 'bundle-weapon-stats';
-        const damageText = weapon.type === 'melee'
-          ? 'MELEE'
-          : weapon.type === 'grenade'
-            ? 'UTILITY'
-            : weapon.type === 'shield'
-              ? 'DEFENSE'
-              : `DMG ${weapon.damage}${weapon.pellets ? `×${weapon.pellets}` : ''}`;
-        const rateText = weapon.unlimited
-          ? '∞ AMMO'
-          : weapon.magSize > 0
-            ? `${weapon.magSize} MAG`
-            : '—';
-        stats.textContent = `${damageText} · ${rateText}`;
-
-        item.append(icon, info, stats);
-        list.append(item);
-      }
-
-      card.append(head, tagline, list);
-      card.addEventListener('click', () => {
-        if (!unlocked) {
-          this.elements.bundleError.textContent = `GODS TIER unlocks at ${bundle.unlockKills} lifetime kills.`;
-          this.elements.bundleError.hidden = false;
-          return;
-        }
-        this.elements.bundleError.hidden = true;
-        this.selectedBundleId = bundle.id;
-        this.renderBundleCards();
-      });
-      this.elements.bundleCards.append(card);
-    }
-  }
-
-  confirmBundle() {
-    const { action, code } = this.pendingAction;
-    if (!action) return;
-    const kills = getLifetimeKills();
-    if (!isBundleUnlocked(this.selectedBundleId, kills)) {
-      this.elements.bundleError.textContent = 'That bundle is still locked. Keep fighting.';
-      this.elements.bundleError.hidden = false;
-      return;
-    }
-    this.elements.bundleError.hidden = true;
-    this.handlers.onBundleConfirmed?.(this.selectedBundleId, action, code);
+  showHome() {
+    this.elements.shell.classList.remove('is-in-match');
+    this.elements.callsignScreen.hidden = true;
+    this.elements.bundleScreen.hidden = true;
+    this.elements.home.hidden = false;
+    this.elements.lobby.hidden = true;
+    this.elements.match.hidden = true;
+    this.elements.end.hidden = true;
+    this.elements.pause.hidden = true;
+    this.elements.death.hidden = true;
+    this.elements.scoreboard.hidden = true;
+    this.elements.weaponWheel.hidden = true;
+    this.scoreboardOpen = false;
   }
 
   showLobby(room = this.room, selfId = this.selfId) {
     if (!room) return;
+    this.elements.shell.classList.remove('is-in-match');
     this.room = room;
     this.selfId = selfId;
     this.lastHudPlayer = null;
+    this.elements.callsignScreen.hidden = true;
+    this.elements.bundleScreen.hidden = true;
     this.elements.home.hidden = true;
-    this.elements.bundle.hidden = true;
     this.elements.lobby.hidden = false;
     this.elements.match.hidden = true;
     this.elements.pause.hidden = true;
@@ -371,13 +382,15 @@ export class GameUI {
 
     const isHost = room.hostId === selfId;
     const self = room.players.find((player) => player.id === selfId);
-    const humans = room.players.filter((player) => !player.isBot);
-    const everyoneReady = humans.length >= room.minPlayers && humans.every((player) => player.ready);
-    const waitingCount = humans.filter((player) => !player.ready).length;
+    const connectedPlayers = room.players.filter((player) => player.connected !== false);
+    const offlineCount = room.players.length - connectedPlayers.length;
+    const everyoneReady = connectedPlayers.length >= room.minPlayers && offlineCount === 0
+      && room.players.every((player) => player.ready);
+    const waitingCount = room.players.filter((player) => player.connected === false || !player.ready).length;
 
     for (const player of room.players) {
       const row = document.createElement('li');
-      row.className = 'lobby-player-row';
+      row.className = `lobby-player-row${player.connected === false ? ' is-offline' : ''}`;
 
       const swatch = document.createElement('span');
       swatch.className = 'player-color-swatch';
@@ -392,17 +405,13 @@ export class GameUI {
       name.textContent = player.name;
       const subtitle = document.createElement('span');
       subtitle.className = 'player-subtitle';
-      subtitle.textContent = player.id === selfId ? 'YOU' : player.isBot ? 'ARENA BOT' : 'OPERATOR';
+      const bundleName = BUNDLE_BY_ID[player.bundleId]?.name ?? 'BUNDLE';
+      subtitle.textContent = `${player.id === selfId ? 'YOU' : 'OPERATOR'} · ${bundleName}`;
       information.append(name, document.createElement('br'), subtitle);
 
       const spacer = document.createElement('span');
       spacer.className = 'player-row-spacer';
-      if (player.isBot) {
-        const botTag = document.createElement('span');
-        botTag.className = 'player-bot-tag';
-        botTag.textContent = '[BOT]';
-        row.append(swatch, avatar, information, spacer, botTag);
-      } else if (player.id === room.hostId) {
+      if (player.id === room.hostId) {
         const hostTag = document.createElement('span');
         hostTag.className = 'player-host-tag';
         hostTag.textContent = 'HOST';
@@ -412,12 +421,12 @@ export class GameUI {
       }
 
       const ready = document.createElement('span');
-      ready.className = `player-ready-status${player.ready ? ' is-ready' : ''}`;
+      ready.className = `player-ready-status${player.ready ? ' is-ready' : ''}${player.connected === false ? ' is-offline' : ''}`;
       const check = document.createElement('span');
       check.className = 'status-check';
-      check.textContent = player.ready ? '✓' : '·';
+      check.textContent = player.connected === false ? '↻' : player.ready ? '✓' : '·';
       const status = document.createElement('span');
-      status.textContent = player.ready ? 'READY' : 'NOT READY';
+      status.textContent = player.connected === false ? 'RECONNECTING' : player.ready ? 'READY' : 'NOT READY';
       ready.append(check, status);
       row.append(ready);
       this.elements.playerList.append(row);
@@ -440,8 +449,10 @@ export class GameUI {
     this.elements.start.append(startArrow);
     this.elements.start.parentElement.classList.toggle('is-host', isHost);
 
-    if (humans.length < room.minPlayers) {
-      this.elements.lobbyHint.textContent = 'Waiting for one more operator. At least 2 players are required.';
+    if (offlineCount > 0) {
+      this.elements.lobbyHint.textContent = `${offlineCount} operator${offlineCount === 1 ? ' is' : 's are'} reconnecting. The room is reserved for 45 seconds.`;
+    } else if (connectedPlayers.length < room.minPlayers) {
+      this.elements.lobbyHint.textContent = 'Waiting for one more operator. At least 2 connected players are required.';
     } else if (everyoneReady) {
       this.elements.lobbyHint.textContent = isHost ? 'All operators ready. Launch when you are.' : 'All operators ready. The host can launch the match.';
     } else {
@@ -450,14 +461,16 @@ export class GameUI {
   }
 
   showMatch(room = this.room) {
+    this.elements.shell.classList.add('is-in-match');
     if (room) {
       this.room = room;
       this.elements.hudCode.textContent = room.code;
       this.elements.targetKills.textContent = String(room.targetKills ?? 30);
       this.elements.scoreboardRoom.textContent = room.code;
     }
+    this.elements.callsignScreen.hidden = true;
+    this.elements.bundleScreen.hidden = true;
     this.elements.home.hidden = true;
-    this.elements.bundle.hidden = true;
     this.elements.lobby.hidden = true;
     this.elements.match.hidden = false;
     this.elements.end.hidden = true;
@@ -473,7 +486,94 @@ export class GameUI {
     this.elements.scoreboard.hidden = !this.scoreboardOpen;
   }
 
-  // ── HUD ─────────────────────────────────────────────────────────────────
+  openWeaponWheel(bundleId, activeWeaponId) {
+    const bundle = BUNDLE_BY_ID[bundleId];
+    if (!bundle) return null;
+    this.wheelWeapons = bundle.weapons;
+    this.activeWheelWeaponId = activeWeaponId;
+    this.selectedWheelWeaponId = activeWeaponId;
+    this.elements.weaponWheelOptions.replaceChildren();
+
+    const radius = Math.min(116, window.innerWidth * 0.29, window.innerHeight * 0.25);
+    this.wheelWeapons.forEach((weapon, index) => {
+      const angle = -Math.PI / 2 + (index * Math.PI * 2) / this.wheelWeapons.length;
+      const option = document.createElement('button');
+      option.type = 'button';
+      option.className = 'weapon-wheel-option';
+      option.dataset.weaponId = weapon.id;
+      option.style.setProperty('--wheel-x', `${Math.cos(angle) * radius}px`);
+      option.style.setProperty('--wheel-y', `${Math.sin(angle) * radius}px`);
+      option.setAttribute('aria-label', `${weapon.name}${weapon.id === activeWeaponId ? ', active' : ''}`);
+
+      const icon = document.createElement('span');
+      icon.className = 'weapon-wheel-option-icon';
+      icon.textContent = weapon.icon;
+      const name = document.createElement('span');
+      name.className = 'weapon-wheel-option-name';
+      name.textContent = weapon.name;
+      const state = document.createElement('span');
+      state.className = 'weapon-wheel-option-state';
+      state.textContent = weapon.id === activeWeaponId ? 'ACTIVE' : 'SELECT';
+      option.append(icon, name, state);
+      option.addEventListener('click', () => this.selectWheelWeapon(weapon.id));
+      this.elements.weaponWheelOptions.append(option);
+    });
+
+    this.elements.weaponWheel.hidden = false;
+    this.updateWeaponWheel();
+    return this.selectedWheelWeaponId;
+  }
+
+  selectWheelWeapon(weaponId) {
+    if (!this.wheelWeapons.some((weapon) => weapon.id === weaponId)) return;
+    this.selectedWheelWeaponId = weaponId;
+    this.updateWeaponWheel();
+  }
+
+  selectWeaponByDirection(x, y) {
+    if (Math.hypot(x, y) < 15 || this.wheelWeapons.length === 0) return;
+    let nearestIndex = 0;
+    let nearestDot = -Infinity;
+    const magnitude = Math.hypot(x, y);
+    const directionX = x / magnitude;
+    const directionY = y / magnitude;
+    this.wheelWeapons.forEach((_weapon, index) => {
+      const angle = -Math.PI / 2 + (index * Math.PI * 2) / this.wheelWeapons.length;
+      const dot = directionX * Math.cos(angle) + directionY * Math.sin(angle);
+      if (dot > nearestDot) {
+        nearestDot = dot;
+        nearestIndex = index;
+      }
+    });
+    this.selectWheelWeapon(this.wheelWeapons[nearestIndex].id);
+  }
+
+  updateWeaponWheel() {
+    for (const option of this.elements.weaponWheelOptions.querySelectorAll('.weapon-wheel-option')) {
+      const active = option.dataset.weaponId === this.activeWheelWeaponId;
+      const selected = option.dataset.weaponId === this.selectedWheelWeaponId;
+      option.classList.toggle('is-active', active);
+      option.classList.toggle('is-selected', selected);
+      option.setAttribute('aria-pressed', String(selected));
+      const state = option.querySelector('.weapon-wheel-option-state');
+      if (state) state.textContent = selected ? (active ? 'ACTIVE' : 'RELEASE TO EQUIP') : active ? 'CURRENT' : 'SELECT';
+    }
+    const selectedWeapon = this.wheelWeapons.find((weapon) => weapon.id === this.selectedWheelWeaponId);
+    if (selectedWeapon) {
+      this.elements.wheelCenterIcon.textContent = selectedWeapon.icon;
+      this.elements.wheelCenterName.textContent = selectedWeapon.name;
+      this.elements.wheelCenterState.textContent = selectedWeapon.id === this.activeWheelWeaponId ? 'ACTIVE' : 'RELEASE Q';
+    }
+  }
+
+  closeWeaponWheel() {
+    const weaponId = this.selectedWheelWeaponId;
+    this.elements.weaponWheel.hidden = true;
+    this.wheelWeapons = [];
+    this.activeWheelWeaponId = null;
+    this.selectedWheelWeaponId = null;
+    return weaponId;
+  }
 
   updateHud(player, estimatedServerNow = Date.now(), playerCount = 0) {
     if (!player) return;
@@ -487,43 +587,36 @@ export class GameUI {
     this.elements.healthState.textContent = health <= 0 ? 'OPERATOR DOWN' : percent <= 32 ? 'CRITICAL' : 'COMBAT READY';
     this.elements.aliveCount.textContent = String(playerCount);
 
-    const weaponId = player.weaponId ?? 'pistol';
-    const weapon = getWeapon(weaponId);
-    this.elements.weaponIcon.textContent = weapon.icon;
-    this.elements.weaponName.textContent = weapon.name;
-
-    if (weapon.unlimited) {
-      this.elements.ammo.textContent = '∞';
-      this.elements.ammoMax.textContent = '∞';
-    } else if (weapon.magSize <= 0) {
-      this.elements.ammo.textContent = '—';
-      this.elements.ammoMax.textContent = '—';
-    } else {
-      this.elements.ammo.textContent = String(player.ammo ?? weapon.magSize);
-      this.elements.ammoMax.textContent = String(player.maxAmmo ?? weapon.magSize);
-    }
-
-    const overheated = Boolean(player.overheated);
+    const weaponId = player.currentWeaponId ?? 'SMG';
+    const weapon = WEAPON_PRESENTATION[weaponId];
+    const noMagazine = !player.unlimitedAmmo && !(player.maxAmmo > 0);
+    this.elements.weaponIcon.textContent = player.currentWeaponIcon ?? weapon?.icon ?? '◌';
+    this.elements.weaponName.textContent = player.currentWeaponName ?? weapon?.name ?? weaponId;
+    this.elements.weaponBundle.textContent = BUNDLE_BY_ID[player.bundleId]?.name ?? 'BUNDLE';
+    this.elements.ammo.textContent = player.unlimitedAmmo ? '∞' : noMagazine ? '—' : String(player.ammo ?? 0);
+    this.elements.ammoTotal.textContent = player.unlimitedAmmo
+      ? '∞'
+      : noMagazine
+        ? '—'
+        : String(player.totalAmmo ?? ((player.ammo ?? 0) + (player.reserveAmmo ?? 0)));
     this.elements.ammoWidget.classList.toggle('is-reloading', Boolean(player.reloading));
-    this.elements.ammoWidget.classList.toggle('is-overheated', overheated);
-    this.elements.ammoStatus.textContent = overheated ? 'OVERHEATED' : player.reloading ? 'RELOADING' : 'READY';
-    this.elements.reloadHint.textContent = overheated
-      ? 'BARREL COOLING'
+    this.elements.ammoWidget.classList.toggle('is-overheated', Boolean(player.overheated));
+    this.elements.ammoStatus.textContent = player.reloading
+      ? 'RELOADING'
+      : player.overheated
+        ? 'OVERHEATED'
+        : weaponId === 'COMBAT_SHIELD'
+          ? 'FRONTAL GUARD'
+          : weaponId === 'KNIFE' || weaponId === 'GOD_FIST'
+            ? 'MELEE READY'
+            : 'READY';
+    this.elements.reloadHint.textContent = player.overheated
+      ? 'COOLING DOWN'
       : player.reloading
         ? 'MAGAZINE INCOMING'
-        : weapon.unlimited
-          ? 'UNLIMITED AMMO'
-          : weapon.magSize > 0
-            ? 'R TO RELOAD'
-            : 'MELEE READY';
-
-    const showHeat = Boolean(weapon.overheatAfterMs);
-    this.elements.heatTrack.hidden = !showHeat;
-    if (showHeat) {
-      const heat = Math.max(0, Math.min(1, player.heat ?? 0));
-      this.elements.heatFill.style.width = `${heat * 100}%`;
-      this.elements.heatFill.classList.toggle('is-hot', heat > 0.8 || overheated);
-    }
+        : noMagazine
+          ? 'Q WEAPON WHEEL'
+          : 'R RELOAD · Q WHEEL';
 
     if (!player.alive && player.respawnAt) {
       this.elements.death.hidden = false;
@@ -534,89 +627,6 @@ export class GameUI {
       this.elements.death.hidden = true;
     }
   }
-
-  // ── Weapon wheel ────────────────────────────────────────────────────────
-  // Hold Q: three slots on a dark/cyan ring. Mouse direction picks the slot,
-  // releasing Q equips it (main.js issues the SWITCH_WEAPON request).
-
-  openWeaponWheel(slots, activeSlot = 0) {
-    if (this.wheelOpen) return;
-    this.wheelOpen = true;
-    this.wheelSlots = slots;
-    this.wheelSelection = activeSlot;
-    this.wheelVector = { x: 0, y: -1 };
-    this.elements.weaponWheel.hidden = false;
-    this.elements.weaponWheel.classList.add('is-open');
-    this.elements.weaponWheelSlots.replaceChildren();
-
-    const angles = [-Math.PI / 2, Math.PI / 6, (5 * Math.PI) / 6];
-    slots.forEach((slot, index) => {
-      const weapon = getWeapon(slot.weaponId);
-      const item = document.createElement('div');
-      item.className = `wheel-slot${index === activeSlot ? ' is-active' : ''}`;
-      item.dataset.slot = String(index);
-      const angle = angles[index];
-      const radius = 118;
-      item.style.setProperty('--slot-x', `${Math.cos(angle) * radius}px`);
-      item.style.setProperty('--slot-y', `${Math.sin(angle) * radius}px`);
-
-      const icon = document.createElement('span');
-      icon.className = 'wheel-slot-icon';
-      icon.textContent = weapon.icon;
-      const name = document.createElement('span');
-      name.className = 'wheel-slot-name';
-      name.textContent = weapon.name;
-      const key = document.createElement('span');
-      key.className = 'wheel-slot-key';
-      key.textContent = String(index + 1);
-      item.append(key, icon, name);
-      this.elements.weaponWheelSlots.append(item);
-    });
-
-    this.refreshWheelSelection();
-  }
-
-  moveWeaponWheel(deltaX, deltaY) {
-    if (!this.wheelOpen) return;
-    this.wheelVector.x += deltaX;
-    this.wheelVector.y += deltaY;
-    const length = Math.hypot(this.wheelVector.x, this.wheelVector.y);
-    if (length < 18) {
-      this.refreshWheelSelection();
-      return;
-    }
-    const angle = Math.atan2(this.wheelVector.y, this.wheelVector.x);
-    // Slots sit at -90°, 30°, 150°; snap the vector angle to the nearest.
-    const slotAngles = [-Math.PI / 2, Math.PI / 6, (5 * Math.PI) / 6];
-    let best = this.wheelSelection;
-    let bestDistance = Infinity;
-    slotAngles.forEach((slotAngle, index) => {
-      let delta = Math.abs(((angle - slotAngle + Math.PI * 3) % (Math.PI * 2)) - Math.PI);
-      if (delta < bestDistance) {
-        bestDistance = delta;
-        best = index;
-      }
-    });
-    this.wheelSelection = best;
-    this.refreshWheelSelection();
-  }
-
-  refreshWheelSelection() {
-    const slots = [...this.elements.weaponWheelSlots.children];
-    slots.forEach((item, index) => item.classList.toggle('is-active', index === this.wheelSelection));
-    const weapon = this.wheelSlots[this.wheelSelection];
-    if (weapon) this.elements.wheelHubName.textContent = getWeapon(weapon.weaponId).name;
-  }
-
-  closeWeaponWheel() {
-    if (!this.wheelOpen) return null;
-    this.wheelOpen = false;
-    this.elements.weaponWheel.classList.remove('is-open');
-    this.elements.weaponWheel.hidden = true;
-    return this.wheelSelection;
-  }
-
-  // ── Scoreboard & kill feed ──────────────────────────────────────────────
 
   updateScoreboard(players, localId = this.selfId) {
     if (!Array.isArray(players)) return;
@@ -650,8 +660,8 @@ export class GameUI {
       const deaths = document.createElement('span');
       deaths.textContent = String(player.deaths ?? 0);
       const status = document.createElement('span');
-      status.className = `scoreboard-status${player.alive === false ? ' is-down' : ''}`;
-      status.textContent = player.alive === false ? 'DOWN' : 'ACTIVE';
+      status.className = `scoreboard-status${player.connected === false ? ' is-offline' : player.alive === false ? ' is-down' : ''}`;
+      status.textContent = player.connected === false ? 'OFFLINE' : player.alive === false ? 'DOWN' : 'ACTIVE';
       row.append(identity, kills, deaths, status);
       this.elements.scoreboardBody.append(row);
     });
@@ -670,12 +680,6 @@ export class GameUI {
     victim.className = 'feed-victim';
     victim.textContent = entry.victimName;
     row.append(killer, cross, victim);
-    if (entry.killerIsBot || entry.victimIsBot) {
-      const botTag = document.createElement('span');
-      botTag.className = 'feed-bot';
-      botTag.textContent = '[BOT]';
-      row.append(botTag);
-    }
     if (entry.headshot) {
       const tag = document.createElement('span');
       tag.className = 'feed-headshot';
@@ -696,13 +700,12 @@ export class GameUI {
   showHitMarker(hit) {
     if (!hit?.hit) return;
     const crosshair = this.elements.crosshair;
-    crosshair.classList.remove('is-hit', 'is-kill', 'is-headshot', 'is-blocked');
-    if (hit.blocked) crosshair.classList.add('is-blocked');
-    else if (hit.killed) crosshair.classList.add('is-kill');
+    crosshair.classList.remove('is-hit', 'is-kill', 'is-headshot');
+    if (hit.killed) crosshair.classList.add('is-kill');
     else crosshair.classList.add('is-hit');
     if (hit.headshot) crosshair.classList.add('is-headshot');
     window.clearTimeout(this.hitMarkerTimer);
-    this.hitMarkerTimer = window.setTimeout(() => crosshair.classList.remove('is-hit', 'is-kill', 'is-headshot', 'is-blocked'), 180);
+    this.hitMarkerTimer = window.setTimeout(() => crosshair.classList.remove('is-hit', 'is-kill', 'is-headshot'), 180);
   }
 
   showGameEnd(data, localId = this.selfId) {
@@ -713,7 +716,7 @@ export class GameUI {
     this.elements.scoreboard.hidden = true;
     this.scoreboardOpen = false;
     this.elements.winner.textContent = winner.name;
-    this.elements.winnerSummary.textContent = `${winner.kills} eliminations secured${winner.id === localId ? ' — that was you.' : winner.isBot ? ' — the bots took this one.' : '.'}`;
+    this.elements.winnerSummary.textContent = `${winner.kills} eliminations secured${winner.id === localId ? ' — that was you.' : '.'}`;
     this.renderEndScoreboard(data.scoreboard ?? []);
 
     const isHost = this.room?.hostId === localId;
@@ -728,7 +731,7 @@ export class GameUI {
       row.className = 'end-score-row';
       const name = document.createElement('span');
       name.className = index === 0 ? 'champion-name' : '';
-      name.textContent = `${index + 1}. ${player.isBot ? '[BOT] ' : ''}${player.name}`;
+      name.textContent = `${index + 1}. ${player.name}${player.isBot ? ' [BOT]' : ''}`;
       const kills = document.createElement('span');
       kills.textContent = `${player.kills} K`;
       const deaths = document.createElement('span');
@@ -739,18 +742,23 @@ export class GameUI {
   }
 
   showError(message) {
-    const inLobby = !this.elements.lobby.hidden;
-    const target = inLobby ? this.elements.roomError : this.elements.homeError;
-    const other = inLobby ? this.elements.homeError : this.elements.roomError;
-    other.hidden = true;
+    const target = !this.elements.lobby.hidden
+      ? this.elements.roomError
+      : !this.elements.bundleScreen.hidden
+        ? this.elements.bundleError
+        : !this.elements.callsignScreen.hidden
+          ? this.elements.callsignError
+          : this.elements.homeError;
+    this.clearError();
     target.textContent = String(message || 'Something went wrong. Please try again.');
     target.hidden = false;
   }
 
   clearError() {
+    this.elements.callsignError.hidden = true;
+    this.elements.bundleError.hidden = true;
     this.elements.homeError.hidden = true;
     this.elements.roomError.hidden = true;
-    this.elements.bundleError.hidden = true;
   }
 
   showToast(message) {

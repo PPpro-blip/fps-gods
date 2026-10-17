@@ -16,6 +16,7 @@ const arenaMaterials = {
 export class World {
   constructor(scene) {
     this.scene = scene;
+    this.coverMeshes = new Map();
     this.buildLighting();
     this.buildFloor();
     this.buildWalls();
@@ -140,6 +141,7 @@ export class World {
 
   buildCover() {
     COVER.forEach((block, index) => {
+      if (this.coverMeshes.has(index)) return;
       const geometry = new THREE.BoxGeometry(block.width, block.height, block.depth);
       const material = arenaMaterials.crate[index % arenaMaterials.crate.length];
       const crate = new THREE.Mesh(geometry, material);
@@ -160,7 +162,33 @@ export class World {
       );
       seam.position.set(block.x, block.height * 0.31, block.z);
       this.scene.add(seam);
+      this.coverMeshes.set(index, { crate, edges, seam });
     });
+  }
+
+  updateCover(remainingIds) {
+    if (!Array.isArray(remainingIds)) return;
+    const remaining = new Set(remainingIds);
+    for (const [id, parts] of this.coverMeshes) {
+      if (remaining.has(id)) continue;
+      this.scene.remove(parts.crate, parts.edges, parts.seam);
+      parts.crate.geometry.dispose();
+      parts.edges.geometry.dispose();
+      parts.edges.material.dispose();
+      parts.seam.geometry.dispose();
+      parts.seam.material.dispose();
+      this.coverMeshes.delete(id);
+    }
+  }
+
+  destroyCover(blockId) {
+    if (!this.coverMeshes.has(blockId)) return;
+    const remainingIds = [...this.coverMeshes.keys()].filter((id) => id !== blockId);
+    this.updateCover(remainingIds);
+  }
+
+  resetCover() {
+    this.buildCover();
   }
 
   buildSpawnMarkers() {

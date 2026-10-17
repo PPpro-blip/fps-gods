@@ -4,7 +4,7 @@ const EPSILON = 1e-8;
 
 // Slab intersection for an axis-aligned cover block. The result is the first
 // non-negative ray distance, or Infinity when the ray misses the block.
-export function rayBoxDistance(origin, direction, block, maxDistance) {
+export function rayBoxDistance(origin, direction, block, maxDistance = PLAYER.shotRange) {
   const bounds = [
     [block.x - block.width / 2, block.x + block.width / 2, origin.x, direction.x],
     [0, block.height, origin.y, direction.y],
@@ -28,6 +28,61 @@ export function rayBoxDistance(origin, direction, block, maxDistance) {
   }
 
   return near <= maxDistance ? near : Infinity;
+}
+
+function normalizedRay(direction) {
+  const length = Math.hypot(direction.x, direction.y, direction.z);
+  if (!Number.isFinite(length) || length < EPSILON) return null;
+  return { x: direction.x / length, y: direction.y / length, z: direction.z / length };
+}
+
+function pointAlong(origin, direction, distance) {
+  return {
+    x: origin.x + direction.x * distance,
+    y: origin.y + direction.y * distance,
+    z: origin.z + direction.z * distance,
+  };
+}
+
+// Finds the first cover/floor impact for a projectile. The cover reference is
+// per-match so rockets can remove a block without changing other rooms.
+export function raycastCover({
+  origin,
+  direction,
+  cover = COVER,
+  maxDistance = PLAYER.shotRange,
+  includeFloor = true,
+}) {
+  const ray = normalizedRay(direction);
+  if (!ray) return null;
+
+  let nearestDistance = Infinity;
+  let nearestBlock = null;
+  for (const block of cover) {
+    const distance = rayBoxDistance(origin, ray, block, maxDistance);
+    if (distance < nearestDistance) {
+      nearestDistance = distance;
+      nearestBlock = block;
+    }
+  }
+
+  let hitFloor = false;
+  if (includeFloor && ray.y < -EPSILON) {
+    const floorDistance = -origin.y / ray.y;
+    if (floorDistance >= 0 && floorDistance <= maxDistance && floorDistance < nearestDistance) {
+      nearestDistance = floorDistance;
+      nearestBlock = null;
+      hitFloor = true;
+    }
+  }
+
+  if (!Number.isFinite(nearestDistance)) return null;
+  return {
+    distance: nearestDistance,
+    block: nearestBlock,
+    hitFloor,
+    point: pointAlong(origin, ray, nearestDistance),
+  };
 }
 
 // Intersect a vertical, flat-capped cylinder. Separate body and head cylinders
@@ -65,101 +120,62 @@ function rayCylinderDistance(origin, direction, centerX, centerZ, radius, bottom
   return nearest;
 }
 
-function nearestCover(origin, direction, maxDistance) {
-  let nearest = Infinity;
-  for (const block of COVER) {
-    nearest = Math.min(nearest, rayBoxDistance(origin, direction, block, maxDistance));
-  }
+function raySphereDistance(origin, direction, sphere, maxDistance) {
+  const radius = Number(sphere.radius);
+  if (!Number.isFinite(radius) || radius <= 0) return Infinity;
+  const offsetX = origin.x - sphere.x;
+  const offsetY = origin.y - sphere.y;
+  const offsetZ = origin.z - sphere.z;
+  const projection = offsetX * direction.x + offsetY * direction.y + offsetZ * direction.z;
+  const offsetLengthSquared = offsetX * offsetX + offsetY * offsetY + offsetZ * offsetZ;
+  const c = offsetLengthSquared - radius * radius;
+  if (c <= 0) return 0;
 
-  // A downward shot can hit the arena floor before reaching another player.
-  if (direction.y < -EPSILON) {
-    const floorDistance = -origin.y / direction.y;
-    if (floorDistance >= 0 && floorDistance <= maxDistance) nearest = Math.min(nearest, floorDistance);
+  const discriminant = projection * projection - c;
+  if (discriminant < 0) return Infinity;
+  const distance = -projection - Math.sqrt(discriminant);
+  return distance >= 0 && distance <= maxDistance ? distance : Infinity;
+}
+
+function nearestSmokeDistance(origin, direction, smokeClouds, maxDistance) {
+  let nearest = Infinity;
+  for (const cloud of smokeClouds) {
+    nearest = Math.min(nearest, raySphereDistance(origin, direction, cloud, maxDistance));
   }
   return nearest;
-}
-
-// Distance at which a ray first touches an active smoke cloud, or Infinity.
-function nearestSmoke(origin, direction, smokes, maxDistance) {
-  let nearest = Infinity;
-  for (const smoke of smokes ?? []) {
-    const offsetX = smoke.x - origin.x;
-    const offsetY = smoke.y - origin.y;
-    const offsetZ = smoke.z - origin.z;
-    const along = offsetX * direction.x + offsetY * direction.y + offsetZ * direction.z;
-    if (along < 0 || along > maxDistance) continue;
-    const closestSq = offsetX * offsetX + offsetY * offsetY + offsetZ * offsetZ - along * along;
-    const radius = smoke.radius;
-    if (closestSq <= radius * radius) nearest = Math.min(nearest, along);
-  }
-  return nearest;
-}
-
-/** True when a straight segment from `from` to `to` ignores cover and smoke. */
-export function hasLineOfSight(from, to, smokes = []) {
-  const dx = to.x - from.x;
-  const dy = to.y - from.y;
-  const dz = to.z - from.z;
-  const distance = Math.hypot(dx, dy, dz);
-  if (distance < EPSILON) return true;
-
-  const direction = { x: dx / distance, y: dy / distance, z: dz / distance };
-  const coverDistance = nearestCover(from, direction, distance);
-  if (coverDistance < distance - 0.05) return false;
-
-  const smokeDistance = nearestSmoke(from, direction, smokes, distance);
-  return smokeDistance >= distance - 0.05;
-}
-
-/** True when a projectile-sized point sits inside cover or outside the arena. */
-export function pointHitsWorld(x, y, z, { halfWidth, halfDepth, wallThickness }) {
-  const limitX = halfWidth - wallThickness / 2;
-  const limitZ = halfDepth - wallThickness / 2;
-  if (x < -limitX || x > limitX || z < -limitZ || z > limitZ || y > 12) return true;
-  if (y < 0) return true;
-  for (const block of COVER) {
-    if (
-      x >= block.x - block.width / 2 && x <= block.x + block.width / 2
-      && z >= block.z - block.depth / 2 && z <= block.z + block.depth / 2
-      && y <= block.height
-    ) return true;
-  }
-  return false;
 }
 
 // Returns only the first server-verified target in line of sight. The client
 // never sends a target id or damage value, so it cannot choose its own hit.
-// `piercesWalls` (railgun) flies through cover; `piercesPlayers` collects
-// every player along the ray, nearest first.
 export function castShot({
   origin,
   direction,
   players,
   shooterId,
-  maxDistance = 85,
-  smokes = [],
-  piercesWalls = false,
-  piercesPlayers = false,
+  maxDistance = PLAYER.shotRange,
+  cover = COVER,
+  smokeClouds = [],
+  ignoreCover = false,
 }) {
-  const length = Math.hypot(direction.x, direction.y, direction.z);
-  if (!Number.isFinite(length) || length < EPSILON) return null;
+  const ray = normalizedRay(direction);
+  if (!ray) return null;
 
-  const ray = {
-    x: direction.x / length,
-    y: direction.y / length,
-    z: direction.z / length,
-  };
-
-  let wallDistance = piercesWalls ? maxDistance : nearestCover(origin, ray, maxDistance);
-  if (!piercesWalls) wallDistance = Math.min(wallDistance, nearestSmoke(origin, ray, smokes, maxDistance));
-
-  const hits = [];
-  let nearestDistance = Math.min(maxDistance, wallDistance);
+  const obstruction = raycastCover({
+    origin,
+    direction: ray,
+    cover: ignoreCover ? [] : cover,
+    maxDistance,
+    includeFloor: true,
+  });
+  const coverDistance = obstruction?.distance ?? Infinity;
+  const smokeDistance = nearestSmokeDistance(origin, ray, smokeClouds, maxDistance);
+  const blockingDistance = Math.min(maxDistance, coverDistance, smokeDistance);
   let nearestPlayer = null;
+  let nearestDistance = blockingDistance;
   let headshot = false;
 
   for (const target of players.values()) {
-    if (target.id === shooterId || !target.alive) continue;
+    if (target.id === shooterId || !target.alive || target.connected === false) continue;
 
     const headBottom = target.y + PLAYER.height * 0.8;
     const headDistance = rayCylinderDistance(
@@ -170,7 +186,7 @@ export function castShot({
       PLAYER.radius * 0.63,
       headBottom,
       target.y + PLAYER.height,
-      piercesPlayers ? maxDistance : nearestDistance,
+      nearestDistance,
     );
     const bodyDistance = rayCylinderDistance(
       origin,
@@ -180,37 +196,15 @@ export function castShot({
       PLAYER.radius,
       target.y + 0.2,
       headBottom + 0.03,
-      piercesPlayers ? maxDistance : nearestDistance,
+      nearestDistance,
     );
     const playerDistance = Math.min(headDistance, bodyDistance);
-    const playerHeadshot = headDistance <= bodyDistance;
-
-    if (piercesPlayers) {
-      if (playerDistance < wallDistance && playerDistance < maxDistance) {
-        hits.push({
-          target,
-          distance: playerDistance,
-          headshot: playerHeadshot,
-          point: {
-            x: origin.x + ray.x * playerDistance,
-            y: origin.y + ray.y * playerDistance,
-            z: origin.z + ray.z * playerDistance,
-          },
-        });
-      }
-      continue;
-    }
 
     if (playerDistance < nearestDistance) {
       nearestDistance = playerDistance;
       nearestPlayer = target;
-      headshot = playerHeadshot;
+      headshot = headDistance <= bodyDistance;
     }
-  }
-
-  if (piercesPlayers) {
-    hits.sort((left, right) => left.distance - right.distance);
-    return hits.length ? { hits } : null;
   }
 
   if (!nearestPlayer) return null;
@@ -218,10 +212,6 @@ export function castShot({
     target: nearestPlayer,
     distance: nearestDistance,
     headshot,
-    point: {
-      x: origin.x + ray.x * nearestDistance,
-      y: origin.y + ray.y * nearestDistance,
-      z: origin.z + ray.z * nearestDistance,
-    },
+    point: pointAlong(origin, ray, nearestDistance),
   };
 }
