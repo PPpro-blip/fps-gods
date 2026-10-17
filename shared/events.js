@@ -17,12 +17,19 @@ export const EVENTS = Object.freeze({
   GAME_END: 'GAME_END',
   RETURN_TO_LOBBY: 'RETURN_TO_LOBBY',
 
-  // Lobby and pistol actions are also explicit, shared socket contracts.
+  // Lobby and weapon actions are explicit, shared socket contracts.
   PLAYER_READY: 'PLAYER_READY',
   START_GAME: 'START_GAME',
   PLAYER_RELOAD: 'PLAYER_RELOAD',
   AMMO_UPDATE: 'AMMO_UPDATE',
   HEALTH_UPDATE: 'HEALTH_UPDATE',
+  WEAPON_SWITCH: 'WEAPON_SWITCH',
+  WEAPON_UPDATE: 'WEAPON_UPDATE',
+  WEAPON_OVERHEATED: 'WEAPON_OVERHEATED',
+  PROFILE_REQUEST: 'PROFILE_REQUEST',
+  PROFILE_UPDATE: 'PROFILE_UPDATE',
+  SMOKE_UPDATE: 'SMOKE_UPDATE',
+  COVER_DESTROYED: 'COVER_DESTROYED',
 });
 
 export const ROOM_STATES = Object.freeze({

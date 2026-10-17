@@ -1,13 +1,16 @@
 import * as THREE from 'three';
 
-// Decorative first-person pistol plus tracer/muzzle flash. This module is only
-// a visual effect: the server independently casts every shot and applies damage.
+// Decorative first-person weapon presentation, smoke, tracers, and muzzle flash.
+// The server independently resolves every shot and applies all damage.
 export class WeaponEffects {
   constructor(scene, camera) {
     this.scene = scene;
     this.camera = camera;
     this.tracers = [];
+    this.smokeMeshes = new Map();
+    this.smokeGeometry = new THREE.SphereGeometry(1, 20, 14);
     this.flashUntil = 0;
+    this.weaponId = 'SMG';
     this.buildViewModel();
   }
 
@@ -22,6 +25,7 @@ export class WeaponEffects {
     const slideMaterial = new THREE.MeshStandardMaterial({ color: '#65758a', roughness: 0.32, metalness: 0.82 });
     const gripMaterial = new THREE.MeshStandardMaterial({ color: '#111923', roughness: 0.78, metalness: 0.18 });
     const accentMaterial = new THREE.MeshBasicMaterial({ color: '#59d8ff' });
+    this.accentMaterial = accentMaterial;
 
     const slide = new THREE.Mesh(new THREE.BoxGeometry(0.125, 0.095, 0.36), slideMaterial);
     slide.position.set(0, 0.035, -0.105);
@@ -67,27 +71,92 @@ export class WeaponEffects {
     gun.add(this.flashLight);
   }
 
-  fire(now = performance.now()) {
+  setWeapon(weaponId) {
+    this.weaponId = weaponId;
+    const accentByWeapon = {
+      SMG: '#ff9858', SHOTGUN: '#ff9858', KNIFE: '#ff9858',
+      PISTOL: '#80aaff', SNIPER: '#80aaff', SMOKE_GRENADE: '#80aaff',
+      LMG: '#ffc857', ROCKET: '#ffc857', COMBAT_SHIELD: '#ffc857',
+      RAILGUN: '#59d8ff', MINIGUN: '#59d8ff', GOD_FIST: '#59d8ff',
+    };
+    this.accentMaterial.color.set(accentByWeapon[weaponId] ?? '#59d8ff');
+    const scale = weaponId === 'SNIPER' || weaponId === 'RAILGUN' || weaponId === 'ROCKET'
+      ? 1.13
+      : weaponId === 'KNIFE' || weaponId === 'GOD_FIST' || weaponId === 'COMBAT_SHIELD'
+        ? 0.82
+        : 1;
+    this.gun.scale.setScalar(scale);
+  }
+
+  fire(now = performance.now(), weaponId = this.weaponId) {
+    this.setWeapon(weaponId);
+    const noTracer = ['PISTOL', 'KNIFE', 'GOD_FIST', 'SMOKE_GRENADE', 'COMBAT_SHIELD'].includes(weaponId);
+    const noMuzzleFlash = ['KNIFE', 'GOD_FIST', 'SMOKE_GRENADE', 'COMBAT_SHIELD'].includes(weaponId);
     this.camera.updateMatrixWorld(true);
     const start = this.muzzle.getWorldPosition(new THREE.Vector3());
     const direction = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion).normalize();
-    const end = start.clone().addScaledVector(direction, 46);
-    const geometry = new THREE.BufferGeometry().setFromPoints([start, end]);
-    const material = new THREE.LineBasicMaterial({
-      color: '#ffd67a',
-      transparent: true,
-      opacity: 0.88,
-      depthWrite: false,
-    });
-    const line = new THREE.Line(geometry, material);
-    line.frustumCulled = false;
-    this.scene.add(line);
-    this.tracers.push({ line, expiresAt: now + 100 });
+    if (!noTracer) {
+      const end = start.clone().addScaledVector(direction, 58);
+      const geometry = new THREE.BufferGeometry().setFromPoints([start, end]);
+      const color = weaponId === 'ROCKET' ? '#ff9858' : weaponId === 'RAILGUN' ? '#59d8ff' : '#ffd67a';
+      const material = new THREE.LineBasicMaterial({
+        color,
+        transparent: true,
+        opacity: 0.88,
+        depthWrite: false,
+      });
+      const line = new THREE.Line(geometry, material);
+      line.frustumCulled = false;
+      this.scene.add(line);
+      this.tracers.push({ line, expiresAt: now + 100 });
+    }
 
-    this.flashUntil = now + 48;
-    this.flashMesh.visible = true;
-    this.flashLight.visible = true;
-    this.gun.position.y = -0.273;
+    if (!noMuzzleFlash) {
+      this.flashUntil = now + 48;
+      this.flashMesh.visible = true;
+      this.flashLight.visible = true;
+      this.gun.position.y = -0.273;
+    }
+  }
+
+  updateSmokeClouds(clouds = []) {
+    const visibleIds = new Set(clouds.map((cloud) => cloud.id));
+    for (const [id, record] of this.smokeMeshes) {
+      if (visibleIds.has(id)) continue;
+      this.scene.remove(record.group);
+      for (const material of record.materials) material.dispose();
+      this.smokeMeshes.delete(id);
+    }
+
+    for (const cloud of clouds) {
+      let record = this.smokeMeshes.get(cloud.id);
+      if (!record) {
+        const group = new THREE.Group();
+        const radius = Math.max(1, Number(cloud.radius) || 4);
+        const materials = [0.28, 0.22, 0.18].map((opacity) => new THREE.MeshBasicMaterial({
+          color: '#8e9aa6',
+          transparent: true,
+          opacity,
+          depthWrite: false,
+          side: THREE.DoubleSide,
+        }));
+        const lobes = [
+          { x: 0, y: 0, z: 0, scale: [1, 0.78, 1] },
+          { x: -0.36, y: 0.1, z: 0.22, scale: [0.74, 0.66, 0.72] },
+          { x: 0.34, y: -0.05, z: -0.24, scale: [0.76, 0.69, 0.75] },
+        ];
+        lobes.forEach((lobe, index) => {
+          const mesh = new THREE.Mesh(this.smokeGeometry, materials[index]);
+          mesh.position.set(lobe.x * radius, lobe.y * radius, lobe.z * radius);
+          mesh.scale.set(radius * lobe.scale[0], radius * lobe.scale[1], radius * lobe.scale[2]);
+          group.add(mesh);
+        });
+        this.scene.add(group);
+        record = { group, materials };
+        this.smokeMeshes.set(cloud.id, record);
+      }
+      record.group.position.set(cloud.x, cloud.y, cloud.z);
+    }
   }
 
   update(now = performance.now()) {
@@ -116,5 +185,11 @@ export class WeaponEffects {
       tracer.line.geometry.dispose();
       tracer.line.material.dispose();
     }
+    for (const record of this.smokeMeshes.values()) {
+      this.scene.remove(record.group);
+      for (const material of record.materials) material.dispose();
+    }
+    this.smokeMeshes.clear();
+    this.smokeGeometry.dispose();
   }
 }

@@ -1,6 +1,9 @@
 import { randomInt } from 'node:crypto';
 import { EVENTS, ROOM_MODES, ROOM_STATES } from '../shared/events.js';
+import { DEFAULT_BUNDLE_ID, BUNDLE_UNLOCK_KILLS } from '../shared/bundles.js';
 import { PLAYER } from '../shared/gameConfig.js';
+import { PlayerProfileStore } from './profiles.js';
+import { getBundleLoadout, isBundleId } from './weaponConfig.js';
 
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const PLAYER_COLORS = [
@@ -42,24 +45,28 @@ function uniqueName(room, requestedName) {
 // Owns room membership and state transitions. Each room has its own Socket.IO
 // channel and its own game state; no broadcast is ever sent to a global channel.
 export class RoomManager {
-  constructor(io) {
+  constructor(io, profileStore = new PlayerProfileStore(null)) {
     this.io = io;
+    this.profileStore = profileStore;
     this.rooms = new Map();
   }
 
-  createRoom(socket, requestedName) {
-    return this.createRoomWithState(socket, requestedName, ROOM_STATES.LOBBY, ROOM_MODES.MULTIPLAYER, true);
+  createRoom(socket, requestedName, selection = {}) {
+    return this.createRoomWithState(socket, requestedName, ROOM_STATES.LOBBY, ROOM_MODES.MULTIPLAYER, true, selection);
   }
 
-  createSoloBotsRoom(socket, requestedName) {
-    return this.createRoomWithState(socket, requestedName, ROOM_STATES.PLAYING, ROOM_MODES.SOLO_VS_BOTS, false);
+  createSoloBotsRoom(socket, requestedName, selection = {}) {
+    return this.createRoomWithState(socket, requestedName, ROOM_STATES.PLAYING, ROOM_MODES.SOLO_VS_BOTS, false, selection);
   }
 
-  createRoomWithState(socket, requestedName, state, mode, broadcast) {
+  createRoomWithState(socket, requestedName, state, mode, broadcast, selection = {}) {
     if (socket.data.roomCode) {
       this.emitError(socket, 'You are already in a room. Finish or leave that room first.');
       return null;
     }
+
+    const profileSelection = this.resolveProfileSelection(socket, requestedName, selection);
+    if (!profileSelection) return null;
 
     const code = createRoomCode(this.rooms);
     const room = {
@@ -73,12 +80,12 @@ export class RoomManager {
       winner: null,
     };
     this.rooms.set(code, room);
-    this.addPlayer(room, socket, requestedName);
+    this.addPlayer(room, socket, requestedName, profileSelection);
     if (broadcast) this.broadcastRoomState(room);
     return room;
   }
 
-  joinRoom(socket, requestedCode, requestedName) {
+  joinRoom(socket, requestedCode, requestedName, selection = {}) {
     if (socket.data.roomCode) {
       this.emitError(socket, 'You are already in a room. Finish or leave that room first.');
       return null;
@@ -104,15 +111,43 @@ export class RoomManager {
       return null;
     }
 
-    this.addPlayer(room, socket, requestedName);
+    const profileSelection = this.resolveProfileSelection(socket, requestedName, selection);
+    if (!profileSelection) return null;
+    this.addPlayer(room, socket, requestedName, profileSelection);
     this.broadcastRoomState(room);
     return room;
   }
 
-  addPlayer(room, socket, requestedName) {
+  resolveProfileSelection(socket, requestedName, selection = {}) {
+    const callsign = cleanName(requestedName);
+    const profile = this.profileStore.getOrCreate(
+      selection?.profileId ?? socket.data.profileId,
+      callsign,
+    );
+    const bundleId = typeof selection?.bundleId === 'string' ? selection.bundleId : DEFAULT_BUNDLE_ID;
+
+    if (!isBundleId(bundleId)) {
+      this.emitError(socket, 'Choose a valid weapon bundle before joining a room.');
+      return null;
+    }
+    if (!this.profileStore.isBundleUnlocked(profile.profileId, bundleId)) {
+      this.emitError(socket, `GODS TIER unlocks at ${BUNDLE_UNLOCK_KILLS} lifetime kills. Your profile has ${profile.lifetimeKills}.`);
+      return null;
+    }
+
+    socket.data.profileId = profile.profileId;
+    socket.emit(EVENTS.PROFILE_UPDATE, profile);
+    return { profileId: profile.profileId, lifetimeKills: profile.lifetimeKills, bundleId, callsign };
+  }
+
+  addPlayer(room, socket, requestedName, profileSelection) {
     const player = {
       id: socket.id,
-      name: uniqueName(room, cleanName(requestedName)),
+      profileId: profileSelection.profileId,
+      lifetimeKills: profileSelection.lifetimeKills,
+      bundleId: profileSelection.bundleId,
+      currentWeaponId: getBundleLoadout(profileSelection.bundleId)[0].id,
+      name: uniqueName(room, profileSelection.callsign || cleanName(requestedName)),
       color: PLAYER_COLORS[room.players.size % PLAYER_COLORS.length],
       ready: false,
       connectedAt: Date.now(),
@@ -194,6 +229,10 @@ export class RoomManager {
           health: player.health,
           alive: player.alive,
           isBot: Boolean(player.isBot),
+          bundleId: player.bundleId,
+          currentWeaponId: player.currentWeaponId,
+          currentWeaponName: player.currentWeaponName,
+          currentWeaponIcon: player.currentWeaponIcon,
         }))
       : [...room.players.values()].map((player) => ({
           id: player.id,
@@ -204,6 +243,8 @@ export class RoomManager {
           deaths: 0,
           health: PLAYER.maxHealth,
           alive: true,
+          bundleId: player.bundleId,
+          currentWeaponId: player.currentWeaponId,
         }));
 
     this.io.to(room.code).emit(EVENTS.ROOM_STATE, {

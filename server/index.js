@@ -6,6 +6,7 @@ import { Server } from 'socket.io';
 import { EVENTS, ROOM_STATES } from '../shared/events.js';
 import { PLAYER } from '../shared/gameConfig.js';
 import { GameState } from './gameState.js';
+import { PlayerProfileStore } from './profiles.js';
 import { RoomManager } from './rooms.js';
 
 // Fixed 20 Hz simulation and state broadcast. The server derives its own delta
@@ -17,7 +18,8 @@ const TICK_RATE_MS = 50;
  * port. Exported so deployment/integration tests can boot the real server on an
  * ephemeral port and shut the simulation timer down again.
  */
-export function createGameServer() {
+export function createGameServer(options = {}) {
+  const profileStore = options.profileStore ?? new PlayerProfileStore(options.profileStorePath);
   const app = express();
   app.disable('x-powered-by');
   app.get('/health', (_request, response) => {
@@ -34,13 +36,14 @@ export function createGameServer() {
     pingTimeout: 20_000,
     maxHttpBufferSize: 16_384,
   });
-  const roomManager = new RoomManager(io);
+  const roomManager = new RoomManager(io, profileStore);
 
   function launchRoom(room) {
     const now = Date.now();
     room.game = new GameState(room, {
       emitRoom: (event, data) => io.to(room.code).emit(event, data),
       emitPlayer: (playerId, event, data) => io.to(playerId).emit(event, data),
+      onHumanKill: (player) => profileStore.recordLifetimeKill(player.profileId),
     }, now);
     io.to(room.code).emit(EVENTS.GAME_START, {
       code: room.code,
@@ -53,12 +56,18 @@ export function createGameServer() {
 
   // Socket handlers validate room membership before any input can reach a game.
   io.on('connection', (socket) => {
+    socket.on(EVENTS.PROFILE_REQUEST, (payload = {}) => {
+      const profile = profileStore.getOrCreate(payload.profileId, payload.callsign ?? payload.name);
+      socket.data.profileId = profile.profileId;
+      socket.emit(EVENTS.PROFILE_UPDATE, profile);
+    });
+
     socket.on(EVENTS.CREATE_ROOM, (payload = {}) => {
-      roomManager.createRoom(socket, payload.name);
+      roomManager.createRoom(socket, payload.name, payload);
     });
 
     socket.on(EVENTS.JOIN_ROOM, (payload = {}) => {
-      roomManager.joinRoom(socket, payload.code, payload.name);
+      roomManager.joinRoom(socket, payload.code, payload.name, payload);
     });
 
     socket.on(EVENTS.PLAYER_READY, (payload = {}) => {
@@ -76,7 +85,7 @@ export function createGameServer() {
     });
 
     socket.on(EVENTS.PLAY_NOW, (payload = {}) => {
-      const room = roomManager.createSoloBotsRoom(socket, payload.name);
+      const room = roomManager.createSoloBotsRoom(socket, payload.name, payload);
       if (room) launchRoom(room);
     });
 
@@ -93,6 +102,11 @@ export function createGameServer() {
     socket.on(EVENTS.PLAYER_RELOAD, () => {
       const room = roomManager.getRoomForSocket(socket);
       if (room?.state === ROOM_STATES.PLAYING) room.game?.reload(socket.id, Date.now());
+    });
+
+    socket.on(EVENTS.WEAPON_SWITCH, (payload = {}) => {
+      const room = roomManager.getRoomForSocket(socket);
+      if (room?.state === ROOM_STATES.PLAYING) room.game?.switchWeapon(socket.id, payload.weaponId, Date.now());
     });
 
     socket.on(EVENTS.RETURN_TO_LOBBY, () => {

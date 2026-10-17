@@ -2,10 +2,11 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { io as ioClient } from 'socket.io-client';
 import { EVENTS, ROOM_MODES, ROOM_STATES } from '../shared/events.js';
+import { createMemoryProfileStore } from '../server/profiles.js';
 import { createGameServer } from '../server/index.js';
 
 async function startServer() {
-  const server = createGameServer();
+  const server = createGameServer({ profileStore: createMemoryProfileStore() });
   const port = await new Promise((resolve, reject) => {
     server.httpServer.once('error', reject);
     server.httpServer.listen(0, '127.0.0.1', () => resolve(server.httpServer.address().port));
@@ -129,6 +130,61 @@ test('PLAY_NOW instantly starts SOLO_VS_BOTS with five named bots', async () => 
     const room = server.roomManager.rooms.get(roomState.code);
     assert.equal(room?.game?.players.size, 6);
     assert.equal(room?.game?.mode, ROOM_MODES.SOLO_VS_BOTS);
+  } finally {
+    socket.close();
+    await server.close();
+  }
+});
+
+test('server profile requests persist the player key and enforce bundle unlocks before room entry', async () => {
+  const server = await startServer();
+  const socket = await connectSocket(server.url, 'https://any-origin.example');
+
+  try {
+    const profile = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('no PROFILE_UPDATE within 5s')), 5_000);
+      socket.once(EVENTS.PROFILE_UPDATE, (data) => {
+        clearTimeout(timeout);
+        resolve(data);
+      });
+      socket.emit(EVENTS.PROFILE_REQUEST, { profileId: 'profile-integration', callsign: 'BundleTester' });
+    });
+    assert.equal(profile.profileId, 'profile-integration');
+    assert.equal(profile.lifetimeKills, 0);
+    assert.equal(profile.godsTierUnlocked, false);
+
+    const lockedError = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('no locked-bundle ROOM_ERROR within 5s')), 5_000);
+      socket.once(EVENTS.ROOM_ERROR, (error) => {
+        clearTimeout(timeout);
+        resolve(error);
+      });
+      socket.emit(EVENTS.CREATE_ROOM, {
+        name: 'BundleTester',
+        profileId: profile.profileId,
+        bundleId: 'GODS_TIER',
+      });
+    });
+    assert.match(lockedError.message, /30 lifetime kills/i);
+    assert.equal(server.roomManager.rooms.size, 0);
+
+    for (let kill = 0; kill < 30; kill += 1) {
+      server.roomManager.profileStore.recordLifetimeKill(profile.profileId);
+    }
+    const roomState = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('no unlocked ROOM_STATE within 5s')), 5_000);
+      socket.once(EVENTS.ROOM_STATE, (state) => {
+        clearTimeout(timeout);
+        resolve(state);
+      });
+      socket.emit(EVENTS.CREATE_ROOM, {
+        name: 'BundleTester',
+        profileId: profile.profileId,
+        bundleId: 'GODS_TIER',
+      });
+    });
+    assert.equal(roomState.players[0].bundleId, 'GODS_TIER');
+    assert.equal(roomState.players[0].currentWeaponId, 'RAILGUN');
   } finally {
     socket.close();
     await server.close();

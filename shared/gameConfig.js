@@ -15,15 +15,12 @@ export const PLAYER = Object.freeze({
   jumpVelocity: 7.4,
   gravity: 21,
   maxHealth: 100,
-  fireIntervalMs: 150,
-  magazineSize: 12,
-  reloadMs: 1_150,
   respawnMs: 3_000,
   spawnProtectionMs: 2_000,
   targetKills: 30,
   minPlayers: 2,
   maxPlayers: 16,
-  shotRange: 85,
+  shotRange: 140,
   inputTimeoutMs: 300,
 });
 

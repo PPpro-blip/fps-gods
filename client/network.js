@@ -47,6 +47,11 @@ export class GameNetwork {
     this.socket.on(EVENTS.HIT_CONFIRMED, (data) => this.handlers.onHitConfirmed?.(data));
     this.socket.on(EVENTS.AMMO_UPDATE, (data) => this.handlers.onAmmoUpdate?.(data));
     this.socket.on(EVENTS.HEALTH_UPDATE, (data) => this.handlers.onHealthUpdate?.(data));
+    this.socket.on(EVENTS.WEAPON_UPDATE, (data) => this.handlers.onWeaponUpdate?.(data));
+    this.socket.on(EVENTS.WEAPON_OVERHEATED, (data) => this.handlers.onWeaponOverheated?.(data));
+    this.socket.on(EVENTS.PROFILE_UPDATE, (data) => this.handlers.onProfileUpdate?.(data));
+    this.socket.on(EVENTS.SMOKE_UPDATE, (data) => this.handlers.onSmokeUpdate?.(data));
+    this.socket.on(EVENTS.COVER_DESTROYED, (data) => this.handlers.onCoverDestroyed?.(data));
   }
 
   get id() {
@@ -57,16 +62,20 @@ export class GameNetwork {
     return this.socket.connected;
   }
 
-  createRoom(name) {
-    this.socket.emit(EVENTS.CREATE_ROOM, { name });
+  requestProfile(profileId, callsign) {
+    this.socket.emit(EVENTS.PROFILE_REQUEST, { profileId, callsign });
   }
 
-  joinRoom(code, name) {
-    this.socket.emit(EVENTS.JOIN_ROOM, { code, name });
+  createRoom(name, bundleId, profileId) {
+    this.socket.emit(EVENTS.CREATE_ROOM, { name, bundleId, profileId });
   }
 
-  playNow(name) {
-    this.socket.emit(EVENTS.PLAY_NOW, { name });
+  joinRoom(code, name, bundleId, profileId) {
+    this.socket.emit(EVENTS.JOIN_ROOM, { code, name, bundleId, profileId });
+  }
+
+  playNow(name, bundleId, profileId) {
+    this.socket.emit(EVENTS.PLAY_NOW, { name, bundleId, profileId });
   }
 
   setReady(ready) {
@@ -87,6 +96,10 @@ export class GameNetwork {
 
   reload() {
     this.socket.emit(EVENTS.PLAYER_RELOAD);
+  }
+
+  switchWeapon(weaponId) {
+    this.socket.emit(EVENTS.WEAPON_SWITCH, { weaponId });
   }
 
   returnToLobby() {

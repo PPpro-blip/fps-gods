@@ -17,22 +17,32 @@ To play with friends on the same network, make the Vite URL reachable on your LA
 
 ## How to play
 
-1. Enter a callsign and choose **Play Now** for an instant solo match against five bots.
-2. To play with friends, choose **Create Room**, share the six-character room code, and have other players join. Private rooms support **2–16 human players**.
+1. Enter a callsign, then choose one of the **RUSHER**, **GHOST**, **HEAVY**, or **GODS TIER** bundles. GODS TIER unlocks at 30 server-recorded lifetime kills.
+2. Choose **Play Now** for an instant solo match against five bots, or choose **Create Room** and share the six-character code. Private rooms support **2–16 human players**.
 3. Every player, including the host, presses **Mark Ready**. The host starts the match once everyone is ready.
-4. Click **Enter Arena** and allow pointer lock. Get 30 kills to win.
+4. Click **Enter Arena** and allow pointer lock. Get 30 match eliminations to win.
+
+Hold `Q` and move the mouse toward one of the three weapons to select it; release `Q` to equip. The wheel marks the current weapon and the selection. The lower-right HUD shows the active weapon and current/total remaining ammunition.
 
 | Input | Action |
 | --- | --- |
 | `W A S D` | Move |
 | Mouse | Aim |
-| Left mouse button (hold) | Fire the rapid-fire pistol |
+| Left mouse button (hold) | Fire the selected weapon |
+| `Q` (hold) + mouse direction | Open the weapon wheel and select a weapon; release `Q` to equip |
 | `Space` | Jump |
-| `R` | Reload the 12-round magazine |
+| `R` | Reload the active weapon (when it has a magazine) |
 | `Tab` | Toggle the live scoreboard |
 | `Esc` | Release pointer lock; click **Enter arena** to resume |
 
-The pistol deals 25 body damage or 50 headshot damage. Eliminated players respawn after three seconds and are invulnerable for two seconds after respawning. The magazine reloads automatically when empty and can also be reloaded with `R`; reserve ammunition is unlimited.
+| Bundle | Weapons |
+| --- | --- |
+| **RUSHER** | SMG (30 rounds), close-range Shotgun, instant-kill Knife |
+| **GHOST** | no-tracer Pistol, one-shot-headshot Sniper, vision-blocking Smoke Grenade |
+| **HEAVY** | 60-round LMG, splash-damage cover-destroying Rocket, frontal Combat Shield |
+| **GODS TIER** | wall-piercing Railgun, five-second unlimited Minigun, one-punch God Fist with knockback |
+
+Eliminated players respawn after three seconds and are invulnerable for two seconds after respawning. Weapon damage, fire cadence, magazine size, reload time, range, spread, hit detection, and damage application are authoritative on the server. Lifetime kills are stored server-side in `.data/profiles.json` by default; set `FPS_GODS_PROFILE_PATH` to place that file on a persistent host volume.
 
 ## Game features
 
@@ -40,36 +50,40 @@ The pistol deals 25 body damage or 50 headshot damage. Eliminated players respaw
 - **Private room lifecycle:** `LOBBY → PLAYING → ENDED → LOBBY`, six-character invite codes, host controls, and a ready-up lobby.
 - **Server-owned simulation:** 20 authoritative simulation/state ticks per second. The client sends movement/aim input and renders server snapshots; it does not decide position, damage, hits, health, or score.
 - **Solo bot mode:** Play Now starts a `SOLO_VS_BOTS` match with GOD_BOT_01–GOD_BOT_05. Their server-side 10 Hz brains patrol random map waypoints, aim at the nearest human, fire only with line of sight, miss 30% of shots with random spread, and respawn after three seconds.
-- **Server-side combat:** validated fire cadence, reloads, ray/cylinder hitboxes, top-20%-of-capsule headshots, cover occlusion, spawn protection, kill feed, score updates, and victory checks. Bots use the same authoritative shooting, hit, kill-feed, and scoring path as human players.
-- **Arena:** a medium enclosed map with flat ground, boundary walls, twelve solid cover cubes, and eight fixed perimeter spawn points.
-- **Presentation:** Three.js first-person camera and pistol, pointer lock, server-snapshot interpolation for remote capsules, nametags, bullet tracers, health/ammo HUD, fading kill feed, and a Tab scoreboard.
+- **Server-side combat:** per-weapon fire cadence, magazines and reloads; ray/cylinder hitboxes; headshots; smoke occlusion; destructible cover; frontal shields; spawn protection; kill feed; score updates; and victory checks. Bots use the same authoritative damage and scoring path as human players.
+- **Weapon bundles:** all four bundles are server-validated; GODS TIER unlocks from the server-owned lifetime-kill profile. Bots randomly receive a bundle. Weapon switches broadcast to the whole room.
+- **Arena:** a medium enclosed map with flat ground, boundary walls, destructible cover cubes, and eight fixed perimeter spawn points.
+- **Presentation:** Three.js camera, pointer lock, mouse-direction Q weapon wheel, remote weapon name tags, weapon icon and ammunition HUD, smoke clouds, visual tracers (the Pistol has none), fading kill feed, and a Tab scoreboard.
 - **Room isolation:** game snapshots and gameplay events are emitted only to the Socket.IO room that owns the match.
 
 ## Project layout
 
 ```text
 client/                 Vanilla HTML, CSS, and browser JavaScript
-  index.html             Home, lobby, match HUD, and overlays
-  style.css              Responsive game UI
-  main.js                Three.js renderer and app orchestration
+  index.html             Callsign, bundle select, room menu, HUD, and overlays
+  style.css              Responsive game and weapon-wheel UI
+  main.js                Three.js renderer, controls, and app orchestration
   network.js             Socket.IO client adapter
-  player.js              Input, snapshot interpolation, and remote capsules
-  world.js               Arena visuals
-  weapons.js             First-person pistol and visual-only tracer effects
-  ui.js                  DOM-driven lobby, scoreboard, and HUD
+  player.js              Input, interpolation, and remote operator presentation
+  world.js               Arena visuals and destructible cover presentation
+  weapons.js             First-person presentation, tracers, and smoke clouds
+  ui.js                  Bundle selection, lobby, scoreboard, and HUD
 server/
   index.js               Express health route, Socket.IO handlers, 20 Hz loop
   origins.js             standalone origin-matching utility (not used by server CORS)
-  rooms.js               Room creation, membership, host, and lifecycle
+  rooms.js               Room membership, profile validation, and lifecycle
+  profiles.js            Persistent server-owned lifetime-kill profiles
+  weaponConfig.js        Server-authoritative weapon stats and behaviors
   gameState.js           Authoritative movement, weapons, damage, and scoring
-  hitDetection.js        Server-side ray/AABB/cylinder collision
+  hitDetection.js        Server-side smoke, ray/AABB/cylinder collision
 shared/
   events.js              Shared Socket.IO event names and room states
-  gameConfig.js          Shared map, spawn, and gameplay constants
+  bundles.js             Client-safe bundle and weapon presentation data
+  gameConfig.js          Shared map, spawn, and movement constants
 test/
-  gameplay.test.js       Room, movement, combat, and hit-detection tests
+  gameplay.test.js       Room, movement, bundles, weapons, and hit-detection tests
   origins.test.js        origin-matching utility tests
-  server.test.js         Health route, CORS headers, and a live Socket.IO handshake
+  server.test.js         Health route, CORS, profiles, and live Socket.IO tests
 vite.config.js           Vite root and development Socket.IO proxy
 vercel.json              Vercel build settings: build at root, publish dist/client
 render.yaml              Alternative blueprint for the persistent Express/Socket.IO server
@@ -167,8 +181,8 @@ Serve the static build and proxy `/socket.io` (including WebSocket upgrades) to 
 ## Development notes
 
 - `npm run dev` uses Node's watch mode for the game server and Vite's hot reload for the browser code.
-- `npm test` runs the built-in Node test suite for room isolation, input validation, combat, bot behavior, cover raycasts, scoring, respawns, the health route, wildcard CORS, and live Socket.IO room creation.
-- Shared gameplay constants ensure server collision dimensions and rendered arena geometry stay aligned.
-- Rooms and scores are held in memory. Restarting the Node process ends all active rooms; add a persistent store only if cross-restart recovery is needed.
+- `npm test` runs the built-in Node test suite for room isolation, input validation, bundle selection, authoritative weapon behavior, profile progression, combat, bot behavior, cover raycasts, scoring, respawns, CORS, and Socket.IO.
+- Shared map and movement constants keep server collision dimensions and rendered arena geometry aligned; weapon combat stats stay in `server/weaponConfig.js`.
+- Rooms, match scores, and live matches are held in memory. Lifetime kills are persisted separately to `.data/profiles.json` (or `FPS_GODS_PROFILE_PATH`); production hosts should point that variable at persistent storage if progression must survive redeploys.
 - A match cannot start until every connected player is ready. If a host disconnects, the oldest remaining player becomes host.
 - Socket.IO CORS is configured for every origin (`*`) in development and production. CORS is not authentication; gameplay rules are validated server-side.

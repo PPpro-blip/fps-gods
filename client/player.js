@@ -199,10 +199,16 @@ export class RemotePlayers {
     const label = document.createElement('div');
     label.className = 'name-tag';
     label.style.setProperty('--player-color', data.color || '#57d6ff');
-    label.textContent = data.name;
+    const nameLabel = document.createElement('span');
+    nameLabel.className = 'name-tag-name';
+    nameLabel.textContent = data.name;
+    const weaponLabel = document.createElement('span');
+    weaponLabel.className = 'name-tag-weapon';
+    weaponLabel.textContent = data.currentWeaponName ?? data.currentWeaponId ?? '';
+    label.append(nameLabel, weaponLabel);
     this.nameTagRoot.append(label);
 
-    const record = { mesh, label, shield, name: data.name, color: data.color, alive: true };
+    const record = { mesh, label, shield, nameLabel, weaponLabel, name: data.name, color: data.color, alive: true };
     this.players.set(data.id, record);
     return record;
   }
@@ -220,18 +226,24 @@ export class RemotePlayers {
       const record = this.ensurePlayer(data);
       const pose = interpolator.sample(data.id, renderAt) ?? data;
       record.name = data.name;
-      record.label.textContent = data.name;
+      record.nameLabel.textContent = data.name;
+      const weaponName = data.currentWeaponName ?? data.currentWeaponId ?? '';
+      const weaponIcon = data.currentWeaponIcon ?? '';
+      record.weaponLabel.textContent = weaponName ? `${weaponIcon} ${weaponName}` : '';
       record.color = data.color;
       record.label.style.setProperty('--player-color', data.color || '#57d8ff');
-      record.mesh.visible = Boolean(pose.alive);
+      const showingKnockback = !pose.alive && Math.hypot(pose.vx ?? 0, pose.vz ?? 0) > 1.5;
+      record.mesh.visible = Boolean(pose.alive || showingKnockback);
       record.label.hidden = !pose.alive;
-      if (!pose.alive) continue;
+      if (!pose.alive && !showingKnockback) continue;
 
       record.mesh.position.set(pose.x, pose.y + PLAYER.height / 2, pose.z);
       record.mesh.rotation.y = pose.yaw;
-      record.shield.visible = Boolean(pose.spawnProtected);
+      record.mesh.rotation.z = showingKnockback ? Math.sign(pose.vx || pose.vz) * 0.5 : 0;
+      record.shield.visible = Boolean(pose.alive && pose.spawnProtected);
       record.label.classList.toggle('is-protected', Boolean(pose.spawnProtected));
 
+      if (!pose.alive) continue;
       this.projected.set(pose.x, pose.y + PLAYER.height + 0.28, pose.z).project(camera);
       const onScreen = this.projected.z > -1 && this.projected.z < 1
         && this.projected.x > -1.2 && this.projected.x < 1.2
