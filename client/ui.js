@@ -1,4 +1,5 @@
 import { BUNDLE_BY_ID, BUNDLE_INFO, BUNDLE_UNLOCK_KILLS, DEFAULT_BUNDLE_ID, WEAPON_PRESENTATION } from '../shared/bundles.js';
+import { ROOM_MODES } from '../shared/events.js';
 
 // All presentation is plain DOM/CSS. Socket payloads are inserted with
 // textContent rather than HTML so player names never become markup.
@@ -17,6 +18,8 @@ export class GameUI {
     this.toastTimeout = null;
     this.feedTimers = new Map();
     this.lastHudPlayer = null;
+    this.latestScoreboard = null;
+    this.scoreboardSignature = null;
 
     this.elements = {
       shell: document.querySelector('.app-shell'),
@@ -259,7 +262,13 @@ export class GameUI {
     this.elements.start.addEventListener('click', () => this.handlers.onStart?.());
     this.elements.copyCode.addEventListener('click', () => this.copyRoomCode());
     this.elements.resume.addEventListener('click', () => this.handlers.onResume?.());
-    this.elements.returnLobby.addEventListener('click', () => this.handlers.onReturnToLobby?.());
+    this.elements.returnLobby.addEventListener('click', () => {
+      if (this.room?.mode === ROOM_MODES.SOLO_VS_BOTS) {
+        this.handlers.onPlayAgain?.();
+        return;
+      }
+      this.handlers.onReturnToLobby?.();
+    });
 
     window.addEventListener('keydown', (event) => {
       if (event.code === 'Tab' && !event.repeat && !this.elements.match.hidden) {
@@ -484,6 +493,12 @@ export class GameUI {
   setScoreboard(open) {
     this.scoreboardOpen = Boolean(open);
     this.elements.scoreboard.hidden = !this.scoreboardOpen;
+    // Scores are buffered while the panel is hidden so the 20 Hz game state
+    // never causes DOM churn. Opening Tab renders the freshest buffered list.
+    if (this.scoreboardOpen && this.latestScoreboard) {
+      this.scoreboardSignature = null;
+      this.updateScoreboard(this.latestScoreboard.players, this.latestScoreboard.localId);
+    }
   }
 
   openWeaponWheel(bundleId, activeWeaponId) {
@@ -630,7 +645,20 @@ export class GameUI {
 
   updateScoreboard(players, localId = this.selfId) {
     if (!Array.isArray(players)) return;
+    this.latestScoreboard = { players, localId };
+    if (!this.scoreboardOpen) return;
+
     const sorted = [...players].sort((left, right) => right.kills - left.kills || left.deaths - right.deaths || left.name.localeCompare(right.name));
+    const signature = sorted.map((player) => [
+      player.id,
+      player.kills,
+      player.deaths,
+      player.alive,
+      player.connected,
+      player.isBot,
+    ].join(':')).join('|');
+    if (signature === this.scoreboardSignature) return;
+    this.scoreboardSignature = signature;
     this.elements.scoreboardBody.replaceChildren();
 
     sorted.forEach((player, index) => {
@@ -719,9 +747,18 @@ export class GameUI {
     this.elements.winnerSummary.textContent = `${winner.kills} eliminations secured${winner.id === localId ? ' — that was you.' : '.'}`;
     this.renderEndScoreboard(data.scoreboard ?? []);
 
+    const mode = data?.mode ?? this.room?.mode;
+    const solo = mode === ROOM_MODES.SOLO_VS_BOTS;
     const isHost = this.room?.hostId === localId;
+    this.setEndActionLabel(solo ? 'REDEPLOY' : 'RETURN TO LOBBY');
     this.elements.returnLobby.hidden = !isHost;
     this.elements.endWaiting.hidden = isHost;
+  }
+
+  setEndActionLabel(label) {
+    const first = this.elements.returnLobby.firstChild;
+    if (first?.nodeType === Node.TEXT_NODE) first.textContent = `${label} `;
+    else this.elements.returnLobby.prepend(document.createTextNode(`${label} `));
   }
 
   renderEndScoreboard(players) {

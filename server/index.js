@@ -129,6 +129,17 @@ export function createGameServer(options = {}) {
       roomManager.returnToLobby(socket);
     });
 
+    // Solo bot rooms cannot use the shared lobby (they never have a second
+    // human), so their end screen requests a fresh authoritative match instead.
+    socket.on(EVENTS.PLAY_AGAIN, () => {
+      const result = roomManager.restartSoloMatch(socket);
+      if (result.error) {
+        roomManager.emitError(socket, result.error);
+        return;
+      }
+      launchRoom(result.room);
+    });
+
     socket.on('disconnect', () => {
       roomManager.handleDisconnect(socket);
     });

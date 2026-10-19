@@ -86,6 +86,7 @@ function syncActiveWeapon(player, now = Date.now()) {
 
   player.currentWeaponName = weapon.name;
   player.currentWeaponIcon = weapon.icon;
+  player.auto = weapon.auto === true;
   player.ammo = state.ammo;
   player.reserveAmmo = state.reserveAmmo;
   player.maxAmmo = weapon.magSize;
@@ -435,6 +436,7 @@ export class GameState {
       weaponId,
       weaponName: player.currentWeaponName,
       weaponIcon: player.currentWeaponIcon,
+      auto: player.auto,
     };
     this.emitRoom(EVENTS.WEAPON_UPDATE, data);
     this.sendAmmo(player, now);
@@ -722,6 +724,7 @@ export class GameState {
       weaponId: player.currentWeaponId,
       weaponName: player.currentWeaponName,
       weaponIcon: player.currentWeaponIcon,
+      auto: player.auto,
       ammo: player.ammo,
       reserveAmmo: player.reserveAmmo,
       totalAmmo: player.totalAmmo,
@@ -951,6 +954,7 @@ export class GameState {
           currentWeaponId: player.currentWeaponId,
           currentWeaponName: player.currentWeaponName,
           currentWeaponIcon: player.currentWeaponIcon,
+          auto: player.auto,
           spawnProtected: now < player.spawnProtectionUntil,
           spawnProtectionUntil: player.spawnProtectionUntil,
           respawnAt: player.respawnAt,

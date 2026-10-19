@@ -1,64 +1,92 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
-  BUNDLES,
-  GODS_TIER_UNLOCK_KILLS,
+  BUNDLE_BY_ID,
+  BUNDLE_INFO,
+  BUNDLE_UNLOCK_KILLS,
+  DEFAULT_BUNDLE_ID,
+} from '../shared/bundles.js';
+import {
+  BUNDLE_IDS,
+  BUNDLE_LOADOUTS,
   WEAPONS,
-  getBundle,
   getWeapon,
-  isBundleUnlocked,
-} from '../shared/weapons.js';
+  isBundleId,
+} from '../server/weaponConfig.js';
 
-// The shared catalog is the single source of truth for gameplay stats. These
-// checks keep bundles, models and the GODS TIER unlock contract consistent.
-test('every bundle carries exactly three resolvable weapons', () => {
-  assert.deepEqual(Object.keys(BUNDLES), ['rusher', 'ghost', 'heavy', 'gods']);
-  for (const bundle of Object.values(BUNDLES)) {
-    assert.equal(bundle.slots.length, 3, `${bundle.id} must have three slots`);
-    for (const weaponId of bundle.slots) {
-      const weapon = getWeapon(weaponId);
-      assert.equal(weapon.id, weaponId);
-      assert.ok(weapon.name && weapon.icon && weapon.blurb, `${weaponId} needs HUD copy`);
-    }
+// server/weaponConfig.js is the single authoritative combat catalog.
+// shared/bundles.js mirrors only presentation copy, so these checks keep both
+// sides locked to the same weapon ids, slots, and display names.
+
+test('every presentation bundle maps onto three authoritative weapons', () => {
+  assert.deepEqual(BUNDLE_IDS, ['RUSHER', 'GHOST', 'HEAVY', 'GODS_TIER']);
+  assert.equal(BUNDLE_INFO.length, BUNDLE_IDS.length);
+  assert.equal(DEFAULT_BUNDLE_ID, 'RUSHER');
+
+  for (const bundle of BUNDLE_INFO) {
+    const loadout = BUNDLE_LOADOUTS[bundle.id];
+    assert.equal(isBundleId(bundle.id), true);
+    assert.equal(loadout.length, 3, `${bundle.id} must have three slots`);
+    assert.deepEqual(
+      loadout.map((weapon) => weapon.id),
+      bundle.weapons.map((weapon) => weapon.id),
+      `${bundle.id} slot ids must match the authoritative loadout`,
+    );
+    loadout.forEach((weapon, index) => {
+      const presentation = bundle.weapons[index];
+      assert.equal(presentation.name, weapon.name, `${weapon.id} display name`);
+      assert.equal(presentation.icon, weapon.icon, `${weapon.id} display icon`);
+      assert.ok(presentation.role, `${weapon.id} needs HUD role copy`);
+    });
   }
 });
 
-test('weapon stats cover every server-side branch', () => {
+test('every authoritative weapon declares complete combat metadata', () => {
+  assert.equal(Object.keys(WEAPONS).length, 12);
   for (const weapon of Object.values(WEAPONS)) {
-    assert.ok(Number.isFinite(weapon.damage), `${weapon.id} damage`);
-    assert.ok(Number.isFinite(weapon.fireRateMs), `${weapon.id} fireRateMs`);
-    assert.ok(Number.isFinite(weapon.range), `${weapon.id} range`);
+    for (const stat of ['damage', 'fireRate', 'magSize', 'reloadTime', 'range', 'spread']) {
+      assert.equal(Number.isFinite(weapon[stat]), true, `${weapon.id}.${stat}`);
+    }
     assert.ok(
-      ['hitscan', 'melee', 'projectile', 'grenade', 'shield'].includes(weapon.type),
-      `${weapon.id} type`,
+      ['hitscan', 'melee', 'rocket', 'smoke', 'shield'].includes(weapon.behavior),
+      `${weapon.id} behavior`,
     );
-    if (weapon.type === 'hitscan') assert.equal(typeof weapon.spread, 'number');
-    if (weapon.type === 'projectile') {
+    assert.equal(typeof weapon.auto, 'boolean', `${weapon.id} must declare automatic fire`);
+    if (weapon.behavior === 'rocket') {
       assert.ok(weapon.splashRadius > 0 && weapon.splashDamage > 0, `${weapon.id} splash`);
     }
-    if (weapon.unlimited) assert.ok(weapon.overheatAfterMs > 0, `${weapon.id} must overheat`);
+    if (weapon.unlimitedAmmo) {
+      assert.ok(weapon.overheatsAfterMs > 0, `${weapon.id} must overheat`);
+      assert.ok(weapon.overheatCooldownMs > 0, `${weapon.id} needs a cooldown`);
+    }
+  }
+
+  // Held fire is a server-declared property, not a client guess.
+  for (const weaponId of ['SHOTGUN', 'KNIFE', 'PISTOL', 'SNIPER', 'SMOKE_GRENADE', 'ROCKET', 'COMBAT_SHIELD', 'RAILGUN']) {
+    assert.equal(WEAPONS[weaponId].auto, false, `${weaponId} must be semi-automatic`);
+  }
+  for (const weaponId of ['SMG', 'LMG', 'MINIGUN', 'GOD_FIST']) {
+    assert.equal(WEAPONS[weaponId].auto, true, `${weaponId} must support held fire`);
   }
 });
 
 test('GODS TIER unlocks at exactly 30 lifetime kills', () => {
-  assert.equal(GODS_TIER_UNLOCK_KILLS, 30);
-  assert.equal(BUNDLES.gods.unlockKills, 30);
-  assert.equal(isBundleUnlocked('gods', 29), false);
-  assert.equal(isBundleUnlocked('gods', 30), true);
-  assert.equal(isBundleUnlocked('rusher', 0), true);
-  assert.equal(getBundle('heavy').name, 'HEAVY');
-  assert.throws(() => getWeapon('nope'), /Unknown weapon/);
-  assert.throws(() => getBundle('nope'), /Unknown bundle/);
+  assert.equal(BUNDLE_UNLOCK_KILLS, 30);
+  assert.equal(BUNDLE_BY_ID.GODS_TIER.unlockKills, 30);
+  assert.equal(BUNDLE_BY_ID.RUSHER.unlockKills, undefined);
+  assert.equal(getWeapon('RAILGUN').piercesCover, true);
+  assert.equal(getWeapon('MINIGUN').unlimitedAmmo, true);
+  assert.equal(getWeapon('nope'), null);
 });
 
 test('the sniper one-shots to the head and the knife one-shots anywhere', () => {
-  const sniper = getWeapon('sniper');
-  assert.ok(sniper.damage * sniper.headshotMultiplier >= 100, 'sniper headshot must kill');
+  const sniper = getWeapon('SNIPER');
+  assert.ok(sniper.headshotDamage >= 100, 'sniper headshot must kill');
   assert.ok(sniper.damage < 100, 'sniper body shot leaves a sliver');
-  const knife = getWeapon('knife');
+  const knife = getWeapon('KNIFE');
   assert.ok(knife.damage >= 100, 'knife must kill in one swing');
-  const fist = getWeapon('fist');
+  const fist = getWeapon('GOD_FIST');
   assert.ok(fist.knockback > 0, 'god fist needs knockback');
-  const pistol = getWeapon('pistol');
+  const pistol = getWeapon('PISTOL');
   assert.equal(pistol.tracer, false, 'pistol never draws a tracer');
 });

@@ -371,6 +371,52 @@ test('weapon switching is limited to the selected bundle and synchronizes the ac
   assert.equal(publicPlayer?.bundleId, 'RUSHER');
 });
 
+test('authoritative snapshots expose automatic-fire metadata for the client trigger', () => {
+  const now = 1_000_000;
+  const { game, shooter, emitted } = makeGame(now, 'RUSHER', 'GHOST');
+  const snapshot = (at) => game.getPublicState(at).players.find((player) => player.id === shooter.id);
+
+  assert.equal(snapshot(now).currentWeaponId, 'SMG');
+  assert.equal(snapshot(now).auto, true, 'the SMG repeats while the trigger is held');
+
+  assert.equal(game.switchWeapon(shooter.id, 'SHOTGUN', now + 1), true);
+  const update = emitted.find((event) => event.event === EVENTS.WEAPON_UPDATE);
+  assert.equal(update?.data.auto, false, 'weapon broadcasts carry the new trigger mode');
+  assert.equal(snapshot(now + 2).auto, false, 'the public state carries the new trigger mode');
+  const ammo = emitted.filter((event) => event.channel === shooter.id && event.event === EVENTS.AMMO_UPDATE).at(-1);
+  assert.equal(ammo?.data.auto, false, 'ammo updates carry the new trigger mode');
+});
+
+test('an ended solo room redeploys a fresh match without a lobby detour', () => {
+  const io = new FakeIO();
+  const rooms = new RoomManager(io);
+  const host = new FakeSocket('solo-host');
+  const room = rooms.createSoloBotsRoom(host, 'SoloHost');
+  assert.equal(room.mode, ROOM_MODES.SOLO_VS_BOTS);
+  assert.equal(room.state, ROOM_STATES.PLAYING);
+
+  assert.match(rooms.restartSoloMatch(host).error, /must finish/i, 'active matches cannot restart');
+
+  room.state = ROOM_STATES.ENDED;
+  room.winner = { id: host.id, name: 'SoloHost', kills: 30 };
+  room.game = { transient: true };
+
+  const intruder = new FakeSocket('solo-intruder');
+  intruder.data.roomCode = room.code;
+  assert.match(rooms.restartSoloMatch(intruder).error, /only the match host/i);
+
+  const multiplayerHost = new FakeSocket('multiplayer-host');
+  const multiplayerRoom = rooms.createRoom(multiplayerHost, 'MultiHost');
+  multiplayerRoom.state = ROOM_STATES.ENDED;
+  assert.match(rooms.restartSoloMatch(multiplayerHost).error, /only solo bot matches/i);
+
+  const result = rooms.restartSoloMatch(host);
+  assert.equal(result.room, room);
+  assert.equal(room.state, ROOM_STATES.PLAYING);
+  assert.equal(room.winner, null);
+  assert.equal(room.game, null, 'launchRoom must construct a brand-new GameState');
+});
+
 test('SMG fire rate and ammunition are enforced by the server', () => {
   const now = 1_000_000;
   const { game, shooter, target } = makeGame(now, 'RUSHER', 'GHOST');
