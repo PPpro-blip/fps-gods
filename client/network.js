@@ -119,6 +119,10 @@ export class GameNetwork {
     this.socket.emit(EVENTS.RETURN_TO_LOBBY);
   }
 
+  playAgain() {
+    this.socket.emit(EVENTS.PLAY_AGAIN);
+  }
+
   disconnect() {
     this.socket.disconnect();
   }

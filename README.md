@@ -29,7 +29,7 @@ npm run build   # production client into dist/client
 | --- | --- |
 | `W A S D` | Move |
 | Mouse | Aim |
-| Left mouse button | Fire (hold for automatic weapons) |
+| Left mouse button | Fire — click for semi-automatic weapons; hold for automatic weapons |
 | `Space` | Jump |
 | `R` | Reload |
 | `Q` (hold) | Weapon wheel — move the mouse to select, release to equip |
@@ -74,7 +74,7 @@ The local view shows the active gun and procedural hands at the bottom-right of 
 
 ## Solo bot mode
 
-**PLAY NOW** starts a private `SOLO_VS_BOTS` match against five bots (`GOD_BOT_01`–`GOD_BOT_05`). Their 10 Hz server-side brains patrol waypoints, aim at the nearest human, fire only with line of sight, miss 30% of shots with randomized aim, select a bundle, and respawn after three seconds. Bots use the same authoritative damage and scoring pipeline as human operators.
+**PLAY NOW** starts a private `SOLO_VS_BOTS` match against five bots (`GOD_BOT_01`–`GOD_BOT_05`). Their 10 Hz server-side brains patrol waypoints, aim at the nearest human, fire only with line of sight, miss 30% of shots with randomized aim, select a bundle, and respawn after three seconds. Bots use the same authoritative damage and scoring pipeline as human operators. When a solo match ends, **REDEPLOY** starts a fresh zero-score match against new bots in the same room code; multiplayer hosts use **RETURN TO LOBBY** instead.
 
 ## Project layout
 

@@ -21,6 +21,7 @@ export const EVENTS = Object.freeze({
   GAME_START: 'GAME_START',
   GAME_END: 'GAME_END',
   RETURN_TO_LOBBY: 'RETURN_TO_LOBBY',
+  PLAY_AGAIN: 'PLAY_AGAIN',
 
   // Lobby and weapon actions are explicit, shared socket contracts.
   PLAYER_READY: 'PLAYER_READY',

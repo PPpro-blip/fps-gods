@@ -178,6 +178,7 @@ export class RoomManager {
     if (room.state === ROOM_STATES.ENDED) {
       socket.emit(EVENTS.GAME_END, {
         code: room.code,
+        mode: room.mode,
         winner: room.winner,
         scoreboard: room.game?.getScoreboard() ?? [],
       });
@@ -275,6 +276,33 @@ export class RoomManager {
 
     room.state = ROOM_STATES.PLAYING;
     room.winner = null;
+    return { room };
+  }
+
+  /**
+   * Start a fresh bot match in an ended SOLO_VS_BOTS room.
+   *
+   * Solo rooms never contain a second human, so the shared lobby flow can never
+   * satisfy the two-player launch rule. Redeploying keeps the same room code
+   * and human seat while launchRoom builds a brand-new GameState, which resets
+   * bots, score, cover, and smoke.
+   */
+  restartSoloMatch(socket) {
+    const room = this.getRoomForSocket(socket);
+    if (!room) return { error: 'You are no longer in a room.' };
+    if (room.mode !== ROOM_MODES.SOLO_VS_BOTS) {
+      return { error: 'Only solo bot matches can be redeployed.' };
+    }
+    if (room.state !== ROOM_STATES.ENDED) {
+      return { error: 'The current match must finish before redeploying.' };
+    }
+    if (room.hostId !== socket.id) {
+      return { error: 'Only the match host can redeploy.' };
+    }
+
+    room.state = ROOM_STATES.PLAYING;
+    room.winner = null;
+    room.game = null;
     return { room };
   }
 
@@ -414,6 +442,7 @@ export class RoomManager {
     room.winner = winner;
     this.io.to(room.code).emit(EVENTS.GAME_END, {
       code: room.code,
+      mode: room.mode,
       winner,
       scoreboard: room.game?.getScoreboard() ?? [],
     });

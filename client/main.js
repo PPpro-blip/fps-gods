@@ -5,6 +5,7 @@ import { PlayerController, RemotePlayers, StateInterpolator } from './player.js'
 import { World } from './world.js';
 import { WeaponEffects, WeaponModelLibrary } from './weapons.js';
 import { GameUI } from './ui.js';
+import { WeaponTrigger } from './trigger.js';
 
 function getOrCreateProfileId() {
   const stored = localStorage.getItem('fps-gods-profile-id');
@@ -65,7 +66,7 @@ weaponModels.ready.then((loaded) => {
 let currentRoom = null;
 let matchActive = false;
 let matchEnded = false;
-let isShooting = false;
+const trigger = new WeaponTrigger();
 let weaponWheelOpen = false;
 let wheelPointer = { x: 0, y: 0 };
 let nextClientShotAt = 0;
@@ -94,12 +95,13 @@ function closeWeaponWheel(equip = true) {
 function clearMatchPresentation() {
   matchActive = false;
   matchEnded = false;
-  isShooting = false;
+  trigger.release();
   closeWeaponWheel(false);
   nextClientShotAt = 0;
   latestPlayers = [];
   latestLocalPlayer = null;
   latestPlayerAlive = false;
+  trigger.sync(null, false);
   interpolator.clear();
   remotePlayers.clear();
   weaponEffects.updateSmokeClouds([]);
@@ -139,7 +141,7 @@ const network = new GameNetwork({
     ui.setConnectionState('offline');
     if (reason !== 'io client disconnect') ui.showToast('Connection interrupted. Trying to reconnect…');
     controller.setEnabled(false);
-    isShooting = false;
+    trigger.release();
     closeWeaponWheel(false);
   },
   onConnectionError: () => ui.setConnectionState('offline'),
@@ -173,7 +175,7 @@ const network = new GameNetwork({
       ui.showLobby(room, network.id);
     } else if (room.state === 'ENDED') {
       matchEnded = true;
-      isShooting = false;
+      trigger.release();
       closeWeaponWheel(false);
       controller.setEnabled(false);
       if (document.pointerLockElement === canvas) document.exitPointerLock();
@@ -189,6 +191,7 @@ const network = new GameNetwork({
     serverClockOffset = (state.serverTime ?? Date.now()) - Date.now();
     latestLocalPlayer = latestPlayers.find((player) => player.id === network.id) ?? null;
     latestPlayerAlive = Boolean(latestLocalPlayer?.alive);
+    trigger.sync(latestLocalPlayer?.currentWeaponId, latestLocalPlayer?.auto);
     world.updateCover(state.cover);
     weaponEffects.updateSmokeClouds(state.smokeClouds ?? []);
     if (latestLocalPlayer) {
@@ -200,7 +203,7 @@ const network = new GameNetwork({
   },
   onGameEnd: (result) => {
     matchEnded = true;
-    isShooting = false;
+    trigger.release();
     closeWeaponWheel(false);
     controller.setEnabled(false);
     if (document.pointerLockElement === canvas) document.exitPointerLock();
@@ -216,7 +219,7 @@ const network = new GameNetwork({
       latestLocalPlayer.health = 0;
       latestLocalPlayer.respawnAt = data.respawnAt;
       latestPlayerAlive = false;
-      isShooting = false;
+      trigger.release();
       closeWeaponWheel(false);
       ui.updateHud(latestLocalPlayer, Date.now() + serverClockOffset, latestPlayers.filter((player) => player.alive && player.connected !== false).length);
     }
@@ -230,6 +233,7 @@ const network = new GameNetwork({
   onAmmoUpdate: (data) => {
     if (!latestLocalPlayer) return;
     Object.assign(latestLocalPlayer, data);
+    trigger.sync(latestLocalPlayer.currentWeaponId, latestLocalPlayer.auto);
     weaponEffects.setWeapon(latestLocalPlayer.currentWeaponId, latestLocalPlayer.bundleId);
     if (data.reloading) {
       weaponEffects.startReload((data.reloadCompletesAt ?? Date.now() + 900) - (Date.now() + serverClockOffset));
@@ -250,7 +254,9 @@ const network = new GameNetwork({
         currentWeaponId: data.weaponId,
         currentWeaponName: data.weaponName,
         currentWeaponIcon: data.weaponIcon,
+        auto: data.auto === true,
       });
+      trigger.sync(data.weaponId, data.auto);
       weaponEffects.setWeapon(data.weaponId, data.bundleId);
       ui.updateHud(latestLocalPlayer, Date.now() + serverClockOffset, latestPlayers.filter((candidate) => candidate.alive && candidate.connected !== false).length);
     }
@@ -295,6 +301,10 @@ ui.setHandlers({
   onReady: (ready) => network.setReady(ready),
   onStart: () => network.startGame(),
   onReturnToLobby: () => network.returnToLobby(),
+  onPlayAgain: () => {
+    if (!network.connected) return ui.showError('Still reconnecting to the game server. Try again in a moment.');
+    network.playAgain();
+  },
   onResume: () => {
     if (canPlay() && document.pointerLockElement !== canvas) {
       const request = canvas.requestPointerLock?.();
@@ -313,7 +323,7 @@ document.addEventListener('pointerlockchange', () => {
   const locked = document.pointerLockElement === canvas;
   controller.setEnabled(locked && canPlay() && !weaponWheelOpen);
   if (!locked) {
-    isShooting = false;
+    trigger.release();
     closeWeaponWheel(false);
   }
   if (canPlay()) ui.setPaused(!locked);
@@ -334,14 +344,14 @@ document.addEventListener('mousemove', (event) => {
 document.addEventListener('mousedown', (event) => {
   if (event.button !== 0 || !canPlay() || weaponWheelOpen
     || document.pointerLockElement !== canvas || !latestPlayerAlive) return;
-  isShooting = true;
+  trigger.press();
   fireOnce(performance.now());
 });
 document.addEventListener('mouseup', (event) => {
-  if (event.button === 0) isShooting = false;
+  if (event.button === 0) trigger.release();
 });
 window.addEventListener('blur', () => {
-  isShooting = false;
+  trigger.release();
   closeWeaponWheel(false);
 });
 window.addEventListener('contextmenu', (event) => event.preventDefault());
@@ -353,7 +363,7 @@ document.addEventListener('keydown', (event) => {
     event.preventDefault();
     weaponWheelOpen = true;
     wheelPointer = { x: 0, y: 0 };
-    isShooting = false;
+    trigger.release();
     ui.openWeaponWheel(latestLocalPlayer?.bundleId, latestLocalPlayer?.currentWeaponId);
     controller.setEnabled(false);
     return;
@@ -403,7 +413,7 @@ function animate(now = performance.now()) {
         input.jump = false;
       }
       network.sendInput(input);
-      if (isShooting && now >= nextClientShotAt) fireOnce(now);
+      if (trigger.shouldRepeat) fireOnce(now);
     }
 
     camera.rotation.order = 'YXZ';

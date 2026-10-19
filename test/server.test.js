@@ -154,6 +154,51 @@ test('PLAY_NOW instantly starts SOLO_VS_BOTS with five named bots', async () => 
   }
 });
 
+test('PLAY_AGAIN redeploys a finished solo match with fresh bots and score', async () => {
+  const server = await startServer();
+  const socket = await connectSocket(server.url, 'https://any-origin.example');
+
+  try {
+    const playingState = waitForEvent(
+      socket,
+      EVENTS.ROOM_STATE,
+      (state) => state.state === ROOM_STATES.PLAYING && state.mode === ROOM_MODES.SOLO_VS_BOTS,
+    );
+    socket.emit(EVENTS.PLAY_NOW, { name: 'SoloRanger' });
+    const firstState = await playingState;
+
+    const room = server.roomManager.rooms.get(firstState.code);
+    const firstGame = room.game;
+    assert.equal(firstGame.players.size, 6);
+
+    const endPromise = waitForEvent(socket, EVENTS.GAME_END, (data) => data.code === firstState.code);
+    server.roomManager.endGame(room, { id: socket.id, name: 'SoloRanger', kills: 30 });
+    const end = await endPromise;
+    assert.equal(end.mode, ROOM_MODES.SOLO_VS_BOTS, 'the end screen can tell solo from multiplayer');
+    assert.equal(room.state, ROOM_STATES.ENDED);
+
+    const startPromise = waitForEvent(socket, EVENTS.GAME_START, (data) => data.code === firstState.code);
+    const replayStatePromise = waitForEvent(
+      socket,
+      EVENTS.ROOM_STATE,
+      (state) => state.code === firstState.code && state.state === ROOM_STATES.PLAYING,
+    );
+    socket.emit(EVENTS.PLAY_AGAIN);
+    const [startData, replayState] = await Promise.all([startPromise, replayStatePromise]);
+
+    assert.equal(startData.mode, ROOM_MODES.SOLO_VS_BOTS);
+    assert.equal(room.state, ROOM_STATES.PLAYING);
+    assert.equal(room.winner, null);
+    assert.notEqual(room.game, firstGame, 'a replay gets a brand-new authoritative simulation');
+    assert.equal(room.game.players.size, 6);
+    assert.equal(replayState.players.length, 6);
+    assert.equal(room.game.getScoreboard().every((player) => player.kills === 0), true);
+  } finally {
+    socket.close();
+    await server.close();
+  }
+});
+
 test('two live clients join, ready, play, synchronize weapon switches, and resume a room session', async () => {
   const server = await startServer();
   const host = await connectSocket(server.url, 'https://host.example');
