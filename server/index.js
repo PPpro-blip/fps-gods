@@ -203,6 +203,10 @@ export function startGameServer() {
   // default ONLY - Railway/Render always set PORT (Railway's is commonly 8080),
   // so this value never decides the production port and must not be edited as a
   // fix for a host routing problem. See shared/deployment.js.
+  //
+  // 38ec5ac set this to a literal 3000 on main; that intent is preserved here by
+  // DEFAULT_GAME_SERVER_PORT, which is also what Vite's dev proxy now derives its
+  // target from, so the two can no longer be edited apart.
   const port = Number(process.env.PORT) || DEFAULT_GAME_SERVER_PORT;
   const host = process.env.HOST || DEFAULT_GAME_SERVER_HOST;
 
