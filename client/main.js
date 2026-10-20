@@ -44,11 +44,9 @@ const ui = new GameUI({ profileId });
 let lobbyScene = null;
 let assetsLoaded = false;
 
-// Start loading assets
-assetManager.init().then(() => {
-  assetsLoaded = true;
-  console.log('[FPS GODS] Assets loaded successfully');
-}).catch((error) => {
+// Kick the character GLB off immediately so it downloads while the renderer and
+// world are constructed; the lobby itself waits on this promise below.
+const assetBoot = assetManager.init().catch((error) => {
   console.error('[FPS GODS] Failed to load assets:', error);
 });
 const scene = new THREE.Scene();
@@ -73,18 +71,24 @@ const world = new World(scene);
 const controller = new PlayerController(camera, canvas);
 const nameTagRoot = document.querySelector('#name-tags');
 
-// Initialize lobby scene after assets are loaded
-setTimeout(() => {
-  if (assetsLoaded) {
-    lobbyScene = new LobbyScene(scene, camera);
-  }
-}, 100);
 const weaponModels = new WeaponModelLibrary();
 const remotePlayers = new RemotePlayers(scene, nameTagRoot, weaponModels);
 const interpolator = new StateInterpolator();
 const weaponEffects = new WeaponEffects(scene, camera, weaponModels);
 weaponModels.ready.then((loaded) => {
   if (!loaded) ui.showToast('One or more weapon models could not be loaded. Check the game asset files.');
+});
+
+// The lobby needs the character GLB *and* the weapon library, so it boots when
+// both settle. It used to poll a single 100 ms timer and only construct
+// LobbyScene if the flag had flipped by then - on any real network a 728 KB GLB
+// takes longer than that, so the lobby scene was silently never created and
+// never retried. allSettled also builds the lobby when an asset fails, because
+// LobbyScene degrades to "no character" rather than throwing.
+Promise.allSettled([assetBoot, weaponModels.ready]).then(() => {
+  assetsLoaded = assetManager.ready;
+  lobbyScene = new LobbyScene(scene, camera, { weaponModels });
+  console.log(`[FPS GODS] Lobby booted; assets ${assetsLoaded ? 'loaded' : 'partially unavailable'}`);
 });
 
 let currentRoom = null;

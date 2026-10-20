@@ -101,6 +101,15 @@ shared/
   gameConfig.js          Map and player constants
 ```
 
+## Assets
+
+Every GLB is referenced through a Vite `?url` import (`client/weapons.js`, `client/AssetManager.js`), which emits it into `dist/client/assets/` under a content hash. There is **no `public/` directory and there must not be a hand-written `/assets/foo.glb` string** in client code: with `root: 'client'` Vite's `publicDir` resolves to `client/public`, so a literal web path is copied nowhere and 404s in production while the loader's `catch` turns it into a silent `null`. That is what the original "asset 404s" report actually was — `arena_map.glb`, `animations.glb` and `rifle.glb` name files that have never existed in this repository. `test/assets.test.js` enforces the import rule, so a bad path fails `npm test` instead of shipping.
+
+Two asset loads were deliberately **not** re-pointed at the real files, because the assets themselves don't support them:
+
+- **Map** (`client/assets/map/map-assets.glb`, 3.0 MB) — `getMap()` has no callers; `world.js` builds the arena procedurally. Loading it would ship 3 MB nobody reads.
+- **Animations** (`client/assets/animations/Animation_1..5.glb`, 13 MB total) — the loader expects one GLB whose clips are named per `ANIMATION_MAP` (`Idle`, `Run`, …) and whose rig matches `character.glb`. In the actual files every clip is named `mixamo.com`/`mixamo.com.00N`, and each file carries its own `mixamorig:*` skeleton while `character.glb` ships a different rig with zero animations. So those clips cannot drive the lobby character at all. Restoring animation needs an art decision — re-export one retargeted GLB with named clips, or render the rig embedded in one of the five files — not a path change. The lobby currently shows the character in its bind pose.
+
 ## Deployment
 
 The client is a static Vite build; Socket.IO needs a persistent Node.js process. A Render blueprint is included in `render.yaml`.
