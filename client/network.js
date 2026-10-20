@@ -37,7 +37,7 @@ export function resolveSocketTarget(configuredValue, pageOrigin) {
   // `new URL` resolves almost anything when given a base, so a stray "not a url"
   // would quietly become a same-origin request to a junk path. Accept an
   // absolute URL, or a bare host that is safe to default to https. A scheme must
-  // be `://`, not merely a colon, or `localhost:3001` reads as if `localhost:`
+  // be `://`, not merely a colon, or `localhost:3000` reads as if `localhost:`
   // were the scheme.
   const hasScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(configured);
   const bareHost = /^[a-z0-9.-]+(?::\d+)?(?:\/[^\s]*)?$/i.test(configured);

@@ -11,7 +11,7 @@ npm install
 npm run dev
 ```
 
-Open **http://localhost:5173**. The development command starts the Vite client and the Express/Socket.IO server together; Vite proxies Socket.IO traffic to port 3001. No environment file is needed for local play.
+Open **http://localhost:5173**. The development command starts the Vite client and the Express/Socket.IO server together; Vite proxies Socket.IO traffic to port 3000. No environment file is needed for local play.
 
 ```bash
 npm test        # Node test suite, including live two-client multiplayer coverage
@@ -111,6 +111,20 @@ The client is a static Vite build; Socket.IO needs a persistent Node.js process.
 
 Socket.IO accepts cross-origin connections. CORS is not authentication; gameplay and profile progression are validated server-side.
 
+### Ports
+
+`shared/deployment.js` holds `DEFAULT_GAME_SERVER_PORT` (3000), and both the server's
+`PORT` fallback and Vite's dev proxy target derive from it, so the two can never
+drive apart. Treat that number as a **local** default only. Railway and Render
+inject `PORT` at runtime and the app binds the injected value, so the fallback is
+never what decides a production port — Railway injects `8080` by default, not
+`3000`. If a Railway service starts but the public domain returns 502, the cause
+is the domain's **target port** not matching the port the app actually listens
+on: check `Service → Settings → Networking → Public Networking`, and either clear
+the explicit target port so Railway uses its own injected `PORT`, or pin `PORT` as
+a service variable to the same value as the target port. Do not "fix" this by
+editing the fallback in `shared/deployment.js`, and do not hardcode a port.
+
 ### Reading the connection badge
 
 `GET /health` answers `{ status, service, uptime, rooms, connections, now }`. The client calls it whenever the handshake fails, because the Socket.IO error object cannot distinguish the causes — over the websocket transport a refused connection, a DNS failure, and a 404 from a host that is not the game server all surface as the same `Error("websocket error")`.
@@ -129,8 +143,8 @@ To check the server from anywhere: `curl -s https://<game-server-host>/health`. 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `HOST` | `0.0.0.0` | Game-server listen address |
-| `PORT` | `3001` | Game-server port (hosts may inject this) |
-| `GAME_SERVER_URL` | `http://127.0.0.1:3001` | Vite development proxy target |
+| `PORT` | `3000` | Local game-server port; **overridden by the host's injected `PORT`** |
+| `GAME_SERVER_URL` | `http://127.0.0.1:3000` | Vite development proxy target |
 | `VITE_PORT` | `5173` | Vite development server port |
 | `VITE_SOCKET_URL` | Unset | Browser-facing Socket.IO server URL, baked into the client build |
 | `FPS_GODS_PROFILE_PATH` | `.data/profiles.json` | Persistent server profile store path |

@@ -44,7 +44,7 @@ test('a base path is preserved so a reverse-proxied server still works', () => {
   );
   // A bare host with no scheme is a guessable paste, not garbage.
   assert.equal(resolveSocketTarget('arena.example', HTTPS_PAGE).url, 'https://arena.example');
-  assert.equal(resolveSocketTarget('localhost:3001', 'http://localhost:5173').url, 'https://localhost:3001');
+  assert.equal(resolveSocketTarget('localhost:3000', 'http://localhost:5173').url, 'https://localhost:3000');
 });
 
 test('http is upgraded on an https page, which a browser would block outright', () => {
@@ -55,8 +55,8 @@ test('http is upgraded on an https page, which a browser would block outright', 
   assert.equal(result.source, 'override-upgraded');
   // Over plain http the insecure URL stays insecure.
   assert.equal(
-    resolveSocketTarget('http://localhost:3001', 'http://localhost:5173').url,
-    'http://localhost:3001',
+    resolveSocketTarget('http://localhost:3000', 'http://localhost:5173').url,
+    'http://localhost:3000',
   );
 });
 
