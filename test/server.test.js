@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { spawn } from 'node:child_process';
 import { io as ioClient } from 'socket.io-client';
 import { EVENTS, ROOM_MODES, ROOM_STATES } from '../shared/events.js';
 import { createMemoryProfileStore } from '../server/profiles.js';
@@ -53,6 +54,27 @@ function waitForEvent(socket, event, predicate = () => true, timeoutMs = 5_000) 
       clearTimeout(timeout);
       socket.off(event, onData);
       resolve(data);
+    };
+    socket.on(event, onData);
+  });
+}
+
+// Polling-transport clients can legitimately drop a `volatile` state packet when
+// no GET is outstanding, so this resolves on the first arrival of `count` and the
+// assertions treat >= expected as success rather than an exact stream length.
+function collectEvents(socket, event, expected = 1, timeoutMs = 5_000) {
+  return new Promise((resolve, reject) => {
+    const seen = [];
+    const timeout = setTimeout(() => {
+      socket.off(event, onData);
+      (seen.length >= expected ? resolve(seen) : reject(new Error(`only ${seen.length} ${event} events in ${timeoutMs}ms`)));
+    }, timeoutMs);
+    const onData = (data) => {
+      seen.push(data);
+      if (seen.length < expected) return;
+      clearTimeout(timeout);
+      socket.off(event, onData);
+      resolve(seen);
     };
     socket.on(event, onData);
   });
@@ -116,6 +138,69 @@ test('the health endpoint counts live rooms and connections', async () => {
   } finally {
     socket.close();
     await server.close();
+  }
+});
+
+test('a throwing room tick is contained to that room and cannot kill the process', async () => {
+  const server = await startServer();
+  const victim = await connectSocket(server.url, 'https://any-origin.example');
+  const bystander = await connectSocket(server.url, 'https://any-origin.example');
+  try {
+    const startRoom = (socket) => new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('no GAME_START')), 5_000);
+      socket.once(EVENTS.GAME_START, (data) => { clearTimeout(timeout); resolve(data.code); });
+      socket.once(EVENTS.ROOM_ERROR, (error) => { clearTimeout(timeout); reject(new Error(error.message)); });
+      socket.emit(EVENTS.PLAY_NOW, { name: 'CrankTest', bundleId: 'RUSHER' });
+    });
+    const victimCode = await startRoom(victim);
+    const bystanderCode = await startRoom(bystander);
+    assert.notEqual(victimCode, bystanderCode);
+
+    // Break only the victim's simulation, the way a bad payload would.
+    const victimRoom = server.roomManager.rooms.get(victimCode);
+    assert.ok(victimRoom?.game, 'expected a running solo room to simulate');
+    victimRoom.game.update = () => { throw new Error('synthetic tick fault'); };
+
+    // If the throw escaped the loop it would be an uncaught exception in a timer
+    // callback and this whole test process would die instead of asserting.
+    const [endPayload, bystanderUpdates] = await Promise.all([
+      waitForEvent(victim, EVENTS.GAME_END, (data) => data?.code === victimCode, 5_000),
+      collectEvents(bystander, EVENTS.GAME_STATE_UPDATE, 2, 5_000),
+    ]);
+
+    assert.equal(endPayload.winner, null);
+    assert.match(endPayload.reason, /stopped after a server-side error/);
+    assert.ok(bystanderUpdates.length >= 2, 'the healthy room must keep ticking');
+    assert.equal(server.roomManager.rooms.get(bystanderCode).state, ROOM_STATES.PLAYING);
+    assert.equal(server.roomManager.rooms.get(victimCode).state, ROOM_STATES.ENDED);
+  } finally {
+    victim.close();
+    bystander.close();
+    await server.close();
+  }
+});
+
+test('a failed bind reports the reason and exits instead of dying on an unhandled error', async () => {
+  const blocker = await startServer();
+  try {
+    const child = spawn(process.execPath, [new URL('../server/index.js', import.meta.url).pathname], {
+      cwd: new URL('..', import.meta.url).pathname,
+      env: { ...process.env, PORT: String(blocker.port), HOST: '127.0.0.1' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let output = '';
+    child.stdout.on('data', (chunk) => { output += chunk; });
+    child.stderr.on('data', (chunk) => { output += chunk; });
+    const code = await new Promise((resolve) => child.on('exit', resolve));
+
+    // Before this fix Node raised 'error' on the emitter with no listener, so the
+    // process died with a raw stack trace and the host only saw a crash loop.
+    assert.equal(code, 1);
+    assert.match(output, /cannot listen on 127\.0\.0\.1/);
+    assert.match(output, /port .* is already in use/);
+    assert.doesNotMatch(output, /UnhandledPromiseRejection|ERR_UNHANDLED_ERROR/);
+  } finally {
+    await blocker.close();
   }
 });
 

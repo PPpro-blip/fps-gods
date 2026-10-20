@@ -2,9 +2,10 @@ import * as THREE from 'three';
 import { assetManager } from './AssetManager.js';
 
 export class LobbyScene {
-  constructor(scene, camera) {
+  constructor(scene, camera, { weaponModels } = {}) {
     this.scene = scene;
     this.camera = camera;
+    this.weaponModels = weaponModels ?? null;
     this.character = null;
     this.weapon = null;
     this.lobbyGroup = null;
@@ -156,54 +157,52 @@ export class LobbyScene {
     
     this.lobbyGroup.add(this.character);
     
-    // Load and attach primary weapon (rifle)
-    await this.loadLobbyWeapon('rifle');
+    // Attach a real weapon from the already-loaded model library. This used to
+    // fetch `/assets/weapons/rifle.glb`, a file that does not exist in the repo
+    // (there is no `rifle` weapon id either - see shared/bundles.js), so the
+    // lobby character has never actually held anything. Reusing weaponModels also
+    // avoids a second network fetch of GLBs the game has already downloaded.
+    this.loadLobbyWeapon();
     
     // Set up animations
     this.setupCharacterAnimations();
   }
 
-  async loadLobbyWeapon(weaponName) {
-    try {
-      const weaponPath = `/assets/weapons/${weaponName}.glb`;
-      const { GLTFLoader } = await import('three/addons/loaders/GLTFLoader.js');
-      const loader = new GLTFLoader();
-      const glb = await loader.loadAsync(weaponPath);
-      
-      // Remove existing weapon if any
-      if (this.weapon) {
-        this.character.remove(this.weapon);
-      }
-      
-      this.weapon = glb.scene;
-      
-      // Position weapon in character's hand
-      this.weapon.position.set(0.3, -0.1, -0.3);
-      this.weapon.rotation.set(0, Math.PI / 4, 0);
-      this.weapon.scale.set(0.8, 0.8, 0.8);
-      
-      // Apply cyan emissive to weapon
-      this.weapon.traverse((child) => {
-        if (child.isMesh && child.material) {
-          if (Array.isArray(child.material)) {
-            child.material.forEach(mat => {
-              if (mat && mat.emissive) {
-                mat.emissive.setHex(0x00f0ff);
-                mat.emissiveIntensity = 0.15;
-              }
-            });
-          } else if (child.material.emissive) {
-            child.material.emissive.setHex(0x00f0ff);
-            child.material.emissiveIntensity = 0.15;
-          }
-        }
-      });
-      
-      this.character.add(this.weapon);
-      console.log(`[LobbyScene] Loaded weapon: ${weaponName}`);
-    } catch (error) {
-      console.error(`[LobbyScene] Failed to load weapon ${weaponName}:`, error);
+  loadLobbyWeapon(weaponId = 'SMG') {
+    const model = this.weaponModels?.createModel(weaponId) ?? null;
+    if (!model) {
+      console.warn(`[LobbyScene] Lobby weapon '${weaponId}' is not available yet`);
+      return;
     }
+
+    if (this.weapon) this.character.remove(this.weapon);
+
+    this.weapon = model;
+
+    // Position weapon in character's hand
+    this.weapon.position.set(0.3, -0.1, -0.3);
+    this.weapon.rotation.set(0, Math.PI / 4, 0);
+    this.weapon.scale.set(0.8, 0.8, 0.8);
+
+    // Apply cyan emissive to weapon
+    this.weapon.traverse((child) => {
+      if (child.isMesh && child.material) {
+        if (Array.isArray(child.material)) {
+          child.material.forEach(mat => {
+            if (mat && mat.emissive) {
+              mat.emissive.setHex(0x00f0ff);
+              mat.emissiveIntensity = 0.15;
+            }
+          });
+        } else if (child.material.emissive) {
+          child.material.emissive.setHex(0x00f0ff);
+          child.material.emissiveIntensity = 0.15;
+        }
+      }
+    });
+
+    this.character.add(this.weapon);
+    console.log(`[LobbyScene] Attached lobby weapon: ${weaponId}`);
   }
 
   setupCharacterAnimations() {
