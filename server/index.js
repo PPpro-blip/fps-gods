@@ -182,7 +182,7 @@ export function createGameServer(options = {}) {
 /** Bind the game server to HOST/PORT and install signal-based shutdown. */
 export function startGameServer() {
   const server = createGameServer();
-  const port = Number(process.env.PORT) || 3001;
+  const port = Number(process.env.PORT) || 3000;
   const host = process.env.HOST || '0.0.0.0';
 
   server.httpServer.listen(port, host, () => {
