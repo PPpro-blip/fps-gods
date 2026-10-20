@@ -1,11 +1,14 @@
 import * as THREE from 'three';
 import { PLAYER } from '../shared/gameConfig.js';
+import { BUNDLE_BY_ID } from '../shared/bundles.js';
 import { GameNetwork } from './network.js';
 import { PlayerController, RemotePlayers, StateInterpolator } from './player.js';
 import { World } from './world.js';
 import { WeaponEffects, WeaponModelLibrary } from './weapons.js';
 import { GameUI } from './ui.js';
 import { WeaponTrigger } from './trigger.js';
+import { LobbyScene } from './LobbyScene.js';
+import { assetManager } from './AssetManager.js';
 
 function getOrCreateProfileId() {
   const stored = localStorage.getItem('fps-gods-profile-id');
@@ -33,7 +36,21 @@ function clearRoomSession() {
 
 const canvas = document.querySelector('#game-canvas');
 const profileId = getOrCreateProfileId();
+const urlParams = new URLSearchParams(window.location.search);
+const roomCodeFromUrl = urlParams.get('room');
 const ui = new GameUI({ profileId });
+
+// Initialize asset manager and lobby scene
+let lobbyScene = null;
+let assetsLoaded = false;
+
+// Start loading assets
+assetManager.init().then(() => {
+  assetsLoaded = true;
+  console.log('[FPS GODS] Assets loaded successfully');
+}).catch((error) => {
+  console.error('[FPS GODS] Failed to load assets:', error);
+});
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(77, window.innerWidth / window.innerHeight, 0.05, 125);
 camera.rotation.order = 'YXZ';
@@ -55,6 +72,13 @@ try {
 const world = new World(scene);
 const controller = new PlayerController(camera, canvas);
 const nameTagRoot = document.querySelector('#name-tags');
+
+// Initialize lobby scene after assets are loaded
+setTimeout(() => {
+  if (assetsLoaded) {
+    lobbyScene = new LobbyScene(scene, camera);
+  }
+}, 100);
 const weaponModels = new WeaponModelLibrary();
 const remotePlayers = new RemotePlayers(scene, nameTagRoot, weaponModels);
 const interpolator = new StateInterpolator();
@@ -131,11 +155,20 @@ function enterMatch(room = currentRoom) {
   ui.setPaused(document.pointerLockElement !== canvas);
 }
 
+let autoJoinAttempted = false;
+
 const network = new GameNetwork({
   onConnect: (_socketId, recovered) => {
     ui.setConnectionState('connected');
     network.requestProfile(profileId, ui.playerName);
     if (!recovered) network.resumeRoom(readRoomSession());
+    // Auto-join from URL parameter if present
+    if (roomCodeFromUrl && ui.playerName && !autoJoinAttempted) {
+      autoJoinAttempted = true;
+      setTimeout(() => {
+        network.joinRoom(roomCodeFromUrl, ui.playerName, ui.bundleId, profileId);
+      }, 500);
+    }
   },
   onDisconnect: (reason) => {
     ui.setConnectionState('offline');
@@ -297,6 +330,10 @@ ui.setHandlers({
     if (!network.connected) return ui.showError('Still connecting to the game server. Try again in a moment.');
     network.joinRoom(code, name, bundleId, id);
   },
+  onJoinFromUrl: (name, code, bundleId, id) => {
+    if (!network.connected) return;
+    network.joinRoom(code, name, bundleId, id);
+  },
   onLeaveRoom: () => network.leaveRoom(),
   onReady: (ready) => network.setReady(ready),
   onStart: () => network.startGame(),
@@ -375,6 +412,46 @@ document.addEventListener('keydown', (event) => {
   network.reload();
 });
 
+// Mouse scroll weapon cycling
+document.addEventListener('wheel', (event) => {
+  if (!canPlay() || weaponWheelOpen || !latestPlayerAlive
+    || document.pointerLockElement !== canvas) return;
+  
+  const deltaY = controller.getWheelDelta();
+  if (deltaY === 0) return;
+  
+  event.preventDefault();
+  
+  // Get current bundle weapons
+  const bundleId = latestLocalPlayer?.bundleId;
+  if (!bundleId) return;
+  
+  const bundle = BUNDLE_BY_ID[bundleId];
+  if (!bundle) return;
+  
+  const weapons = bundle.weapons;
+  const currentIndex = weapons.findIndex(w => w.id === latestLocalPlayer?.currentWeaponId);
+  
+  if (currentIndex === -1) return;
+  
+  // Scroll down (deltaY > 0) cycles forward
+  // Scroll up (deltaY < 0) cycles backward
+  let nextIndex;
+  if (deltaY > 0) {
+    nextIndex = (currentIndex + 1) % weapons.length;
+  } else {
+    nextIndex = (currentIndex - 1 + weapons.length) % weapons.length;
+  }
+  
+  const nextWeaponId = weapons[nextIndex].id;
+  if (nextWeaponId && nextWeaponId !== latestLocalPlayer?.currentWeaponId && network.connected) {
+    network.switchWeapon(nextWeaponId);
+    // Require fresh click to fire after weapon swap
+    trigger.release();
+    trigger.sync(nextWeaponId, false);
+  }
+});
+
 document.addEventListener('keyup', (event) => {
   if (event.code === 'KeyQ') closeWeaponWheel(true);
 });
@@ -403,6 +480,19 @@ window.addEventListener('resize', resize);
 // the local camera position is interpolated from authoritative server snapshots.
 function animate(now = performance.now()) {
   requestAnimationFrame(animate);
+
+  const delta = Math.min((now - (window.lastFrameTime || now)) / 1000, 0.1);
+  window.lastFrameTime = now;
+
+  // Update asset manager animations
+  if (assetsLoaded) {
+    assetManager.update(delta);
+  }
+
+  // Update lobby scene if active
+  if (lobbyScene && !matchActive) {
+    lobbyScene.update(delta);
+  }
 
   if (matchActive) {
     if (canPlay() && network.connected) {

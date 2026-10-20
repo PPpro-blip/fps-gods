@@ -149,7 +149,10 @@ button:focus-visible, input:focus-visible, a:focus-visible { outline: 2px solid 
 .room-code-card strong { display: block; margin-top: 4px; color: var(--cyan); font: 600 27px var(--mono); letter-spacing: .22em; }
 .copy-button { padding: 8px 10px; border: 1px solid var(--line); background: transparent; color: #c4d0df; cursor: pointer; font: 9px var(--mono); letter-spacing: .1em; }
 .copy-button:hover { border-color: var(--cyan); color: var(--cyan); }
-.copy-button span { margin-left: 6px; }
+  .copy-button span { margin-left: 6px; }
+  .room-url-display { margin-top: 8px; padding: 8px; border: 1px solid var(--line); background: rgba(12, 18, 29, 0.7); border-radius: 6px; }
+  .room-url-display .url-label { color: var(--muted); font: 8px var(--mono); letter-spacing: 0.1em; }
+  .room-url-display code { display: block; margin-top: 4px; color: var(--cyan); font: 9px var(--mono); word-break: break-all; }
 .players-card { padding: 24px 25px 19px; }
 .players-card::before { left: 23px; }
 .players-card-header { display: flex; align-items: center; justify-content: space-between; padding-bottom: 17px; border-bottom: 1px solid var(--line); }
@@ -443,6 +446,179 @@ kbd { min-width: 15px; height: 15px; display: inline-grid; place-items: center; 
 /* ═══════════════════════════════════════════════════════════════════════
    MASTER UPGRADE — solo mode, bundle select, weapon wheel, bot tags
    ═══════════════════════════════════════════════════════════════════════ */
+
+/* Cryzen-Style Navigation Bar */
+.cryzen-nav {
+  position: absolute;
+  top: 70px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 8px;
+  z-index: 10;
+  padding: 8px 16px;
+  background: rgba(13, 18, 29, 0.85);
+  border: 1px solid rgba(89, 216, 255, 0.2);
+  border-radius: 6px;
+  backdrop-filter: blur(12px);
+}
+
+.nav-item {
+  padding: 8px 16px;
+  border: 1px solid transparent;
+  background: rgba(89, 216, 255, 0.08);
+  color: #b8c5d6;
+  font: 700 9px var(--mono);
+  letter-spacing: 0.12em;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: all 0.2s ease;
+}
+
+.nav-item:hover {
+  border-color: rgba(89, 216, 255, 0.4);
+  background: rgba(89, 216, 255, 0.15);
+  color: var(--cyan);
+}
+
+.nav-item.active {
+  border-color: var(--cyan);
+  background: rgba(89, 216, 255, 0.25);
+  color: var(--cyan);
+  box-shadow: 0 0 12px rgba(89, 216, 255, 0.3);
+}
+
+/* Mode Selector Modal */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.85);
+  z-index: 100;
+  backdrop-filter: blur(4px);
+}
+
+.mode-selector {
+  width: min(420px, 90vw);
+  padding: 32px;
+  border: 1px solid rgba(89, 216, 255, 0.3);
+  background: linear-gradient(145deg, rgba(16, 23, 36, 0.95), rgba(9, 13, 22, 0.93));
+  border-radius: 12px;
+  text-align: center;
+  box-shadow: 0 25px 80px rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(16px);
+}
+
+.mode-selector::before {
+  content: '';
+  position: absolute;
+  top: -1px;
+  left: 50%;
+  width: 44px;
+  height: 2px;
+  transform: translateX(-50%);
+  background: var(--cyan);
+  box-shadow: 0 0 16px rgba(89, 216, 255, 0.7);
+}
+
+.mode-selector h2 {
+  margin: 0 0 24px;
+  color: var(--text);
+  font: 700 18px var(--display);
+  letter-spacing: 0.15em;
+}
+
+.mode-cards {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+.mode-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 16px 8px;
+  border: 1px solid rgba(173, 198, 229, 0.15);
+  background: rgba(3, 8, 15, 0.5);
+  color: #b8c5d6;
+  cursor: pointer;
+  border-radius: 8px;
+  transition: all 0.2s ease;
+}
+
+.mode-card:hover {
+  border-color: var(--cyan);
+  background: rgba(89, 216, 255, 0.12);
+  transform: translateY(-2px);
+}
+
+.mode-icon {
+  font-size: 24px;
+  color: var(--cyan);
+}
+
+.mode-name {
+  font: 700 11px var(--mono);
+  letter-spacing: 0.08em;
+  color: var(--text);
+}
+
+.mode-desc {
+  font-size: 8px;
+  color: var(--muted);
+  letter-spacing: 0.05em;
+}
+
+.modal-close {
+  width: 100%;
+  padding: 12px;
+  border: 1px solid rgba(173, 198, 229, 0.2);
+  background: rgba(89, 216, 255, 0.08);
+  color: #b8c5d6;
+  font: 700 10px var(--mono);
+  letter-spacing: 0.12em;
+  cursor: pointer;
+  border-radius: 6px;
+  transition: all 0.2s ease;
+}
+
+.modal-close:hover {
+  border-color: var(--cyan);
+  background: rgba(89, 216, 255, 0.15);
+  color: var(--cyan);
+}
+
+@media (max-width: 680px) {
+  .cryzen-nav {
+    top: 50px;
+    gap: 4px;
+    padding: 6px 8px;
+  }
+  
+  .nav-item {
+    padding: 6px 10px;
+    font-size: 8px;
+  }
+  
+  .mode-cards {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+  
+  .mode-selector {
+    width: min(320px, 90vw);
+    padding: 20px;
+  }
+  
+  .mode-selector h2 {
+    font-size: 14px;
+  }
+}
+
 
 /* Home: PLAY NOW / CREATE ROOM / JOIN ROOM */
 .play-now-button { width: 100%; margin-top: 14px; min-height: 52px; font-size: 11px; letter-spacing: .17em; }

@@ -102,14 +102,17 @@ export class PlayerController {
     this.yaw = 0;
     this.pitch = 0;
     this.sensitivity = 0.0022;
+    this.wheelDelta = 0;
 
     this.handleMouseMove = this.handleMouseMove.bind(this);
     this.handleKeyDown = this.handleKeyDown.bind(this);
     this.handleKeyUp = this.handleKeyUp.bind(this);
+    this.handleWheel = this.handleWheel.bind(this);
     this.clearKeys = this.clearKeys.bind(this);
     document.addEventListener('mousemove', this.handleMouseMove);
     document.addEventListener('keydown', this.handleKeyDown);
     document.addEventListener('keyup', this.handleKeyUp);
+    document.addEventListener('wheel', this.handleWheel, { passive: false });
     window.addEventListener('blur', this.clearKeys);
   }
 
@@ -118,6 +121,14 @@ export class PlayerController {
     this.yaw -= event.movementX * this.sensitivity;
     this.pitch = Math.max(-1.45, Math.min(1.45, this.pitch - event.movementY * this.sensitivity));
     this.yaw = ((this.yaw + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI;
+  }
+
+  handleWheel(event) {
+    if (!this.enabled || document.pointerLockElement !== this.canvas) return;
+    // Prevent page scroll while in pointer lock
+    event.preventDefault();
+    // Store deltaY for external handler
+    this.wheelDelta = event.deltaY;
   }
 
   handleKeyDown(event) {
@@ -153,6 +164,13 @@ export class PlayerController {
       yaw: this.yaw,
       pitch: this.pitch,
     };
+  }
+
+  getWheelDelta() {
+    // This will be set by the wheel handler
+    const delta = this.wheelDelta;
+    this.wheelDelta = 0;
+    return delta;
   }
 
   clearKeys() {
