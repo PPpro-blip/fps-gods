@@ -26,6 +26,12 @@ export class GameUI {
       callsignScreen: document.querySelector('#callsign-screen'),
       callsignContinue: document.querySelector('#callsign-continue-button'),
       callsignError: document.querySelector('#callsign-error'),
+      cryzenNav: document.querySelector('#cryzen-nav'),
+      modeSelectorModal: document.querySelector('#mode-selector-modal'),
+      modeCards: document.querySelectorAll('.mode-card'),
+      modeSelectorClose: document.querySelector('#mode-selector-close'),
+      roomUrlDisplay: document.querySelector('#room-url-display'),
+      roomUrlText: document.querySelector('#room-url-text'),
       bundleScreen: document.querySelector('#bundle-screen'),
       bundleOptions: document.querySelector('#bundle-options'),
       bundleBack: document.querySelector('#bundle-back-button'),
@@ -96,6 +102,7 @@ export class GameUI {
     this.loadCallsign();
     this.buildBundleOptions();
     this.bindControls();
+    this.bindCryzenNavigation();
     this.showCallsign();
   }
 
@@ -278,6 +285,89 @@ export class GameUI {
     });
   }
 
+  bindCryzenNavigation() {
+    if (!this.elements.cryzenNav) return;
+    
+    // Navigation item click handlers
+    this.elements.cryzenNav.querySelectorAll('.nav-item').forEach((item) => {
+      item.addEventListener('click', () => {
+        const mode = item.dataset.mode;
+        this.handleNavItemClick(mode);
+      });
+    });
+    
+    // Mode selector handlers
+    if (this.elements.modeCards) {
+      this.elements.modeCards.forEach((card) => {
+        card.addEventListener('click', () => {
+          const mode = card.dataset.mode;
+          this.handleModeSelect(mode);
+        });
+      });
+    }
+    
+    // Close button
+    if (this.elements.modeSelectorClose) {
+      this.elements.modeSelectorClose.addEventListener('click', () => {
+        this.hideModeSelector();
+      });
+    }
+  }
+
+  handleNavItemClick(mode) {
+    switch (mode) {
+      case 'play':
+        this.showModeSelector();
+        break;
+      case 'inventory':
+        this.showToast('Inventory coming soon!');
+        break;
+      case 'store':
+        this.showToast('Store coming soon!');
+        break;
+      case 'profile':
+        this.showToast('Profile coming soon!');
+        break;
+      case 'rooms':
+        // Show room creation/join
+        if (this.handlers.onCreate) {
+          this.handlers.onCreate(this.playerName, this.selectedBundleId, this.profileId);
+        }
+        break;
+      case 'settings':
+        this.showToast('Settings coming soon!');
+        break;
+    }
+  }
+
+  showModeSelector() {
+    if (this.elements.modeSelectorModal) {
+      this.elements.modeSelectorModal.hidden = false;
+    }
+  }
+
+  hideModeSelector() {
+    if (this.elements.modeSelectorModal) {
+      this.elements.modeSelectorModal.hidden = true;
+    }
+  }
+
+  handleModeSelect(mode) {
+    this.hideModeSelector();
+    this.showToast(`Selected: ${mode}`);
+    
+    // For now, all modes play the same - in the future we can differentiate
+    switch (mode) {
+      case 'DEATHMATCH':
+      case 'TEAM_DEATHMATCH':
+      case 'KNIFE_ONLY':
+        if (this.handlers.onPlayNow) {
+          this.handlers.onPlayNow(this.playerName, this.selectedBundleId, this.profileId);
+        }
+        break;
+    }
+  }
+
   get playerName() {
     return this.elements.name.value.trim().slice(0, 16);
   }
@@ -297,7 +387,7 @@ export class GameUI {
     this.elements.connection.classList.toggle('is-connected', connected);
     this.elements.connection.classList.toggle('is-offline', offline);
     this.elements.connectionLabel.textContent = connected
-      ? 'SERVER CONNECTED'
+      ? 'LIVE ARENA'
       : offline
         ? 'CONNECTION LOST'
         : 'CONNECTING TO SERVER';
@@ -363,6 +453,10 @@ export class GameUI {
     this.elements.scoreboard.hidden = true;
     this.elements.weaponWheel.hidden = true;
     this.scoreboardOpen = false;
+    // Hide room URL display
+    if (this.elements.roomUrlDisplay) {
+      this.elements.roomUrlDisplay.hidden = true;
+    }
   }
 
   showLobby(room = this.room, selfId = this.selfId) {
@@ -382,10 +476,24 @@ export class GameUI {
     this.elements.end.hidden = true;
     this.scoreboardOpen = false;
     this.clearError();
+    
+    // Show room URL
+    if (this.elements.roomUrlDisplay) {
+      const roomUrl = `${window.location.origin}?room=${room.code}`;
+      this.elements.roomUrlText.textContent = roomUrl;
+      this.elements.roomUrlDisplay.hidden = false;
+    }
 
     this.elements.lobbyCode.textContent = room.code;
     this.elements.lobbyCodeSmall.textContent = room.code;
     this.elements.hudCode.textContent = room.code;
+    
+    // Show room URL
+    if (this.elements.roomUrlDisplay) {
+      const roomUrl = `${window.location.origin}?room=${room.code}`;
+      this.elements.roomUrlText.textContent = roomUrl;
+      this.elements.roomUrlDisplay.hidden = false;
+    }
     this.elements.playerCount.textContent = `${room.players.length} / ${room.maxPlayers}`;
     this.elements.playerList.replaceChildren();
 
@@ -813,9 +921,12 @@ export class GameUI {
     const code = this.room?.code;
     if (!code) return;
     try {
-      await navigator.clipboard.writeText(code);
+      // Copy the full room URL
+      const roomUrl = `${window.location.origin}?room=${code}`;
+      await navigator.clipboard.writeText(roomUrl);
       this.elements.copyCode.innerHTML = 'COPIED <span>✓</span>';
       window.setTimeout(() => { this.elements.copyCode.innerHTML = 'COPY <span>▣</span>'; }, 1_500);
+      this.showToast(`Room link copied! Share: ${roomUrl}`);
     } catch {
       this.showToast(`Room code: ${code}`);
     }

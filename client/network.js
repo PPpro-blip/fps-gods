@@ -16,6 +16,7 @@ export class GameNetwork {
       reconnectionDelayMax: 3_000,
       randomizationFactor: 0,
       timeout: 10_000,
+      transports: ['websocket', 'polling'],
     });
 
     this.socket.on('connect', () => this.handlers.onConnect?.(this.socket.id, this.socket.recovered));

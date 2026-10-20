@@ -26,6 +26,16 @@
           </a>
           <div class="season-chip"><span class="chip-pulse"></span> LIVE ARENA <span class="chip-divider"></span> FREE-FOR-ALL</div>
         </header>
+        
+        <!-- Cryzen-Style Navigation Bar -->
+        <nav class="cryzen-nav" id="cryzen-nav">
+          <button class="nav-item" data-mode="play">PLAY</button>
+          <button class="nav-item" data-mode="inventory">INVENTORY</button>
+          <button class="nav-item" data-mode="store">STORE</button>
+          <button class="nav-item" data-mode="profile">PROFILE</button>
+          <button class="nav-item" data-mode="rooms">ROOMS</button>
+          <button class="nav-item" data-mode="settings">SETTINGS</button>
+        </nav>
 
         <div class="home-layout">
           <section class="hero-copy">
@@ -168,7 +178,11 @@
             <p>Share the room code, get everyone ready, and launch the free-for-all.</p>
             <div class="room-code-card">
               <div><span class="field-label">ROOM CODE</span><strong id="lobby-room-code">------</strong></div>
-              <button class="copy-button" id="copy-room-code-button" type="button" aria-label="Copy room code">COPY <span>▣</span></button>
+              <button class="copy-button" id="copy-room-code-button" type="button" aria-label="Copy room link" title="Copy room link to share">COPY LINK <span>▣</span></button>
+            </div>
+            <div class="room-url-display" id="room-url-display" hidden>
+              <span class="url-label">Share this link:</span>
+              <code id="room-url-text"></code>
             </div>
             <p class="inline-error" id="room-error" aria-live="polite" hidden></p>
           </section>
@@ -261,6 +275,31 @@
 
       <div class="toast" id="toast" role="status" aria-live="polite"></div>
       <div class="webgl-warning" id="webgl-warning" hidden>WebGL is unavailable in this browser. The room and server can still connect, but 3D rendering is disabled.</div>
+      
+      <!-- Mode Selector Modal -->
+      <div class="modal-overlay" id="mode-selector-modal" hidden>
+        <div class="mode-selector">
+          <h2>SELECT GAME MODE</h2>
+          <div class="mode-cards">
+            <button class="mode-card" data-mode="DEATHMATCH">
+              <span class="mode-icon">◌</span>
+              <span class="mode-name">DEATHMATCH</span>
+              <span class="mode-desc">FFA - Free For All</span>
+            </button>
+            <button class="mode-card" data-mode="TEAM_DEATHMATCH">
+              <span class="mode-icon">△</span>
+              <span class="mode-name">TEAM DEATHMATCH</span>
+              <span class="mode-desc">2 Teams - 4v4</span>
+            </button>
+            <button class="mode-card" data-mode="KNIFE_ONLY">
+              <span class="mode-icon">†</span>
+              <span class="mode-name">KNIFE ONLY</span>
+              <span class="mode-desc">Melee Only</span>
+            </button>
+          </div>
+          <button class="modal-close" id="mode-selector-close">CLOSE</button>
+        </div>
+      </div>
     </div>
     <script type="module" src="/main.js"></script>
   </body>
