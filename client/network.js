@@ -1,33 +1,138 @@
 import { io } from 'socket.io-client';
 import { EVENTS } from '../shared/events.js';
 
+// Retry forever with capped exponential backoff plus jitter. A fixed attempt cap
+// (the `reconnectionAttempts: 10` often suggested for this outage) is the wrong
+// trade for a game: ten tries at 1s covers ~10-20s, shorter than a Railway cold
+// start or a redeploy, so the player is stranded on CONNECTION LOST and has to
+// refresh mid-match. Unbounded retries with a delay ceiling recover on their own.
+const RECONNECT_DELAY_MS = 1_000;
+const RECONNECT_DELAY_MAX_MS = 5_000;
+const CONNECT_TIMEOUT_MS = 10_000;
+// Kept short: this runs on the failure path while a player stares at the badge.
+const HEALTH_PROBE_TIMEOUT_MS = 4_000;
+// A refused socket is normal for a few seconds while a host boots, so the
+// provisional verdict waits this long before it is allowed to accuse the server.
+const PROVISIONAL_REPORT_GRACE_MS = 1_200;
+
+/**
+ * Normalize the operator-supplied Socket.IO target.
+ *
+ * Pure and exported so it is unit-testable outside a browser. `VITE_SOCKET_URL`
+ * is pasted out of a host dashboard, so it routinely arrives with a trailing
+ * slash, a `ws://` scheme, or plain `http://` while the client is served over
+ * HTTPS. Each of those silently kills the handshake and shows up as
+ * "CONNECTION LOST", which is why this is not just `configuredUrl || origin`.
+ */
+export function resolveSocketTarget(configuredValue, pageOrigin) {
+  const configured = typeof configuredValue === 'string' ? configuredValue.trim() : '';
+
+  // No override: same-origin, which is right for Vite's dev proxy and for any
+  // deployment that reverse-proxies /socket.io to the Node process. Whether that
+  // fallback is correct here is decided at failure time by probeHealth(), not
+  // assumed now, because the same value is both the dev default and the symptom
+  // of a split deployment whose build-time URL was never set.
+  if (!configured) return { url: pageOrigin, source: 'same-origin' };
+
+  // `new URL` resolves almost anything when given a base, so a stray "not a url"
+  // would quietly become a same-origin request to a junk path. Accept an
+  // absolute URL, or a bare host that is safe to default to https. A scheme must
+  // be `://`, not merely a colon, or `localhost:3001` reads as if `localhost:`
+  // were the scheme.
+  const hasScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(configured);
+  const bareHost = /^[a-z0-9.-]+(?::\d+)?(?:\/[^\s]*)?$/i.test(configured);
+  const candidate = hasScheme
+    ? configured
+    : bareHost
+      ? `https://${configured}`
+      : null;
+  if (!candidate) {
+    console.error('[FPS GODS] VITE_SOCKET_URL is not a usable URL:', configured, '- falling back to same-origin.');
+    return { url: pageOrigin, source: 'invalid-override' };
+  }
+
+  let target;
+  try {
+    // `ws://`/`wss://` are accepted by socket.io-client but normalize them to the
+    // http form so the origin comparisons and the rebuild below behave the same.
+    const schemeless = candidate.replace(/^wss:/i, 'https:').replace(/^ws:/i, 'http:');
+    target = new URL(schemeless);
+  } catch {
+    console.error('[FPS GODS] VITE_SOCKET_URL is not a usable URL:', configured, '- falling back to same-origin.');
+    return { url: pageOrigin, source: 'invalid-override' };
+  }
+
+  if (!/^https?:$/.test(target.protocol)) {
+    console.error('[FPS GODS] VITE_SOCKET_URL must be http(s) or ws(s); got', target.protocol, '- falling back to same-origin.');
+    return { url: pageOrigin, source: 'invalid-override' };
+  }
+
+  // Socket.IO always appends its own `path` (default /socket.io) to whatever URL
+  // it is given, so a pasted endpoint that already includes it must have it
+  // removed or the client requests /socket.io/socket.io and gets a 404. A
+  // trailing slash is the same class of mistake.
+  const path = target.pathname
+    .replace(/\/socket\.io\/?$/i, '')
+    .replace(/\/+$/, '');
+
+  // A base path in front of the engine.io endpoint is legitimate behind a reverse
+  // proxy, so only strip what belongs to Socket.IO itself.
+  let url = `${target.origin}${path}`;
+
+  // Mixed content: a browser refuses an insecure subresource on a secure page,
+  // and the failure looks identical to the server being down.
+  let upgradedFromInsecure = false;
+  if (pageOrigin.startsWith('https:') && target.protocol === 'http:') {
+    url = url.replace(/^http:/, 'https:');
+    upgradedFromInsecure = true;
+    console.warn('[FPS GODS] VITE_SOCKET_URL used http:// on an https:// page; retrying over https:// to avoid a blocked mixed-content handshake.');
+  }
+
+  return { url, source: upgradedFromInsecure ? 'override-upgraded' : 'override' };
+}
+
 // Thin Socket.IO adapter: gameplay decisions never happen here, only inputs go
 // up and authoritative room/game snapshots and feedback come back down.
 export class GameNetwork {
   constructor(handlers = {}) {
     this.handlers = handlers;
-    const configuredUrl = import.meta.env.VITE_SOCKET_URL?.trim();
-    const socketUrl = configuredUrl || window.location.origin;
+    this.lastIssueSignature = null;
+    this.probeInFlight = false;
+    this.graceElapsed = false;
+    this.graceTimer = null;
+    this.issue = null;
+    const target = resolveSocketTarget(import.meta.env.VITE_SOCKET_URL, window.location.origin);
+    this.target = target;
+    const socketUrl = target.url;
+
+    // Which address we are actually dialling, so a production CONNECTION LOST is
+    // diagnosable from the console without redeploying with extra logging.
+    console.info(`[FPS GODS] Socket.IO target: ${socketUrl} (source: ${target.source})`);
 
     this.socket = io(socketUrl, {
       autoConnect: true,
-      reconnection: true,
-      reconnectionDelay: 3_000,
-      reconnectionDelayMax: 3_000,
-      randomizationFactor: 0,
-      timeout: 10_000,
       transports: ['websocket', 'polling'],
+      reconnection: true,
+      reconnectionAttempts: Infinity,
+      reconnectionDelay: RECONNECT_DELAY_MS,
+      reconnectionDelayMax: RECONNECT_DELAY_MAX_MS,
+      randomizationFactor: 0.4,
+      timeout: CONNECT_TIMEOUT_MS,
     });
 
-    this.socket.on('connect', () => this.handlers.onConnect?.(this.socket.id, this.socket.recovered));
+    this.socket.on('connect', () => {
+      // A fresh handshake clears the dedupe so a later outage is reported again.
+      this.lastIssueSignature = null;
+      this.issue = null;
+      this.handlers.onConnect?.(this.socket.id, this.socket.recovered);
+    });
     this.socket.on('disconnect', (reason) => {
       if (reason !== 'io client disconnect') console.error('[FPS GODS] Socket disconnected:', reason);
       this.handlers.onDisconnect?.(reason);
+      // A drop is the moment players ask "did the arena die or did I?" - ask it.
+      if (reason !== 'io client disconnect') void this.refineAfterDrop();
     });
-    this.socket.on('connect_error', (error) => {
-      console.error('[FPS GODS] Socket connection error:', error);
-      this.handlers.onConnectionError?.(error);
-    });
+    this.socket.on('connect_error', (error) => this.reportConnectionIssue(error));
     this.socket.io.on('reconnect_error', (error) => {
       console.error('[FPS GODS] Socket reconnection error:', error);
     });
@@ -65,6 +170,174 @@ export class GameNetwork {
 
   get connected() {
     return this.socket.connected;
+  }
+
+  /** The address this client dials plus where that address came from. */
+  get connectionTarget() {
+    return { url: this.target.url, source: this.target.source, connected: this.socket.connected };
+  }
+
+  /**
+   * Ask the arena directly whether it is alive, using the same origin the socket
+   * dials. `GET /health` is the discriminator because the Socket.IO error object
+   * is useless for this: over the websocket transport every failure - connection
+   * refused, DNS error, and a 404 from a static host that is not the game server -
+   * arrives as an identical `Error("websocket error")` with no status. Only the
+   * polling fallback reports one (`error.description`).
+   */
+  async probeHealth() {
+    if (typeof fetch !== 'function') return { kind: 'unavailable' };
+    const controller = typeof AbortController === 'function' ? new AbortController() : null;
+    const timer = controller
+      ? setTimeout(() => controller.abort(), HEALTH_PROBE_TIMEOUT_MS)
+      : null;
+    try {
+      const response = await fetch(`${this.target.url}/health`, {
+        signal: controller?.signal,
+        cache: 'no-store',
+        mode: 'cors',
+        credentials: 'omit',
+      });
+      const body = response.ok ? await response.json().catch(() => null) : null;
+      if (response.ok && body?.status === 'ok') {
+        return {
+          kind: 'server-alive',
+          status: response.status,
+          uptime: body.uptime,
+          rooms: body.rooms,
+          connections: body.connections,
+        };
+      }
+      return { kind: 'not-game-server', status: response.status };
+    } catch (error) {
+      // An abort is a host that accepted nothing in time; either way nothing
+      // useful answered, which is what "offline" means to a player.
+      return { kind: 'server-unreachable', reason: error?.name === 'AbortError' ? 'timeout' : 'network' };
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Map a probe verdict onto the two things a player can act on. `unreachable`
+   * renders as SERVER OFFLINE (wait for the host); `offline` renders as
+   * CONNECTION LOST (the client is asking the wrong address, so waiting will not
+   * help anyone).
+   */
+  classifyProbe(probe) {
+    if (probe.kind === 'server-alive') {
+      return {
+        badge: 'offline',
+        message: 'The arena process is up but its Socket.IO handshake is not reaching this browser - the proxy in front of the server is not upgrading /socket.io.',
+      };
+    }
+    if (probe.kind === 'not-game-server') {
+      return {
+        badge: 'offline',
+        status: probe.status,
+        message: this.target.source === 'same-origin'
+          ? this.misconfigurationHint()
+          : `VITE_SOCKET_URL points at ${this.target.url}, which answered HTTP ${probe.status} without a Socket.IO server - that host is not the arena.`,
+      };
+    }
+    if (probe.kind === 'unavailable') {
+      return { badge: 'unreachable', message: 'Cannot reach the arena server. Retrying automatically…' };
+    }
+    return {
+      badge: 'unreachable',
+      message: probe.reason === 'timeout'
+        ? 'The arena server is not answering - it may be asleep or cold-starting. Reconnecting automatically.'
+        : 'The arena server is offline: nothing is listening at its address. Reconnecting automatically.',
+    };
+  }
+
+  /** Fast, transport-level read of the failure, used before the probe returns. */
+  classifyTransportError(error) {
+    const status = typeof error?.description === 'number' ? error.description : null;
+    if (status === 0 || status === null) {
+      return {
+        badge: this.target.source === 'same-origin' ? 'offline' : 'unreachable',
+        message: this.target.source === 'same-origin'
+          ? this.misconfigurationHint()
+          : 'Cannot reach the arena server. Retrying automatically…',
+      };
+    }
+    return {
+      badge: 'offline',
+      status,
+      message: this.target.source === 'same-origin'
+        ? this.misconfigurationHint()
+        : `The Socket.IO handshake got HTTP ${status} from ${this.target.url} - that address is not answering as the arena server.`,
+    };
+  }
+
+  /**
+   * A same-origin fallback with no handshake is the signature of a split
+   * deployment (static client on one host, game server on another) where the
+   * build-time VITE_SOCKET_URL was never set, so the client is politely asking
+   * its own static file host to run a WebSocket server.
+   */
+  misconfigurationHint() {
+    if (this.target.source === 'invalid-override') {
+      return 'VITE_SOCKET_URL is set but could not be parsed - fix the value in the host environment, then rebuild the client so it is baked into the bundle.';
+    }
+    return 'VITE_SOCKET_URL was not baked into this build, so the client fell back to its own origin. Set it to the public game-server URL and redeploy the client - the value is read at build time, so editing the environment variable alone changes nothing.';
+  }
+
+  /** Report an issue only when it differs from the last one, so retries stay quiet. */
+  emitIssue(detail) {
+    const signature = `${detail.badge}:${detail.message}`;
+    if (signature === this.lastIssueSignature) return false;
+    this.lastIssueSignature = signature;
+    this.issue = detail;
+    this.handlers.onConnectionError?.(detail);
+    return true;
+  }
+
+  reportConnectionIssue(error) {
+    console.error('[FPS GODS] Socket connection error:', error?.message ?? error, this.target);
+    const provisional = this.classifyTransportError(error);
+
+    // The transport reports a refused connection immediately, which on a
+    // free-tier host usually just means "still booting". Hold the provisional
+    // verdict briefly so a cold start reads as CONNECTING rather than a
+    // definitive SERVER OFFLINE; a probe confirming the outage still shows it.
+    if (!this.graceElapsed) {
+      this.graceTimer ??= setTimeout(() => {
+        this.graceElapsed = true;
+        this.graceTimer = null;
+        if (!this.socket.connected) this.emitIssue(provisional);
+      }, PROVISIONAL_REPORT_GRACE_MS);
+    } else {
+      this.emitIssue(provisional);
+    }
+
+    if (this.probeInFlight || this.socket.connected) return;
+    this.probeInFlight = true;
+    this.probeHealth().then((probe) => {
+      this.probeInFlight = false;
+      if (this.socket.connected) return;
+      const refined = this.classifyProbe(probe);
+      console.warn('[FPS GODS] Health probe:', probe.kind, '-> badge', refined.badge);
+      clearTimeout(this.graceTimer);
+      this.graceElapsed = true;
+      this.graceTimer = null;
+      this.emitIssue(refined);
+    });
+  }
+
+  /** After a mid-match drop, say whether the arena died or the route did. */
+  async refineAfterDrop() {
+    const probe = await this.probeHealth();
+    if (this.socket.connected || probe.kind === 'unavailable') return;
+    if (probe.kind === 'server-alive') {
+      this.emitIssue({
+        badge: 'offline',
+        message: 'Connection to the arena dropped while the server stayed up. Reconnecting automatically…',
+      });
+      return;
+    }
+    this.emitIssue(this.classifyProbe(probe));
   }
 
   requestProfile(profileId, callsign) {

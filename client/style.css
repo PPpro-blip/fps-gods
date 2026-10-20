@@ -188,6 +188,11 @@ button:focus-visible, input:focus-visible, a:focus-visible { outline: 2px solid 
 .connection-pill.is-connected { opacity: .82; }
 .connection-pill.is-connected:hover { opacity: 1; }
 .connection-pill.is-offline { border-color: rgba(255, 100, 124, .32); color: var(--red); }
+/* SERVER OFFLINE = the host is down and waiting can work, so it is amber and
+   pulsing rather than the red used for a lost/misaimed connection. */
+.connection-pill.is-unreachable { border-color: rgba(255, 200, 87, .34); color: #ffc857; }
+.connection-pill.is-unreachable .connection-dot { background: #ffc857; box-shadow: 0 0 10px rgba(255, 200, 87, .7); animation: pill-pulse 1.4s ease-in-out infinite; }
+@keyframes pill-pulse { 50% { opacity: .3; } }
 .connection-dot { width: 6px; height: 6px; border-radius: 50%; background: #ffc857; box-shadow: 0 0 10px rgba(255, 200, 87, .7); }
 .connection-pill.is-connected .connection-dot { background: var(--green); box-shadow: 0 0 10px rgba(101, 227, 168, .7); }
 .connection-pill.is-offline .connection-dot { background: var(--red); box-shadow: 0 0 10px rgba(255, 100, 124, .7); }

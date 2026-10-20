@@ -111,6 +111,19 @@ The client is a static Vite build; Socket.IO needs a persistent Node.js process.
 
 Socket.IO accepts cross-origin connections. CORS is not authentication; gameplay and profile progression are validated server-side.
 
+### Reading the connection badge
+
+`GET /health` answers `{ status, service, uptime, rooms, connections, now }`. The client calls it whenever the handshake fails, because the Socket.IO error object cannot distinguish the causes — over the websocket transport a refused connection, a DNS failure, and a 404 from a host that is not the game server all surface as the same `Error("websocket error")`.
+
+| Badge | Meaning | Fix |
+| --- | --- | --- |
+| **LIVE ARENA** | Handshake complete. | — |
+| **CONNECTING TO SERVER** | First attempt in flight, or a host that is still booting. | Wait; retries continue automatically with backoff. |
+| **SERVER OFFLINE** | Nothing answered at the configured address, so the process is down, asleep, or cold-starting. Check the host, then just wait. | Railway/Render: confirm the deploy is `success` and not scaled to zero. |
+| **CONNECTION LOST** | Something answered, but it is not the arena server — the client is pointed at the wrong host (typically `VITE_SOCKET_URL` missing at build time, so it fell back to the static client origin), or a proxy is not forwarding `/socket.io` upgrades. Waiting will not help. | `vercel env add VITE_SOCKET_URL production` then redeploy, and confirm the value is in the build log. |
+
+To check the server from anywhere: `curl -s https://<game-server-host>/health`. To confirm what the deployed bundle is dialling, load the site and read the `[FPS GODS] Socket.IO target: … (source: …)` console line.
+
 ## Configuration
 
 | Variable | Default | Purpose |

@@ -8,6 +8,7 @@ import { PLAYER } from '../shared/gameConfig.js';
 import { GameState } from './gameState.js';
 import { PlayerProfileStore } from './profiles.js';
 import { ROOM_RECONNECT_GRACE_MS, RoomManager } from './rooms.js';
+import { ALLOWED_ORIGIN, socketCorsOptions } from './origins.js';
 
 // Fixed 20 Hz simulation and state broadcast. The server derives its own delta
 // time and caps long pauses so clients can never supply movement speed or dt.
@@ -22,16 +23,10 @@ export function createGameServer(options = {}) {
   const profileStore = options.profileStore ?? new PlayerProfileStore(options.profileStorePath);
   const app = express();
   app.disable('x-powered-by');
-  app.get('/health', (_request, response) => {
-    response.json({ status: 'ok', service: 'fps-gods-game-server', rooms: roomManager.rooms.size });
-  });
 
   const httpServer = createServer(app);
   const io = new Server(httpServer, {
-    cors: {
-      origin: '*',
-      methods: ['GET', 'POST'],
-    },
+    cors: socketCorsOptions(),
     pingInterval: 25_000,
     pingTimeout: 20_000,
     maxHttpBufferSize: 16_384,
@@ -41,6 +36,26 @@ export function createGameServer(options = {}) {
     },
   });
   const roomManager = new RoomManager(io, profileStore);
+
+  // Health check for host supervisors (Railway/Render) and for `curl` checks when
+  // a player reports CONNECTION LOST. Registered after `roomManager` exists so it
+  // cannot observe an uninitialized binding. `uptime` and the socket counts tell
+  // you whether the process is merely awake or actually holding connections.
+  // The CORS header matters: the client probes this endpoint from the browser to
+  // tell "the server is down" apart from "the client is aimed at the wrong host",
+  // and an opaque response would make a live server look dead.
+  app.get('/health', (_request, response) => {
+    response.set('Access-Control-Allow-Origin', ALLOWED_ORIGIN);
+    response.set('Cache-Control', 'no-store');
+    response.status(200).json({
+      status: 'ok',
+      service: 'fps-gods-game-server',
+      uptime: process.uptime(),
+      rooms: roomManager.rooms.size,
+      connections: io.engine.clientsCount,
+      now: Date.now(),
+    });
+  });
 
   function launchRoom(room) {
     const now = Date.now();
