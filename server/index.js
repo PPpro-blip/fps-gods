@@ -5,9 +5,11 @@ import express from 'express';
 import { Server } from 'socket.io';
 import { EVENTS, ROOM_STATES } from '../shared/events.js';
 import { PLAYER } from '../shared/gameConfig.js';
+import { DEFAULT_GAME_SERVER_HOST, DEFAULT_GAME_SERVER_PORT } from '../shared/deployment.js';
 import { GameState } from './gameState.js';
 import { PlayerProfileStore } from './profiles.js';
 import { ROOM_RECONNECT_GRACE_MS, RoomManager } from './rooms.js';
+import { ALLOWED_ORIGIN, socketCorsOptions } from './origins.js';
 
 // Fixed 20 Hz simulation and state broadcast. The server derives its own delta
 // time and caps long pauses so clients can never supply movement speed or dt.
@@ -22,16 +24,10 @@ export function createGameServer(options = {}) {
   const profileStore = options.profileStore ?? new PlayerProfileStore(options.profileStorePath);
   const app = express();
   app.disable('x-powered-by');
-  app.get('/health', (_request, response) => {
-    response.json({ status: 'ok', service: 'fps-gods-game-server', rooms: roomManager.rooms.size });
-  });
 
   const httpServer = createServer(app);
   const io = new Server(httpServer, {
-    cors: {
-      origin: '*',
-      methods: ['GET', 'POST'],
-    },
+    cors: socketCorsOptions(),
     pingInterval: 25_000,
     pingTimeout: 20_000,
     maxHttpBufferSize: 16_384,
@@ -41,6 +37,26 @@ export function createGameServer(options = {}) {
     },
   });
   const roomManager = new RoomManager(io, profileStore);
+
+  // Health check for host supervisors (Railway/Render) and for `curl` checks when
+  // a player reports CONNECTION LOST. Registered after `roomManager` exists so it
+  // cannot observe an uninitialized binding. `uptime` and the socket counts tell
+  // you whether the process is merely awake or actually holding connections.
+  // The CORS header matters: the client probes this endpoint from the browser to
+  // tell "the server is down" apart from "the client is aimed at the wrong host",
+  // and an opaque response would make a live server look dead.
+  app.get('/health', (_request, response) => {
+    response.set('Access-Control-Allow-Origin', ALLOWED_ORIGIN);
+    response.set('Cache-Control', 'no-store');
+    response.status(200).json({
+      status: 'ok',
+      service: 'fps-gods-game-server',
+      uptime: process.uptime(),
+      rooms: roomManager.rooms.size,
+      connections: io.engine.clientsCount,
+      now: Date.now(),
+    });
+  });
 
   function launchRoom(room) {
     const now = Date.now();
@@ -182,8 +198,17 @@ export function createGameServer(options = {}) {
 /** Bind the game server to HOST/PORT and install signal-based shutdown. */
 export function startGameServer() {
   const server = createGameServer();
-  const port = Number(process.env.PORT) || 3000;
-  const host = process.env.HOST || '0.0.0.0';
+  // Number() matters: hosts inject PORT as a string, and a string passed to
+  // listen() is interpreted as a named pipe. The fallback below is a local-dev
+  // default ONLY - Railway/Render always set PORT (Railway's is commonly 8080),
+  // so this value never decides the production port and must not be edited as a
+  // fix for a host routing problem. See shared/deployment.js.
+  //
+  // 38ec5ac set this to a literal 3000 on main; that intent is preserved here by
+  // DEFAULT_GAME_SERVER_PORT, which is also what Vite's dev proxy now derives its
+  // target from, so the two can no longer be edited apart.
+  const port = Number(process.env.PORT) || DEFAULT_GAME_SERVER_PORT;
+  const host = process.env.HOST || DEFAULT_GAME_SERVER_HOST;
 
   server.httpServer.listen(port, host, () => {
     console.log(`FPS GODS server listening on http://${host}:${server.httpServer.address().port}`);

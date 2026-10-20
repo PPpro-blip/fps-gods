@@ -63,12 +63,58 @@ test('the health route reports ok for host health checks', async () => {
   try {
     const response = await fetch(`${server.url}/health`);
     assert.equal(response.status, 200);
-    assert.deepEqual(await response.json(), {
-      status: 'ok',
-      service: 'fps-gods-game-server',
-      rooms: 0,
-    });
+    const body = await response.json();
+    assert.equal(body.status, 'ok');
+    assert.equal(body.service, 'fps-gods-game-server');
+    // Uptime is what tells an operator the instance is awake rather than cold.
+    assert.equal(typeof body.uptime, 'number');
+    assert.ok(body.uptime >= 0);
+    assert.equal(body.rooms, 0);
+    assert.equal(body.connections, 0);
+    assert.equal(typeof body.now, 'number');
   } finally {
+    await server.close();
+  }
+});
+
+test('the health endpoint is readable by the browser connection probe', async () => {
+  const server = await startServer();
+  try {
+    // The client fetches /health from the deployed page's origin to decide
+    // between SERVER OFFLINE and CONNECTION LOST; a blocked read looks like an outage.
+    const response = await fetch(`${server.url}/health`, {
+      headers: { Origin: 'https://fps-gods.vercel.app' },
+    });
+    assert.equal(response.headers.get('access-control-allow-origin'), '*');
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+    assert.equal(response.status, 200);
+  } finally {
+    await server.close();
+  }
+});
+
+test('the health endpoint counts live rooms and connections', async () => {
+  const server = await startServer();
+  const socket = await connectSocket(server.url, 'https://fps-gods.vercel.app');
+  try {
+    const before = await (await fetch(`${server.url}/health`)).json();
+    assert.equal(before.rooms, 0);
+    assert.equal(before.connections, 1);
+
+    const roomState = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('no ROOM_STATE within 5s')), 5_000);
+      socket.once(EVENTS.ROOM_STATE, (state) => { clearTimeout(timeout); resolve(state); });
+      socket.once(EVENTS.ROOM_ERROR, (error) => { clearTimeout(timeout); reject(new Error(error.message)); });
+      socket.emit(EVENTS.CREATE_ROOM, { name: 'HealthCount', bundleId: 'RUSHER' });
+    });
+    assert.match(roomState.code, /^[A-Z2-9]{6}$/);
+
+    const after = await (await fetch(`${server.url}/health`)).json();
+    assert.equal(after.rooms, 1, 'a created room must show up in the health payload');
+    assert.equal(after.status, 'ok');
+    assert.ok(after.uptime >= 0 && Number.isFinite(after.uptime));
+  } finally {
+    socket.close();
     await server.close();
   }
 });

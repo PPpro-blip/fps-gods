@@ -171,13 +171,17 @@ const network = new GameNetwork({
     }
   },
   onDisconnect: (reason) => {
-    ui.setConnectionState('offline');
-    if (reason !== 'io client disconnect') ui.showToast('Connection interrupted. Trying to reconnect…');
+    // Routed through setConnectionState so this respects the same toast cooldown
+    // as the probe verdict that replaces it a moment later.
+    if (reason === 'io client disconnect') ui.setConnectionState('offline');
+    else ui.setConnectionState('offline', 'Connection interrupted. Trying to reconnect…');
     controller.setEnabled(false);
     trigger.release();
     closeWeaponWheel(false);
   },
-  onConnectionError: () => ui.setConnectionState('offline'),
+  // The adapter has already decided whether the arena host is down or this build
+  // is aimed at the wrong address, so the badge states that instead of a shrug.
+  onConnectionError: (detail = {}) => ui.setConnectionState(detail.badge ?? 'offline', detail.message),
   onProfileUpdate: (profile) => ui.setProfile(profile),
   onRoomSession: (session) => localStorage.setItem('fps-gods-room-session', JSON.stringify(session)),
   onRoomResumeFailed: (error) => {

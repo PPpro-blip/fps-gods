@@ -1,14 +1,17 @@
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import { defineConfig, loadEnv } from 'vite';
+import { DEFAULT_DEV_PROXY_TARGET } from './shared/deployment.js';
 
 const projectRoot = fileURLToPath(new URL('.', import.meta.url));
 
 // Keep the vanilla client in its own folder while allowing it to import the
 // shared event/config modules. Socket.IO is proxied to Express in development.
+// The proxy target comes from shared/deployment.js so it can never drift from
+// the port the server actually binds when PORT is unset locally.
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, projectRoot, '');
-  const gameServer = env.GAME_SERVER_URL || 'http://127.0.0.1:3001';
+  const gameServer = env.GAME_SERVER_URL || DEFAULT_DEV_PROXY_TARGET;
 
   return {
     root: resolve(projectRoot, 'client'),

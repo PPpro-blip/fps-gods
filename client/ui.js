@@ -1,6 +1,10 @@
 import { BUNDLE_BY_ID, BUNDLE_INFO, BUNDLE_UNLOCK_KILLS, DEFAULT_BUNDLE_ID, WEAPON_PRESENTATION } from '../shared/bundles.js';
 import { ROOM_MODES } from '../shared/events.js';
 
+// Minimum gap between connection toasts. The badge is the persistent signal; the
+// toast only has to land once per verdict change.
+const CONNECTION_TOAST_COOLDOWN_MS = 6_000;
+
 // All presentation is plain DOM/CSS. Socket payloads are inserted with
 // textContent rather than HTML so player names never become markup.
 export class GameUI {
@@ -384,14 +388,31 @@ export class GameUI {
   setConnectionState(state, detail = '') {
     const connected = state === 'connected';
     const offline = state === 'offline';
+    // A dead host and a misaimed client both fail the handshake, but only one of
+    // them fixes itself by waiting, so they must not share a label.
+    const unreachable = state === 'unreachable';
     this.elements.connection.classList.toggle('is-connected', connected);
     this.elements.connection.classList.toggle('is-offline', offline);
-    this.elements.connectionLabel.textContent = connected
+    this.elements.connection.classList.toggle('is-unreachable', unreachable);
+    const label = connected
       ? 'LIVE ARENA'
       : offline
         ? 'CONNECTION LOST'
-        : 'CONNECTING TO SERVER';
-    if (detail && !connected) this.showToast(detail);
+        : unreachable
+          ? 'SERVER OFFLINE'
+          : 'CONNECTING TO SERVER';
+    const changed = label !== this.elements.connectionLabel.textContent;
+    this.elements.connectionLabel.textContent = label;
+    if (connected) this.lastConnectionToastAt = 0;
+
+    // The badge carries the state permanently, so a toast is only worth its
+    // interruption the first time a verdict changes. Reconnection retries flip
+    // between offline and unreachable as probes time out, and without this
+    // cooldown the player gets a toast on every backoff attempt.
+    const now = Date.now();
+    if (!detail || connected || !changed || now - (this.lastConnectionToastAt ?? 0) < CONNECTION_TOAST_COOLDOWN_MS) return;
+    this.lastConnectionToastAt = now;
+    this.showToast(detail);
   }
 
   setRoom(room, selfId) {
