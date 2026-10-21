@@ -60,7 +60,12 @@ export class AssetManager {
 
   async loadMap() {
     try {
-      const glb = await this.glbLoader.loadAsync(ASSET_PATHS.map);
+      let glb;
+      try {
+        glb = await this.glbLoader.loadAsync(ASSET_PATHS.map);
+      } catch {
+        glb = await this.glbLoader.loadAsync('/assets/map/map-assets.glb');
+      }
       this.assets.map = glb.scene;
       this.setupMapMaterials(this.assets.map);
       console.log('[AssetManager] Map loaded successfully');
@@ -84,7 +89,12 @@ export class AssetManager {
 
   async loadAnimations() {
     try {
-      const glb = await this.glbLoader.loadAsync(ASSET_PATHS.animations);
+      let glb;
+      try {
+        glb = await this.glbLoader.loadAsync(ASSET_PATHS.animations);
+      } catch {
+        glb = await this.glbLoader.loadAsync('/assets/animations/Animation_5.glb');
+      }
       this.assets.animations = glb;
       this.extractAnimations(glb);
       console.log('[AssetManager] Animations loaded successfully');
@@ -191,8 +201,8 @@ export class AssetManager {
       }
     }
     
-    // Return idle as fallback
-    return this.animations['idle'] || this.animations['Idle'] || null;
+    // Return idle as fallback or first available animation
+    return this.animations['idle'] || this.animations['Idle'] || Object.values(this.animations)[0] || null;
   }
 
   playAnimation(state, mesh) {

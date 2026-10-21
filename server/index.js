@@ -11,6 +11,16 @@ import { PlayerProfileStore } from './profiles.js';
 import { ROOM_RECONNECT_GRACE_MS, RoomManager } from './rooms.js';
 import { ALLOWED_ORIGIN, socketCorsOptions } from './origins.js';
 
+// Handle uncaught exceptions and unhandled promise rejections so the server
+// does not crash on startup or unexpected runtime faults in production.
+process.on('uncaughtException', (error) => {
+  console.error('[FPS GODS] Uncaught exception:', error);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[FPS GODS] Unhandled rejection at:', promise, 'reason:', reason);
+});
+
 // Fixed 20 Hz simulation and state broadcast. The server derives its own delta
 // time and caps long pauses so clients can never supply movement speed or dt.
 const TICK_RATE_MS = 50;
@@ -25,7 +35,22 @@ export function createGameServer(options = {}) {
   const app = express();
   app.disable('x-powered-by');
 
+  // Explicit global CORS and preflight handling before heavy middleware
+  app.use((req, res, next) => {
+    res.set('Access-Control-Allow-Origin', ALLOWED_ORIGIN);
+    res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, HEAD');
+    res.set('Access-Control-Allow-Headers', '*');
+    if (req.method === 'OPTIONS') {
+      return res.status(204).end();
+    }
+    next();
+  });
+
   const httpServer = createServer(app);
+  httpServer.on('error', (error) => {
+    console.error('[FPS GODS] HTTP server error:', error);
+  });
+
   const io = new Server(httpServer, {
     cors: socketCorsOptions(),
     pingInterval: 25_000,
@@ -38,13 +63,8 @@ export function createGameServer(options = {}) {
   });
   const roomManager = new RoomManager(io, profileStore);
 
-  // Health check for host supervisors (Railway/Render) and for `curl` checks when
-  // a player reports CONNECTION LOST. Registered after `roomManager` exists so it
-  // cannot observe an uninitialized binding. `uptime` and the socket counts tell
-  // you whether the process is merely awake or actually holding connections.
-  // The CORS header matters: the client probes this endpoint from the browser to
-  // tell "the server is down" apart from "the client is aimed at the wrong host",
-  // and an opaque response would make a live server look dead.
+  // Health check for host supervisors (Railway/Render) and for browser probes.
+  // Registered before any game logic so it cannot observe an uninitialized binding.
   app.get('/health', (_request, response) => {
     response.set('Access-Control-Allow-Origin', ALLOWED_ORIGIN);
     response.set('Cache-Control', 'no-store');
@@ -55,6 +75,17 @@ export function createGameServer(options = {}) {
       rooms: roomManager.rooms.size,
       connections: io.engine.clientsCount,
       now: Date.now(),
+    });
+  });
+
+  // Root endpoint for simple platform probes
+  app.get('/', (_request, response) => {
+    response.set('Access-Control-Allow-Origin', ALLOWED_ORIGIN);
+    response.set('Cache-Control', 'no-store');
+    response.status(200).json({
+      status: 'ok',
+      service: 'fps-gods-game-server',
+      health: '/health',
     });
   });
 
