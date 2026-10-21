@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { PLAYER } from '../shared/gameConfig.js';
+import { assetManager } from './AssetManager.js';
 
 const INTERPOLATION_DELAY_MS = 90;
 const MAX_EXTRAPOLATION_MS = 130;
@@ -185,8 +186,7 @@ export class PlayerController {
   }
 }
 
-// Procedural low-poly operators are built from Three.js primitives: recognizable
-// faces, hair, armor, limbs, and player-specific colors without character GLBs.
+// Rigged character GLBs with fallback to procedural low-poly operators.
 export class RemotePlayers {
   constructor(scene, nameTagRoot, weaponModels) {
     this.scene = scene;
@@ -194,6 +194,7 @@ export class RemotePlayers {
     this.weaponModels = weaponModels;
     this.players = new Map();
     this.projected = new THREE.Vector3();
+    this.lastFrameTime = performance.now();
     this.weaponModels?.onReady(() => {
       for (const record of this.players.values()) this.equipWeapon(record, record.pendingWeaponId);
     });
@@ -220,95 +221,117 @@ export class RemotePlayers {
     const mesh = new THREE.Group();
     mesh.userData.playerId = data.id;
 
-    const materials = {
-      armor: new THREE.MeshStandardMaterial({ color: suitColor, roughness: 0.53, metalness: 0.24, emissive: suitColor, emissiveIntensity: 0.08 }),
-      armorDark: new THREE.MeshStandardMaterial({ color: '#202d3b', roughness: 0.7, metalness: 0.23 }),
-      armorLight: new THREE.MeshStandardMaterial({ color: '#657c8d', roughness: 0.48, metalness: 0.48 }),
-      skin: new THREE.MeshStandardMaterial({ color: skinColor, roughness: 0.82, metalness: 0.02 }),
-      hair: new THREE.MeshStandardMaterial({ color: '#151b24', roughness: 0.94, metalness: 0.02 }),
-      eyeWhite: new THREE.MeshStandardMaterial({ color: '#e7edf0', roughness: 0.32, metalness: 0.02 }),
-      iris: new THREE.MeshStandardMaterial({ color: eyeColor, roughness: 0.35, metalness: 0.06, emissive: eyeColor, emissiveIntensity: 0.14 }),
-      pupil: new THREE.MeshBasicMaterial({ color: '#10151c' }),
-      mouth: new THREE.MeshStandardMaterial({ color: '#57392f', roughness: 0.9 }),
-      glove: new THREE.MeshStandardMaterial({ color: '#101821', roughness: 0.76, metalness: 0.2 }),
-      visor: new THREE.MeshStandardMaterial({ color: '#173b4a', roughness: 0.2, metalness: 0.58, emissive: '#16718a', emissiveIntensity: 0.22 }),
-      sole: new THREE.MeshStandardMaterial({ color: '#0d141c', roughness: 0.9, metalness: 0.08 }),
-    };
-    const record = {
-      mesh,
-      materials: Object.values(materials),
-      geometries: [],
-      name: data.name,
-      color: data.color,
-      weaponId: null,
-      pendingWeaponId: data.currentWeaponId,
-      weaponModel: null,
-      weaponTransition: null,
-      muzzleFlash: null,
-      muzzleFlashUntil: 0,
-      shield: null,
-    };
+    let characterInstance = null;
+    let gunSocket = null;
+    let muzzleFlash = null;
+    const geometries = [];
+    const materials = [];
 
-    const torso = new THREE.CapsuleGeometry(0.235, 0.45, 4, 9);
-    this.addPart(record, mesh, torso, materials.armorDark, [0, -0.05, 0]);
-    this.addPart(record, mesh, new THREE.BoxGeometry(0.36, 0.34, 0.12), materials.armor, [0, 0.08, -0.176]);
-    this.addPart(record, mesh, new THREE.BoxGeometry(0.24, 0.055, 0.035), materials.armorLight, [0, 0.23, -0.246]);
-    this.addPart(record, mesh, new THREE.BoxGeometry(0.12, 0.08, 0.032), materials.visor, [0, -0.03, -0.25]);
-    this.addPart(record, mesh, new THREE.CylinderGeometry(0.19, 0.2, 0.075, 8), materials.armorLight, [0, -0.335, 0]);
-    this.addPart(record, mesh, new THREE.BoxGeometry(0.16, 0.12, 0.08), materials.armorDark, [0, -0.38, 0.17]);
-
-    const neck = new THREE.CylinderGeometry(0.075, 0.09, 0.16, 8);
-    this.addPart(record, mesh, neck, materials.skin, [0, 0.39, 0]);
-    const head = new THREE.SphereGeometry(0.19, 16, 12);
-    this.addPart(record, mesh, head, materials.skin, [0, 0.62, -0.005], [0.9, 1.08, 0.9]);
-    const hair = new THREE.SphereGeometry(0.195, 14, 8, 0, Math.PI * 2, 0, Math.PI * 0.56);
-    this.addPart(record, mesh, hair, materials.hair, [0, 0.72, 0.008], [0.98, 0.64, 0.98]);
-
-    for (const side of [-1, 1]) {
-      const eyeX = side * 0.064;
-      this.addPart(record, mesh, new THREE.SphereGeometry(0.034, 10, 8), materials.eyeWhite, [eyeX, 0.643, -0.163], [1.05, 0.72, 0.62]);
-      this.addPart(record, mesh, new THREE.SphereGeometry(0.018, 8, 6), materials.iris, [eyeX, 0.642, -0.185]);
-      this.addPart(record, mesh, new THREE.SphereGeometry(0.009, 7, 5), materials.pupil, [eyeX, 0.642, -0.198]);
-      this.addPart(record, mesh, new THREE.BoxGeometry(0.076, 0.018, 0.018), materials.hair, [eyeX, 0.694, -0.16], [1, 1, 1], [0, 0, side * -0.08]);
-      this.addPart(record, mesh, new THREE.SphereGeometry(0.061, 8, 7), materials.skin, [side * 0.168, 0.62, -0.005], [0.58, 0.86, 0.55]);
-      this.addPart(record, mesh, new THREE.BoxGeometry(0.045, 0.12, 0.06), materials.armorDark, [side * 0.198, 0.64, -0.006]);
-      this.addPart(record, mesh, new THREE.SphereGeometry(0.115, 10, 8), materials.armor, [side * 0.31, 0.18, 0], [1, 0.72, 1.03]);
-      this.addPart(record, mesh, new THREE.CapsuleGeometry(0.07, 0.31, 3, 7), materials.armorDark, [side * 0.37, -0.06, -0.025], [1, 1, 1], [0.08, 0, side * -0.18]);
-      this.addPart(record, mesh, new THREE.CapsuleGeometry(0.052, 0.23, 3, 7), materials.armorLight, [side * 0.4, -0.24, -0.07], [1, 1, 1], [0.14, 0, side * -0.12]);
-      this.addPart(record, mesh, new THREE.SphereGeometry(0.066, 8, 7), materials.glove, [side * 0.41, -0.4, -0.12], [1, 0.82, 1.1]);
-      this.addPart(record, mesh, new THREE.CapsuleGeometry(0.09, 0.31, 3, 7), materials.armorDark, [side * 0.12, -0.6, 0.012]);
-      this.addPart(record, mesh, new THREE.BoxGeometry(0.14, 0.11, 0.18), materials.armor, [side * 0.12, -0.78, -0.015]);
-      this.addPart(record, mesh, new THREE.BoxGeometry(0.145, 0.06, 0.2), materials.sole, [side * 0.12, -0.86, -0.018]);
-      this.addPart(record, mesh, new THREE.BoxGeometry(0.19, 0.11, 0.055), materials.armorLight, [side * 0.12, -0.59, -0.105]);
+    // Attempt to create a rigged character instance if GLB assets are loaded
+    if (assetManager.ready && assetManager.hasCharacter()) {
+      characterInstance = assetManager.createCharacterInstance();
     }
 
-    const nose = new THREE.ConeGeometry(0.031, 0.09, 6);
-    this.addPart(record, mesh, nose, materials.skin, [0, 0.61, -0.194], [1, 1, 1], [-Math.PI / 2, 0, 0]);
-    this.addPart(record, mesh, new THREE.BoxGeometry(0.086, 0.015, 0.013), materials.mouth, [0, 0.535, -0.174]);
-    this.addPart(record, mesh, new THREE.BoxGeometry(0.12, 0.025, 0.015), materials.hair, [0, 0.49, -0.164]);
-    this.addPart(record, mesh, new THREE.BoxGeometry(0.13, 0.06, 0.07), materials.armorDark, [0, -0.47, -0.025]);
+    if (characterInstance) {
+      mesh.add(characterInstance.mesh);
+      characterInstance.mesh.position.set(0, -PLAYER.height / 2, 0);
+      characterInstance.mesh.scale.set(1, 1, 1);
 
-    const gunSocket = new THREE.Group();
-    gunSocket.position.set(0.33, -0.015, -0.22);
-    mesh.add(gunSocket);
-    const muzzleFlash = new THREE.Mesh(
+      const rightHand = characterInstance.mesh.getObjectByName('mixamorigRightHand');
+      gunSocket = new THREE.Group();
+      if (rightHand) {
+        gunSocket.position.set(0, 0.05, 0);
+        gunSocket.rotation.set(-Math.PI / 2, 0, -Math.PI / 2);
+        rightHand.add(gunSocket);
+      } else {
+        gunSocket.position.set(0.33, -0.015, -0.22);
+        mesh.add(gunSocket);
+      }
+
+      const idleClip = assetManager.getAnimation('idle') || assetManager.getAnimation('pose');
+      if (idleClip && characterInstance.mixer) {
+        const idleAction = characterInstance.mixer.clipAction(idleClip);
+        idleAction.loop = THREE.LoopRepeat;
+        idleAction.play();
+        characterInstance.currentAction = idleAction;
+        characterInstance.currentActionName = 'idle';
+      }
+    } else {
+      const mats = {
+        armor: new THREE.MeshStandardMaterial({ color: suitColor, roughness: 0.53, metalness: 0.24, emissive: suitColor, emissiveIntensity: 0.08 }),
+        armorDark: new THREE.MeshStandardMaterial({ color: '#202d3b', roughness: 0.7, metalness: 0.23 }),
+        armorLight: new THREE.MeshStandardMaterial({ color: '#657c8d', roughness: 0.48, metalness: 0.48 }),
+        skin: new THREE.MeshStandardMaterial({ color: skinColor, roughness: 0.82, metalness: 0.02 }),
+        hair: new THREE.MeshStandardMaterial({ color: '#151b24', roughness: 0.94, metalness: 0.02 }),
+        eyeWhite: new THREE.MeshStandardMaterial({ color: '#e7edf0', roughness: 0.32, metalness: 0.02 }),
+        iris: new THREE.MeshStandardMaterial({ color: eyeColor, roughness: 0.35, metalness: 0.06, emissive: eyeColor, emissiveIntensity: 0.14 }),
+        pupil: new THREE.MeshBasicMaterial({ color: '#10151c' }),
+        mouth: new THREE.MeshStandardMaterial({ color: '#57392f', roughness: 0.9 }),
+        glove: new THREE.MeshStandardMaterial({ color: '#101821', roughness: 0.76, metalness: 0.2 }),
+        visor: new THREE.MeshStandardMaterial({ color: '#173b4a', roughness: 0.2, metalness: 0.58, emissive: '#16718a', emissiveIntensity: 0.22 }),
+        sole: new THREE.MeshStandardMaterial({ color: '#0d141c', roughness: 0.9, metalness: 0.08 }),
+      };
+      materials.push(...Object.values(mats));
+
+      const torso = new THREE.CapsuleGeometry(0.235, 0.45, 4, 9);
+      this.addPart({ geometries }, mesh, torso, mats.armorDark, [0, -0.05, 0]);
+      this.addPart({ geometries }, mesh, new THREE.BoxGeometry(0.36, 0.34, 0.12), mats.armor, [0, 0.08, -0.176]);
+      this.addPart({ geometries }, mesh, new THREE.BoxGeometry(0.24, 0.055, 0.035), mats.armorLight, [0, 0.23, -0.246]);
+      this.addPart({ geometries }, mesh, new THREE.BoxGeometry(0.12, 0.08, 0.032), mats.visor, [0, -0.03, -0.25]);
+      this.addPart({ geometries }, mesh, new THREE.CylinderGeometry(0.19, 0.2, 0.075, 8), mats.armorLight, [0, -0.335, 0]);
+      this.addPart({ geometries }, mesh, new THREE.BoxGeometry(0.16, 0.12, 0.08), mats.armorDark, [0, -0.38, 0.17]);
+
+      const neck = new THREE.CylinderGeometry(0.075, 0.09, 0.16, 8);
+      this.addPart({ geometries }, mesh, neck, mats.skin, [0, 0.39, 0]);
+      const head = new THREE.SphereGeometry(0.19, 16, 12);
+      this.addPart({ geometries }, mesh, head, mats.skin, [0, 0.62, -0.005], [0.9, 1.08, 0.9]);
+      const hair = new THREE.SphereGeometry(0.195, 14, 8, 0, Math.PI * 2, 0, Math.PI * 0.56);
+      this.addPart({ geometries }, mesh, hair, mats.hair, [0, 0.72, 0.008], [0.98, 0.64, 0.98]);
+
+      for (const side of [-1, 1]) {
+        const eyeX = side * 0.064;
+        this.addPart({ geometries }, mesh, new THREE.SphereGeometry(0.034, 10, 8), mats.eyeWhite, [eyeX, 0.643, -0.163], [1.05, 0.72, 0.62]);
+        this.addPart({ geometries }, mesh, new THREE.SphereGeometry(0.018, 8, 6), mats.iris, [eyeX, 0.642, -0.185]);
+        this.addPart({ geometries }, mesh, new THREE.SphereGeometry(0.009, 7, 5), mats.pupil, [eyeX, 0.642, -0.198]);
+        this.addPart({ geometries }, mesh, new THREE.BoxGeometry(0.076, 0.018, 0.018), mats.hair, [eyeX, 0.694, -0.16], [1, 1, 1], [0, 0, side * -0.08]);
+        this.addPart({ geometries }, mesh, new THREE.SphereGeometry(0.061, 8, 7), mats.skin, [side * 0.168, 0.62, -0.005], [0.58, 0.86, 0.55]);
+        this.addPart({ geometries }, mesh, new THREE.BoxGeometry(0.045, 0.12, 0.06), mats.armorDark, [side * 0.198, 0.64, -0.006]);
+        this.addPart({ geometries }, mesh, new THREE.SphereGeometry(0.115, 10, 8), mats.armor, [side * 0.31, 0.18, 0], [1, 0.72, 1.03]);
+        this.addPart({ geometries }, mesh, new THREE.CapsuleGeometry(0.07, 0.31, 3, 7), mats.armorDark, [side * 0.37, -0.06, -0.025], [1, 1, 1], [0.08, 0, side * -0.18]);
+        this.addPart({ geometries }, mesh, new THREE.CapsuleGeometry(0.052, 0.23, 3, 7), mats.armorLight, [side * 0.4, -0.24, -0.07], [1, 1, 1], [0.14, 0, side * -0.12]);
+        this.addPart({ geometries }, mesh, new THREE.SphereGeometry(0.066, 8, 7), mats.glove, [side * 0.41, -0.4, -0.12], [1, 0.82, 1.1]);
+        this.addPart({ geometries }, mesh, new THREE.CapsuleGeometry(0.09, 0.31, 3, 7), mats.armorDark, [side * 0.12, -0.6, 0.012]);
+        this.addPart({ geometries }, mesh, new THREE.BoxGeometry(0.14, 0.11, 0.18), mats.armor, [side * 0.12, -0.78, -0.015]);
+        this.addPart({ geometries }, mesh, new THREE.BoxGeometry(0.145, 0.06, 0.2), mats.sole, [side * 0.12, -0.86, -0.018]);
+        this.addPart({ geometries }, mesh, new THREE.BoxGeometry(0.19, 0.11, 0.055), mats.armorLight, [side * 0.12, -0.59, -0.105]);
+      }
+
+      const nose = new THREE.ConeGeometry(0.031, 0.09, 6);
+      this.addPart({ geometries }, mesh, nose, mats.skin, [0, 0.61, -0.194], [1, 1, 1], [-Math.PI / 2, 0, 0]);
+      this.addPart({ geometries }, mesh, new THREE.BoxGeometry(0.086, 0.015, 0.013), mats.mouth, [0, 0.535, -0.174]);
+      this.addPart({ geometries }, mesh, new THREE.BoxGeometry(0.12, 0.025, 0.015), mats.hair, [0, 0.49, -0.164]);
+      this.addPart({ geometries }, mesh, new THREE.BoxGeometry(0.13, 0.06, 0.07), mats.armorDark, [0, -0.47, -0.025]);
+
+      gunSocket = new THREE.Group();
+      gunSocket.position.set(0.33, -0.015, -0.22);
+      mesh.add(gunSocket);
+    }
+
+    muzzleFlash = new THREE.Mesh(
       new THREE.SphereGeometry(0.048, 8, 6),
       new THREE.MeshBasicMaterial({ color: '#ffe3a0', transparent: true, opacity: 0.95 }),
     );
     muzzleFlash.visible = false;
     gunSocket.add(muzzleFlash);
-    record.gunSocket = gunSocket;
-    record.muzzleFlash = muzzleFlash;
 
     const shieldGeometry = new THREE.SphereGeometry(0.49, 12, 8);
     const shieldMaterial = new THREE.MeshBasicMaterial({ color: '#59d8ff', wireframe: true, transparent: true, opacity: 0.36, depthWrite: false });
     const shield = new THREE.Mesh(shieldGeometry, shieldMaterial);
-    record.geometries.push(shieldGeometry);
-    record.materials.push(shieldMaterial);
+    geometries.push(shieldGeometry);
+    materials.push(shieldMaterial);
     shield.scale.y = 1.8;
     mesh.add(shield);
     shield.visible = false;
-    record.shield = shield;
 
     const label = document.createElement('div');
     label.className = 'name-tag';
@@ -319,9 +342,29 @@ export class RemotePlayers {
     const weaponLabel = document.createElement('span');
     weaponLabel.className = 'name-tag-weapon';
     label.append(nameLabel, weaponLabel);
-    record.label = label;
-    record.nameLabel = nameLabel;
-    record.weaponLabel = weaponLabel;
+
+    const record = {
+      mesh,
+      characterInstance,
+      materials,
+      geometries,
+      name: data.name,
+      color: data.color,
+      weaponId: null,
+      pendingWeaponId: data.currentWeaponId,
+      weaponModel: null,
+      weaponTransition: null,
+      gunSocket,
+      muzzleFlash,
+      muzzleFlashUntil: 0,
+      shield,
+      label,
+      nameLabel,
+      weaponLabel,
+      currentAnim: 'idle',
+      lastAnimUpdate: performance.now(),
+    };
+
     this.nameTagRoot.append(label);
     this.scene.add(mesh);
     this.players.set(data.id, record);
@@ -392,6 +435,43 @@ export class RemotePlayers {
     record.muzzleFlash.visible = now < record.muzzleFlashUntil;
   }
 
+  updatePlayerAnimation(record, pose, delta) {
+    if (!record.characterInstance?.mixer) return;
+    record.characterInstance.mixer.update(delta);
+
+    const speed = Math.hypot(pose.vx ?? 0, pose.vz ?? 0);
+    let targetAnim = 'idle';
+    if (!pose.alive) {
+      targetAnim = 'death';
+    } else if (speed > 4.5) {
+      targetAnim = 'run';
+    } else if (speed > 0.3) {
+      targetAnim = 'walk';
+    }
+
+    if (record.currentAnim !== targetAnim) {
+      const targetClip = assetManager.getAnimation(targetAnim)
+        || (targetAnim === 'run' ? assetManager.getAnimation('walk') : null)
+        || assetManager.getAnimation('idle')
+        || assetManager.getAnimation('pose');
+      if (targetClip) {
+        const nextAction = record.characterInstance.mixer.clipAction(targetClip);
+        if (targetAnim === 'death') {
+          nextAction.setLoop(THREE.LoopOnce, 1);
+          nextAction.clampWhenFinished = true;
+        } else {
+          nextAction.setLoop(THREE.LoopRepeat);
+        }
+        if (record.characterInstance.currentAction) {
+          record.characterInstance.currentAction.crossFadeTo(nextAction, 0.2, true);
+        }
+        nextAction.play();
+        record.characterInstance.currentAction = nextAction;
+        record.currentAnim = targetAnim;
+      }
+    }
+  }
+
   flashWeapon(playerId, weaponId, bundleId, now = performance.now()) {
     const record = this.players.get(playerId);
     if (!record || !weaponId || ['KNIFE', 'GOD_FIST', 'SMOKE_GRENADE', 'COMBAT_SHIELD'].includes(weaponId)) return;
@@ -410,6 +490,9 @@ export class RemotePlayers {
     const width = window.innerWidth;
     const height = window.innerHeight;
     const now = performance.now();
+    const delta = Math.min((now - this.lastFrameTime) / 1000, 0.1);
+    this.lastFrameTime = now;
+
     for (const data of players) {
       if (data.id === localPlayerId) continue;
       const record = this.ensurePlayer(data);
@@ -426,6 +509,7 @@ export class RemotePlayers {
       record.label.style.setProperty('--player-color', data.color || '#57d8ff');
       this.equipWeapon(record, data.currentWeaponId);
       this.updateWeapon(record, now);
+      this.updatePlayerAnimation(record, pose, delta);
       record.gunSocket.rotation.x = Number(pose.pitch) || 0;
 
       const showingKnockback = !pose.alive && Math.hypot(pose.vx ?? 0, pose.vz ?? 0) > 1.5;
@@ -456,6 +540,9 @@ export class RemotePlayers {
   removePlayer(id, record = this.players.get(id)) {
     if (!record) return;
     this.scene.remove(record.mesh);
+    if (record.characterInstance) {
+      record.characterInstance.dispose();
+    }
     record.geometries.forEach((geometry) => geometry.dispose());
     record.materials.forEach((material) => material.dispose());
     record.muzzleFlash.geometry.dispose();

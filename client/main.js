@@ -85,6 +85,10 @@ weaponModels.ready.then((loaded) => {
 Promise.allSettled([assetBoot, weaponModels.ready]).then(() => {
   assetsLoaded = assetManager.ready;
   lobbyScene = new LobbyScene(scene, camera, { weaponModels });
+  const initialBundle = BUNDLE_BY_ID[ui.selectedBundleId];
+  if (initialBundle?.weapons?.[0]?.id) {
+    lobbyScene.loadLobbyWeapon(initialBundle.weapons[0].id);
+  }
   console.log(`[FPS GODS] Lobby booted; assets ${assetsLoaded ? 'loaded' : 'partially unavailable'}`);
 });
 let currentRoom = null;
@@ -346,6 +350,12 @@ ui.setHandlers({
     if (!network.connected) return ui.showError('Still reconnecting to the game server. Try again in a moment.');
     network.playAgain();
   },
+  onBundleChange: (bundleId) => {
+    const bundle = BUNDLE_BY_ID[bundleId];
+    if (bundle && bundle.weapons?.[0]?.id && lobbyScene) {
+      lobbyScene.loadLobbyWeapon(bundle.weapons[0].id);
+    }
+  },
   onResume: () => {
     if (canPlay() && document.pointerLockElement !== canvas) {
       const request = canvas.requestPointerLock?.();
@@ -499,6 +509,7 @@ function animate(now = performance.now()) {
   }
 
   if (matchActive) {
+    if (lobbyScene) lobbyScene.hide();
     if (canPlay() && network.connected) {
       const input = controller.getInput(inputSequence++);
       if (!latestPlayerAlive) {
@@ -520,9 +531,15 @@ function animate(now = performance.now()) {
     camera.updateMatrixWorld(true);
     remotePlayers.update(latestPlayers, interpolator, camera, renderAt, network.id);
   } else {
-    const orbit = now * 0.000035;
-    camera.position.set(Math.sin(orbit) * 31, 22 + Math.sin(orbit * 0.7) * 1.3, Math.cos(orbit) * 31);
-    camera.lookAt(0, 0.65, 0);
+    if (lobbyScene) {
+      lobbyScene.show();
+      camera.position.set(0, 1.25, 3.2);
+      camera.lookAt(0, 0.85, 0);
+    } else {
+      const orbit = now * 0.000035;
+      camera.position.set(Math.sin(orbit) * 31, 22 + Math.sin(orbit * 0.7) * 1.3, Math.cos(orbit) * 31);
+      camera.lookAt(0, 0.65, 0);
+    }
   }
 
   weaponEffects.gun.visible = matchActive && !matchEnded;

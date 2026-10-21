@@ -196,6 +196,7 @@ export class GameUI {
     localStorage.setItem('fps-gods-bundle', bundleId);
     this.updateBundleSelection();
     this.clearError();
+    this.handlers.onBundleChange?.(bundleId);
     return true;
   }
 
