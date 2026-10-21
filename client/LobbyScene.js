@@ -7,6 +7,7 @@ export class LobbyScene {
     this.camera = camera;
     this.weaponModels = weaponModels ?? null;
     this.character = null;
+    this.characterInstance = null;
     this.weapon = null;
     this.lobbyGroup = null;
     this.lightGroup = null;
@@ -123,16 +124,25 @@ export class LobbyScene {
   }
 
   async createLobbyCharacter() {
-    const characterScene = assetManager.getCharacter();
-    if (!characterScene) {
-      console.warn('[LobbyScene] Character model not loaded');
-      return;
+    let characterInstance = assetManager.createCharacterInstance();
+    if (!characterInstance) {
+      const char = assetManager.getCharacter();
+      if (char) {
+        this.character = char.clone(true);
+        this.animationMixer = new THREE.AnimationMixer(this.character);
+      } else {
+        console.warn('[LobbyScene] Character model not loaded');
+        return;
+      }
+    } else {
+      this.characterInstance = characterInstance;
+      this.character = characterInstance.mesh;
+      this.animationMixer = characterInstance.mixer;
     }
 
-    this.character = characterScene.clone(true);
-    this.character.position.set(0, 0, 0);
+    this.character.position.set(0, -0.45, 0);
     this.character.scale.set(1, 1, 1);
-    this.character.rotation.y = Math.PI * 0.25;
+    this.character.rotation.y = Math.PI * 0.15;
 
     this.character.traverse((child) => {
       if (child.isMesh) {
@@ -143,36 +153,37 @@ export class LobbyScene {
 
     this.lobbyGroup.add(this.character);
 
-    await this.loadLobbyWeapon('SMG');
+    this.loadLobbyWeapon('SMG');
     this.setupCharacterAnimations();
   }
 
-  async loadLobbyWeapon(weaponId = 'SMG') {
+  loadLobbyWeapon(weaponId = 'SMG') {
     let model = this.weaponModels?.createModel(weaponId) ?? null;
 
     if (!model) {
-      try {
-        const weaponName = String(weaponId).toLowerCase();
-        const weaponPath = `/assets/weapons/${weaponName}.glb`;
-        const { GLTFLoader } = await import('three/addons/loaders/GLTFLoader.js');
-        const loader = new GLTFLoader();
-        const glb = await loader.loadAsync(weaponPath);
-        model = glb.scene;
-      } catch (error) {
-        console.warn(`[LobbyScene] Could not load lobby weapon ${weaponId}:`, error);
-      }
+      console.warn(`[LobbyScene] Lobby weapon '${weaponId}' is not available yet`);
+      return;
     }
 
-    if (!model) return;
-
-    if (this.weapon && this.character) {
-      this.character.remove(this.weapon);
+    if (this.weapon) {
+      if (this.weapon.parent) this.weapon.parent.remove(this.weapon);
+      this.weapon = null;
     }
 
     this.weapon = model;
-    this.weapon.position.set(0.3, -0.1, -0.3);
-    this.weapon.rotation.set(0, Math.PI / 4, 0);
-    this.weapon.scale.set(0.8, 0.8, 0.8);
+
+    const rightHand = this.character?.getObjectByName('mixamorigRightHand');
+    if (rightHand) {
+      this.weapon.position.set(0, 0.05, 0);
+      this.weapon.rotation.set(-Math.PI / 2, 0, -Math.PI / 2);
+      this.weapon.scale.set(0.75, 0.75, 0.75);
+      rightHand.add(this.weapon);
+    } else if (this.character) {
+      this.weapon.position.set(0.25, 0.9, 0.2);
+      this.weapon.rotation.set(0, Math.PI / 4, 0);
+      this.weapon.scale.set(0.75, 0.75, 0.75);
+      this.character.add(this.weapon);
+    }
 
     this.weapon.traverse((child) => {
       if (child.isMesh && child.material) {
@@ -186,21 +197,18 @@ export class LobbyScene {
       }
     });
 
-    if (this.character) {
-      this.character.add(this.weapon);
-    }
     console.log(`[LobbyScene] Attached lobby weapon: ${weaponId}`);
   }
 
   setupCharacterAnimations() {
-    if (!this.character) return;
-    this.animationMixer = new THREE.AnimationMixer(this.character);
+    if (!this.character || !this.animationMixer) return;
 
-    const idleClip = assetManager.getAnimation('idle');
+    const idleClip = assetManager.getAnimation('idle') || assetManager.getAnimation('pose') || assetManager.getAnimation('tactical');
     if (idleClip) {
       this.idleAction = this.animationMixer.clipAction(idleClip);
       this.idleAction.loop = THREE.LoopRepeat;
       this.idleAction.play();
+      console.log('[LobbyScene] Playing character idle animation:', idleClip.name);
     }
   }
 
@@ -208,30 +216,30 @@ export class LobbyScene {
     this.lightGroup = new THREE.Group();
     this.lobbyGroup.add(this.lightGroup);
 
-    const ambient = new THREE.AmbientLight('#404070', 0.8);
+    const ambient = new THREE.AmbientLight('#404070', 0.9);
     this.lightGroup.add(ambient);
 
-    const directional = new THREE.DirectionalLight('#ffffff', 1.5);
+    const directional = new THREE.DirectionalLight('#ffffff', 1.8);
     directional.position.set(10, 20, 10);
     directional.castShadow = true;
     this.lightGroup.add(directional);
 
-    const cyanLight1 = new THREE.PointLight('#00f0ff', 2, 30);
+    const cyanLight1 = new THREE.PointLight('#00f0ff', 2.2, 30);
     cyanLight1.position.set(-10, 5, -10);
     this.lightGroup.add(cyanLight1);
 
-    const cyanLight2 = new THREE.PointLight('#00f0ff', 2, 30);
+    const cyanLight2 = new THREE.PointLight('#00f0ff', 2.2, 30);
     cyanLight2.position.set(10, 5, 10);
     this.lightGroup.add(cyanLight2);
 
-    const warmLight = new THREE.PointLight('#ff8b3d', 1.5, 30);
+    const warmLight = new THREE.PointLight('#ff8b3d', 1.6, 30);
     warmLight.position.set(0, 8, 0);
     this.lightGroup.add(warmLight);
   }
 
   setupLobbyCamera() {
-    this.camera.position.set(0, 3, 8);
-    this.camera.lookAt(0, 1, 0);
+    this.camera.position.set(0, 1.25, 3.2);
+    this.camera.lookAt(0, 0.85, 0);
   }
 
   update(delta) {
@@ -249,7 +257,7 @@ export class LobbyScene {
     if (this.lightGroup) {
       this.lightGroup.children.forEach((light) => {
         if (light.color && (light.color.r > 0.9 || light.color.b > 0.9)) {
-          light.intensity = 2 * pulse;
+          light.intensity = 2.2 * pulse;
         }
       });
     }
@@ -269,7 +277,10 @@ export class LobbyScene {
     if (this.lobbyGroup) {
       this.scene.remove(this.lobbyGroup);
     }
-    if (this.animationMixer) {
+    if (this.characterInstance) {
+      this.characterInstance.dispose();
+      this.characterInstance = null;
+    } else if (this.animationMixer) {
       this.animationMixer.stopAllAction();
       this.animationMixer = null;
     }

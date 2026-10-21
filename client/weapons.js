@@ -68,12 +68,18 @@ function orientModel(scene, file) {
   const bounds = new THREE.Box3().setFromObject(oriented);
   const size = bounds.getSize(new THREE.Vector3());
   const center = bounds.getCenter(new THREE.Vector3());
+
+  // Center the oriented geometry around (0, 0, 0) inside a pivot group
+  const centered = new THREE.Group();
+  oriented.position.copy(center).negate();
+  centered.add(oriented);
+
   const fitted = new THREE.Group();
   const modelScale = MODEL_LENGTH[file] / Math.max(size.z, 0.001);
-  fitted.position.copy(center).multiplyScalar(-modelScale);
   fitted.scale.setScalar(modelScale);
-  fitted.add(oriented);
+  fitted.add(centered);
   fitted.userData.normalizedLength = 1;
+  fitted.userData.baseScale = fitted.scale.clone();
   fitted.traverse((part) => {
     if (part.isMesh) {
       part.castShadow = false;
