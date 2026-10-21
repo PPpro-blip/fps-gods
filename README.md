@@ -101,6 +101,14 @@ shared/
   gameConfig.js          Map and player constants
 ```
 
+## Assets
+
+Static GLB assets (maps, characters, animations, and weapon models) are provided in `public/assets/` and exposed cleanly to the root build and development server at `/assets/...`.
+
+- **Map** (`/assets/map/arena_map.glb`)
+- **Character** (`/assets/characters/character.glb`)
+- **Animations** (`/assets/animations/animations.glb`)
+- **Weapons** (`/assets/weapons/knife.glb`, `lmg.glb`, `pistol.glb`, `rifle.glb`, `rocket.glb`, `shotgun.glb`, `smg.glb`, `sniper.glb`)
 ## Deployment
 
 The client is a static Vite build; Socket.IO needs a persistent Node.js process. A Render blueprint is included in `render.yaml`.

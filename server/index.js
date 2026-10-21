@@ -47,10 +47,6 @@ export function createGameServer(options = {}) {
   });
 
   const httpServer = createServer(app);
-  httpServer.on('error', (error) => {
-    console.error('[FPS GODS] HTTP server error:', error);
-  });
-
   const io = new Server(httpServer, {
     cors: socketCorsOptions(),
     pingInterval: 25_000,
@@ -194,6 +190,7 @@ export function createGameServer(options = {}) {
 
   let lastTick = Date.now();
   let lastRoomCleanup = 0;
+  const failingRooms = new Map();
   const simulationTimer = setInterval(() => {
     const now = Date.now();
     const delta = Math.min((now - lastTick) / 1_000, 0.1);
@@ -205,12 +202,38 @@ export function createGameServer(options = {}) {
 
     for (const room of roomManager.rooms.values()) {
       if (room.state !== ROOM_STATES.PLAYING || !room.game) continue;
-      const result = room.game.update(delta, now);
-      if (result?.winner) {
-        roomManager.endGame(room, result.winner);
-        continue;
+      // One room must never take the process down. Without this guard a throw
+      // inside a single match's simulation is an uncaught exception in a timer
+      // callback, which kills the node process and every other live match with
+      // it - the blast radius reaches players who did nothing wrong. The room is
+      // ended instead, so its own clients get a result rather than a hang.
+      try {
+        const result = room.game.update(delta, now);
+        if (result?.winner) {
+          roomManager.endGame(room, result.winner);
+          continue;
+        }
+        io.to(room.code).volatile.emit(EVENTS.GAME_STATE_UPDATE, room.game.getPublicState(now));
+        failingRooms.delete(room.code);
+      } catch (error) {
+        const strikes = (failingRooms.get(room.code) ?? 0) + 1;
+        failingRooms.set(room.code, strikes);
+        console.error(`[FPS GODS] room ${room.code} tick ${strikes} failed:`, error);
+        // Give a transient fault one more tick, then stop the match so a room
+        // cannot log forever while its players watch a frozen arena.
+        if (strikes >= 2) {
+          failingRooms.delete(room.code);
+          room.state = ROOM_STATES.ENDED;
+          io.to(room.code).emit(EVENTS.GAME_END, {
+            code: room.code,
+            mode: room.mode,
+            winner: null,
+            scoreboard: room.game?.getScoreboard?.() ?? [],
+            reason: 'The match was stopped after a server-side error.',
+          });
+          roomManager.broadcastRoomState(room);
+        }
       }
-      io.to(room.code).volatile.emit(EVENTS.GAME_STATE_UPDATE, room.game.getPublicState(now));
     }
   }, TICK_RATE_MS);
 
@@ -240,6 +263,24 @@ export function startGameServer() {
   // target from, so the two can no longer be edited apart.
   const port = Number(process.env.PORT) || DEFAULT_GAME_SERVER_PORT;
   const host = process.env.HOST || DEFAULT_GAME_SERVER_HOST;
+
+  // A failed bind must be reported, not thrown. Without a listener Node raises
+  // the 'error' event on the emitter, which becomes an unhandled exception and
+  // kills the process during boot - indistinguishable from a crash loop, and the
+  // host answers 502 / "Application Failed to Respond" with no useful log line.
+  server.httpServer.once('error', (error) => {
+    const hint = error.code === 'EADDRINUSE'
+      ? `port ${port} is already in use`
+      : error.code === 'EACCES'
+        ? `no permission to bind ${port}; privileged ports need a capability, not a fallback port`
+        : 'bind failed';
+    console.error(`[FPS GODS] cannot listen on ${host}:${port} (${hint})`, error);
+    // Exit non-zero and let the host restart the instance. Swallowing this in an
+    // uncaughtException handler would leave a process that answers health checks
+    // while holding no sockets, which is worse than a visible crash.
+    process.exitCode = 1;
+    process.exit(1);
+  });
 
   server.httpServer.listen(port, host, () => {
     console.log(`FPS GODS server listening on http://${host}:${server.httpServer.address().port}`);
