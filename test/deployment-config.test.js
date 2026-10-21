@@ -54,3 +54,24 @@ test('the README documents the current default rather than a stale port', () => 
   // The distinction that has caused real outages: the fallback is local-only.
   assert.match(readme, /inject`? ?`?PORT`?/, 'README must state that hosts inject PORT');
 });
+
+test('public assets directory contains all required GLB models for web root delivery', async () => {
+  const { existsSync } = await import('node:fs');
+  const requiredAssets = [
+    '../public/assets/map/arena_map.glb',
+    '../public/assets/characters/character.glb',
+    '../public/assets/animations/animations.glb',
+    '../public/assets/weapons/knife.glb',
+    '../public/assets/weapons/lmg.glb',
+    '../public/assets/weapons/pistol.glb',
+    '../public/assets/weapons/rifle.glb',
+    '../public/assets/weapons/rocket.glb',
+    '../public/assets/weapons/shotgun.glb',
+    '../public/assets/weapons/smg.glb',
+    '../public/assets/weapons/sniper.glb',
+  ];
+  for (const asset of requiredAssets) {
+    const assetUrl = new URL(asset, import.meta.url);
+    assert.equal(existsSync(assetUrl), true, `Asset ${asset} must exist in public/`);
+  }
+});

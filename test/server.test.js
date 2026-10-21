@@ -110,6 +110,20 @@ test('the health endpoint is readable by the browser connection probe', async ()
     assert.equal(response.headers.get('access-control-allow-origin'), '*');
     assert.equal(response.headers.get('cache-control'), 'no-store');
     assert.equal(response.status, 200);
+
+    // OPTIONS preflight request
+    const preflight = await fetch(`${server.url}/health`, {
+      method: 'OPTIONS',
+      headers: { Origin: 'https://fps-gods.vercel.app' },
+    });
+    assert.equal(preflight.headers.get('access-control-allow-origin'), '*');
+    assert.equal(preflight.status, 204);
+
+    // Root endpoint probe
+    const rootRes = await fetch(`${server.url}/`);
+    assert.equal(rootRes.status, 200);
+    const rootBody = await rootRes.json();
+    assert.equal(rootBody.status, 'ok');
   } finally {
     await server.close();
   }
@@ -203,7 +217,6 @@ test('a failed bind reports the reason and exits instead of dying on an unhandle
     await blocker.close();
   }
 });
-
 test('Socket.IO CORS accepts every origin with a wildcard response', async () => {
   const server = await startServer();
   try {

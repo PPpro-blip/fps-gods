@@ -1,29 +1,23 @@
 import * as THREE from 'three';
 
-// Only assets that actually exist are declared here, and they are declared as
-// bundler imports rather than runtime strings.
-//
-// The previous revision hardcoded `/assets/map/arena_map.glb`,
-// `/assets/animations/animations.glb` and `/assets/weapons/rifle.glb`. None of
-// those files exist in this repository: the map ships as `map-assets.glb`, the
-// animations ship as five separate `Animation_N.glb` files, and there is no
-// `rifle` weapon anywhere in the game. Each request therefore 404'd in the
-// browser, and every loader swallowed the error and assigned `null`, so the
-// failure was invisible except in the network panel - which is what "asset 404s"
-// turned out to mean.
-//
-// A `?url` import is the fix that prevents a repeat: Vite resolves the specifier
-// at build time, so a mistyped or deleted asset fails `npm run build` instead of
-// silently 404ing for every player. This is the same mechanism `weapons.js`
-// already uses successfully for the seven weapon GLBs.
-import characterModelUrl from './assets/characters/character.glb?url';
-
+// Asset path configuration - pointing to web root /assets/...
 export const ASSET_PATHS = Object.freeze({
-  character: characterModelUrl,
+  map: '/assets/map/arena_map.glb',
+  character: '/assets/characters/character.glb',
+  animations: '/assets/animations/animations.glb',
+  weapons: {
+    rifle: '/assets/weapons/rifle.glb',
+    pistol: '/assets/weapons/pistol.glb',
+    knife: '/assets/weapons/knife.glb',
+    smg: '/assets/weapons/smg.glb',
+    shotgun: '/assets/weapons/shotgun.glb',
+    sniper: '/assets/weapons/sniper.glb',
+    lmg: '/assets/weapons/lmg.glb',
+    rocket: '/assets/weapons/rocket.glb',
+  },
 });
 
-// Kept for the intended animation contract; see loadAnimations() for why no clip
-// currently satisfies it.
+// Animation state to track name mapping
 export const ANIMATION_MAP = Object.freeze({
   idle: 'Idle',
   run: 'Run',
@@ -34,40 +28,21 @@ export const ANIMATION_MAP = Object.freeze({
   crouch: 'Crouch',
 });
 
-/**
- * Load the presentation assets the lobby actually consumes.
- *
- * Deliberately small. Two asset loads that used to be attempted here were
- * removed rather than repathed, because the data is unusable and shipping it is
- * not free:
- *
- * - **Map (3.0 MB).** `getMap()` has no callers. `world.js` builds the arena
- *   procedurally, so the file was fetched, assigned, and never read.
- * - **Animations (13 MB).** Inspecting the five `Animation_N.glb` files shows
- *   every clip is named `mixamo.com`, `mixamo.com.001`, ... so `ANIMATION_MAP`
- *   can never match, and each file carries its own `mixamorig:*` skeleton while
- *   `character.glb` ships a different rig with zero animations. Clips from those
- *   files cannot drive the loaded character.
- *
- * Restoring animation playback is an art-pipeline task, not a path edit: either
- * re-export one GLB whose clips are named to `ANIMATION_MAP` and retargeted to
- * `character.glb`'s rig, or render the rig that ships inside an
- * `Animation_N.glb` and drop `character.glb`. Both need a decision about which
- * of the five files is authoritative, so it is left to a designer rather than
- * guessed at here.
- */
 export class AssetManager {
   constructor() {
     this.assets = {
+      map: null,
       character: null,
+      animations: null,
+      weapons: {},
     };
     this.animationMixer = null;
     this.animations = {};
     this.loaded = false;
-    // What a player-facing "asset 404" actually was: a silent null. Failures are
-    // recorded and reported instead of only written to the console.
     this.status = { requested: Object.keys(ASSET_PATHS), loaded: [], failed: [] };
     this.glbLoader = null;
+    this.initialized = false;
+    this.loadPromise = null;
   }
 
   async init() {
@@ -80,8 +55,14 @@ export class AssetManager {
   async loadAll() {
     const { GLTFLoader } = await import('three/addons/loaders/GLTFLoader.js');
     this.glbLoader = new GLTFLoader();
-    await this.loadCharacter();
-    this.loaded = this.status.failed.length === 0;
+
+    await Promise.allSettled([
+      this.loadCharacter(),
+      this.loadMap(),
+      this.loadAnimations(),
+    ]);
+
+    this.loaded = Boolean(this.assets.character);
     return this.loaded;
   }
 
@@ -91,6 +72,7 @@ export class AssetManager {
       this.assets.character = glb.scene;
       this.setupCharacterMaterials(this.assets.character);
       this.status.loaded.push('character');
+      console.log('[AssetManager] Character loaded successfully');
     } catch (error) {
       console.error('[AssetManager] Failed to load character:', error);
       this.assets.character = null;
@@ -98,36 +80,118 @@ export class AssetManager {
     }
   }
 
-  setupCharacterMaterials(scene) {
+  async loadMap() {
+    try {
+      let glb;
+      try {
+        glb = await this.glbLoader.loadAsync(ASSET_PATHS.map);
+      } catch {
+        glb = await this.glbLoader.loadAsync('/assets/map/map-assets.glb');
+      }
+      this.assets.map = glb.scene;
+      this.setupMapMaterials(this.assets.map);
+      this.status.loaded.push('map');
+      console.log('[AssetManager] Map loaded successfully');
+    } catch (error) {
+      console.error('[AssetManager] Failed to load map:', error);
+      this.assets.map = null;
+      this.status.failed.push('map');
+    }
+  }
+
+  async loadAnimations() {
+    try {
+      let glb;
+      try {
+        glb = await this.glbLoader.loadAsync(ASSET_PATHS.animations);
+      } catch {
+        glb = await this.glbLoader.loadAsync('/assets/animations/Animation_5.glb');
+      }
+      this.assets.animations = glb;
+      this.extractAnimations(glb);
+      this.status.loaded.push('animations');
+      console.log('[AssetManager] Animations loaded successfully');
+    } catch (error) {
+      console.error('[AssetManager] Failed to load animations:', error);
+      this.assets.animations = null;
+      this.status.failed.push('animations');
+    }
+  }
+
+  extractAnimations(glb) {
+    if (!glb.animations || !glb.animations.length) {
+      return;
+    }
+
+    this.animationMixer = new THREE.AnimationMixer(glb.scene);
+
+    glb.animations.forEach((clip) => {
+      const lowerName = clip.name.toLowerCase();
+      for (const [state, trackName] of Object.entries(ANIMATION_MAP)) {
+        if (lowerName.includes(trackName.toLowerCase())) {
+          this.animations[state] = clip;
+          break;
+        }
+      }
+      this.animations[clip.name] = clip;
+    });
+  }
+
+  setupMapMaterials(scene) {
     scene.traverse((child) => {
-      if (!child.isMesh) return;
-      child.castShadow = true;
-      child.receiveShadow = true;
-      if (!child.material) return;
-      const materials = Array.isArray(child.material) ? child.material : [child.material];
-      for (const material of materials) {
-        if (!material?.emissive) continue;
-        material.emissive.setHex(0x00f0ff);
-        material.emissiveIntensity = 0.08;
+      if (child.isMesh) {
+        child.receiveShadow = true;
+        child.castShadow = false;
+        if (child.material) {
+          const mats = Array.isArray(child.material) ? child.material : [child.material];
+          mats.forEach((mat) => {
+            if (mat && mat.emissive) {
+              mat.emissive.setHex(0x00f0ff);
+              mat.emissiveIntensity = 0.1;
+            }
+          });
+        }
       }
     });
+  }
+
+  setupCharacterMaterials(scene) {
+    scene.traverse((child) => {
+      if (child.isMesh) {
+        child.castShadow = true;
+        child.receiveShadow = true;
+        if (child.material) {
+          const mats = Array.isArray(child.material) ? child.material : [child.material];
+          mats.forEach((mat) => {
+            if (mat && mat.emissive) {
+              mat.emissive.setHex(0x00f0ff);
+              mat.emissiveIntensity = 0.08;
+            }
+          });
+        }
+      }
+    });
+  }
+
+  getMap() {
+    return this.assets.map;
   }
 
   getCharacter() {
     return this.assets.character;
   }
 
-  /**
-   * Always null until an animation source exists (see the class comment).
-   * Callers already treat a missing clip as "skip this action", so the lobby
-   * renders the character unanimated instead of erroring.
-   */
   getAnimation(state) {
-    if (!this.warnedAboutAnimations && state) {
-      this.warnedAboutAnimations = true;
-      console.info('[AssetManager] No animation clips are available for this rig; the lobby character renders in its bind pose. See AssetManager.js for the asset-pipeline fix.');
+    if (this.animations[state]) {
+      return this.animations[state];
     }
-    return this.animations[state] ?? null;
+    const lowerState = String(state).toLowerCase();
+    for (const [key, clip] of Object.entries(this.animations)) {
+      if (key.toLowerCase() === lowerState) {
+        return clip;
+      }
+    }
+    return this.animations['idle'] || this.animations['Idle'] || Object.values(this.animations)[0] || null;
   }
 
   playAnimation(state, mesh) {
@@ -139,14 +203,15 @@ export class AssetManager {
   }
 
   update(delta) {
-    this.animationMixer?.update(delta);
+    if (this.animationMixer) {
+      this.animationMixer.update(delta);
+    }
   }
 
   getAnimationMixer() {
     return this.animationMixer;
   }
 
-  /** True when every requested asset resolved, for callers that gate on it. */
   get ready() {
     return this.loaded;
   }

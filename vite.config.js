@@ -15,6 +15,7 @@ export default defineConfig(({ mode }) => {
 
   return {
     root: resolve(projectRoot, 'client'),
+    publicDir: resolve(projectRoot, 'public'),
     envDir: projectRoot,
     server: {
       host: '0.0.0.0',
