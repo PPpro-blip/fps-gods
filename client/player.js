@@ -1,19 +1,17 @@
 import * as THREE from 'three';
 import { PLAYER } from '../shared/gameConfig.js';
-import { assetManager } from './AssetManager.js';
+import { createOperator } from './operator.js';
 
 const INTERPOLATION_DELAY_MS = 90;
 const MAX_EXTRAPOLATION_MS = 130;
-const SKIN_TONES = ['#d6a17e', '#b98462', '#e2b18c', '#8b5d47', '#c68b6d'];
-const EYE_COLORS = ['#39c7dc', '#72a9ff', '#67d99c', '#c18aff'];
-const WEAPON_SWITCH_MS = 220;
-const REMOTE_MODEL_SCALE = 0.82;
+const WEAPON_SWITCH_MS = 160;
 const FLASH_COLORS = Object.freeze({
   RUSHER: '#59d8ff',
   GHOST: '#c18aff',
   HEAVY: '#ff8b3d',
   GODS_TIER: '#ffd45e',
 });
+const HITSCAN_FLASH = new Set(['SMG', 'SHOTGUN', 'PISTOL', 'SNIPER', 'LMG', 'ROCKET', 'RAILGUN', 'MINIGUN']);
 
 function angleDelta(from, to) {
   return ((to - from + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI;
@@ -30,8 +28,8 @@ function numericHash(value) {
 }
 
 // Buffers the 20 Hz authoritative snapshots and interpolates them between
-// render frames. It is presentation smoothing only; the client never simulates
-// or predicts player movement.
+// render frames. Presentation smoothing only: the client never simulates or
+// predicts player positions, it just draws the server's history smoothly.
 export class StateInterpolator {
   constructor() {
     this.states = new Map();
@@ -92,8 +90,8 @@ export class StateInterpolator {
   }
 }
 
-// Mouse look and keyboard sampling only. Position is always taken from the
-// server snapshots in main.js; this controller intentionally has no movement.
+// Mouse look and keyboard sampling only. Position is always taken from server
+// snapshots in main.js, so this controller deliberately has no movement code.
 export class PlayerController {
   constructor(camera, canvas) {
     this.camera = camera;
@@ -103,33 +101,39 @@ export class PlayerController {
     this.yaw = 0;
     this.pitch = 0;
     this.sensitivity = 0.0022;
+    this.invertY = false;
     this.wheelDelta = 0;
 
     this.handleMouseMove = this.handleMouseMove.bind(this);
     this.handleKeyDown = this.handleKeyDown.bind(this);
     this.handleKeyUp = this.handleKeyUp.bind(this);
     this.handleWheel = this.handleWheel.bind(this);
-    this.clearKeys = this.clearKeys.bind(this);
+    this.handleBlur = this.handleBlur.bind(this);
+
     document.addEventListener('mousemove', this.handleMouseMove);
     document.addEventListener('keydown', this.handleKeyDown);
     document.addEventListener('keyup', this.handleKeyUp);
     document.addEventListener('wheel', this.handleWheel, { passive: false });
-    window.addEventListener('blur', this.clearKeys);
+    window.addEventListener('blur', this.handleBlur);
+    // A backgrounded tab never delivers keyup, which used to leave the player
+    // walking forever after an alt-tab.
+    document.addEventListener('visibilitychange', this.handleBlur);
   }
 
   handleMouseMove(event) {
     if (!this.enabled || document.pointerLockElement !== this.canvas) return;
-    this.yaw -= event.movementX * this.sensitivity;
-    this.pitch = Math.max(-1.45, Math.min(1.45, this.pitch - event.movementY * this.sensitivity));
+    const movementX = Number(event.movementX) || 0;
+    const movementY = Number(event.movementY) || 0;
+    this.yaw -= movementX * this.sensitivity;
+    const pitchDelta = movementY * this.sensitivity * (this.invertY ? -1 : 1);
+    this.pitch = Math.max(-1.45, Math.min(1.45, this.pitch - pitchDelta));
     this.yaw = ((this.yaw + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI;
   }
 
   handleWheel(event) {
     if (!this.enabled || document.pointerLockElement !== this.canvas) return;
-    // Prevent page scroll while in pointer lock
     event.preventDefault();
-    // Store deltaY for external handler
-    this.wheelDelta = event.deltaY;
+    this.wheelDelta += event.deltaY;
   }
 
   handleKeyDown(event) {
@@ -142,6 +146,10 @@ export class PlayerController {
     this.keys.delete(event.code);
   }
 
+  handleBlur() {
+    this.clearKeys();
+  }
+
   isTyping(element) {
     return element instanceof HTMLElement && (
       element.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(element.tagName)
@@ -149,8 +157,19 @@ export class PlayerController {
   }
 
   setEnabled(enabled) {
-    this.enabled = Boolean(enabled);
-    if (!this.enabled) this.keys.clear();
+    const next = Boolean(enabled);
+    if (this.enabled && !next) this.clearKeys();
+    this.enabled = next;
+  }
+
+  setSensitivity(radiansPerPixel) {
+    const numeric = Number(radiansPerPixel);
+    if (!Number.isFinite(numeric) || numeric <= 0) return;
+    this.sensitivity = Math.min(0.02, Math.max(0.0002, numeric));
+  }
+
+  setInvertY(invertY) {
+    this.invertY = invertY === true;
   }
 
   getInput(sequence) {
@@ -168,7 +187,6 @@ export class PlayerController {
   }
 
   getWheelDelta() {
-    // This will be set by the wheel handler
     const delta = this.wheelDelta;
     this.wheelDelta = 0;
     return delta;
@@ -176,162 +194,106 @@ export class PlayerController {
 
   clearKeys() {
     this.keys.clear();
+    this.wheelDelta = 0;
+  }
+
+  /** Full input reset for death, respawn, disconnect, and scene changes. */
+  reset() {
+    this.clearKeys();
   }
 
   dispose() {
     document.removeEventListener('mousemove', this.handleMouseMove);
     document.removeEventListener('keydown', this.handleKeyDown);
     document.removeEventListener('keyup', this.handleKeyUp);
-    window.removeEventListener('blur', this.clearKeys);
+    document.removeEventListener('wheel', this.handleWheel);
+    document.removeEventListener('visibilitychange', this.handleBlur);
+    window.removeEventListener('blur', this.handleBlur);
   }
 }
 
-// Rigged character GLBs with fallback to procedural low-poly operators.
+const fallbackGeometry = new THREE.CapsuleGeometry(0.34, 0.9, 4, 10);
+const fallbackHeadGeometry = new THREE.SphereGeometry(0.17, 12, 10);
+const fallbackVisorGeometry = new THREE.BoxGeometry(0.22, 0.05, 0.06);
+
+function createFallbackOperator(color) {
+  const group = new THREE.Group();
+  const accent = new THREE.Color(color || '#57d6ff');
+  const suitMaterial = new THREE.MeshStandardMaterial({ color: '#1a2430', roughness: 0.7, metalness: 0.25 });
+  const visorMaterial = new THREE.MeshStandardMaterial({
+    color: accent, emissive: accent, emissiveIntensity: 0.7, roughness: 0.3,
+  });
+  const body = new THREE.Mesh(fallbackGeometry, suitMaterial);
+  body.position.y = 1.0;
+  const head = new THREE.Mesh(fallbackHeadGeometry, suitMaterial);
+  head.position.y = 1.66;
+  const visor = new THREE.Mesh(fallbackVisorGeometry, visorMaterial);
+  visor.position.set(0, 1.66, 0.15);
+  const socket = new THREE.Group();
+  socket.position.set(0.24, 1.34, 0.24);
+  group.add(body, head, visor, socket);
+  return {
+    group,
+    socket,
+    rig: null,
+    materials: [suitMaterial, visorMaterial],
+    geometries: [fallbackGeometry, fallbackHeadGeometry, fallbackVisorGeometry],
+  };
+}
+
+// Remote operators: the real rigged character when the asset is available, with
+// a compact procedural stand-in when it is not. Every instance owns its mixer
+// and materials and is disposed when the player leaves.
 export class RemotePlayers {
-  constructor(scene, nameTagRoot, weaponModels) {
+  constructor(scene, nameTagRoot, weaponModels, assetManager) {
     this.scene = scene;
     this.nameTagRoot = nameTagRoot;
     this.weaponModels = weaponModels;
+    this.assetManager = assetManager;
     this.players = new Map();
     this.projected = new THREE.Vector3();
     this.lastFrameTime = performance.now();
-    this.weaponModels?.onReady(() => {
-      for (const record of this.players.values()) this.equipWeapon(record, record.pendingWeaponId);
+    this.weaponModels?.onReady?.(() => {
+      for (const record of this.players.values()) this.equipWeapon(record, record.pendingWeaponId, true);
     });
   }
 
-  addPart(record, parent, geometry, material, position, scale = [1, 1, 1], rotation = [0, 0, 0]) {
-    const mesh = new THREE.Mesh(geometry, material);
-    mesh.position.set(...position);
-    mesh.scale.set(...scale);
-    mesh.rotation.set(...rotation);
-    mesh.castShadow = false;
-    mesh.receiveShadow = false;
-    mesh.frustumCulled = false;
-    parent.add(mesh);
-    record.geometries.push(geometry);
-    return mesh;
-  }
+  createRecord(data) {
+    const fallback = this.assetManager?.createCharacterRig?.();
+    let operator;
+    let group;
+    let socket;
+    let rig = null;
 
-  createOperator(data) {
-    const idHash = numericHash(data.id);
-    const suitColor = new THREE.Color(data.color || '#57d6ff');
-    const skinColor = SKIN_TONES[idHash % SKIN_TONES.length];
-    const eyeColor = EYE_COLORS[Math.floor(idHash / 5) % EYE_COLORS.length];
-    const mesh = new THREE.Group();
-    mesh.userData.playerId = data.id;
-
-    let characterInstance = null;
-    let gunSocket = null;
-    let muzzleFlash = null;
-    const geometries = [];
-    const materials = [];
-
-    // Attempt to create a rigged character instance if GLB assets are loaded
-    if (assetManager.ready && assetManager.hasCharacter()) {
-      characterInstance = assetManager.createCharacterInstance();
-    }
-
-    if (characterInstance) {
-      mesh.add(characterInstance.mesh);
-      characterInstance.mesh.position.set(0, -PLAYER.height / 2, 0);
-      characterInstance.mesh.scale.set(1, 1, 1);
-
-      const rightHand = characterInstance.mesh.getObjectByName('mixamorigRightHand');
-      gunSocket = new THREE.Group();
-      if (rightHand) {
-        gunSocket.position.set(0, 0.05, 0);
-        gunSocket.rotation.set(-Math.PI / 2, 0, -Math.PI / 2);
-        rightHand.add(gunSocket);
-      } else {
-        gunSocket.position.set(0.33, -0.015, -0.22);
-        mesh.add(gunSocket);
-      }
-
-      const idleClip = assetManager.getAnimation('idle') || assetManager.getAnimation('pose');
-      if (idleClip && characterInstance.mixer) {
-        const idleAction = characterInstance.mixer.clipAction(idleClip);
-        idleAction.loop = THREE.LoopRepeat;
-        idleAction.play();
-        characterInstance.currentAction = idleAction;
-        characterInstance.currentActionName = 'idle';
-      }
+    if (fallback) {
+      rig = fallback;
+      operator = createOperator(rig, { tint: data.color });
+      group = operator.group;
+      socket = operator.socket;
     } else {
-      const mats = {
-        armor: new THREE.MeshStandardMaterial({ color: suitColor, roughness: 0.53, metalness: 0.24, emissive: suitColor, emissiveIntensity: 0.08 }),
-        armorDark: new THREE.MeshStandardMaterial({ color: '#202d3b', roughness: 0.7, metalness: 0.23 }),
-        armorLight: new THREE.MeshStandardMaterial({ color: '#657c8d', roughness: 0.48, metalness: 0.48 }),
-        skin: new THREE.MeshStandardMaterial({ color: skinColor, roughness: 0.82, metalness: 0.02 }),
-        hair: new THREE.MeshStandardMaterial({ color: '#151b24', roughness: 0.94, metalness: 0.02 }),
-        eyeWhite: new THREE.MeshStandardMaterial({ color: '#e7edf0', roughness: 0.32, metalness: 0.02 }),
-        iris: new THREE.MeshStandardMaterial({ color: eyeColor, roughness: 0.35, metalness: 0.06, emissive: eyeColor, emissiveIntensity: 0.14 }),
-        pupil: new THREE.MeshBasicMaterial({ color: '#10151c' }),
-        mouth: new THREE.MeshStandardMaterial({ color: '#57392f', roughness: 0.9 }),
-        glove: new THREE.MeshStandardMaterial({ color: '#101821', roughness: 0.76, metalness: 0.2 }),
-        visor: new THREE.MeshStandardMaterial({ color: '#173b4a', roughness: 0.2, metalness: 0.58, emissive: '#16718a', emissiveIntensity: 0.22 }),
-        sole: new THREE.MeshStandardMaterial({ color: '#0d141c', roughness: 0.9, metalness: 0.08 }),
-      };
-      materials.push(...Object.values(mats));
-
-      const torso = new THREE.CapsuleGeometry(0.235, 0.45, 4, 9);
-      this.addPart({ geometries }, mesh, torso, mats.armorDark, [0, -0.05, 0]);
-      this.addPart({ geometries }, mesh, new THREE.BoxGeometry(0.36, 0.34, 0.12), mats.armor, [0, 0.08, -0.176]);
-      this.addPart({ geometries }, mesh, new THREE.BoxGeometry(0.24, 0.055, 0.035), mats.armorLight, [0, 0.23, -0.246]);
-      this.addPart({ geometries }, mesh, new THREE.BoxGeometry(0.12, 0.08, 0.032), mats.visor, [0, -0.03, -0.25]);
-      this.addPart({ geometries }, mesh, new THREE.CylinderGeometry(0.19, 0.2, 0.075, 8), mats.armorLight, [0, -0.335, 0]);
-      this.addPart({ geometries }, mesh, new THREE.BoxGeometry(0.16, 0.12, 0.08), mats.armorDark, [0, -0.38, 0.17]);
-
-      const neck = new THREE.CylinderGeometry(0.075, 0.09, 0.16, 8);
-      this.addPart({ geometries }, mesh, neck, mats.skin, [0, 0.39, 0]);
-      const head = new THREE.SphereGeometry(0.19, 16, 12);
-      this.addPart({ geometries }, mesh, head, mats.skin, [0, 0.62, -0.005], [0.9, 1.08, 0.9]);
-      const hair = new THREE.SphereGeometry(0.195, 14, 8, 0, Math.PI * 2, 0, Math.PI * 0.56);
-      this.addPart({ geometries }, mesh, hair, mats.hair, [0, 0.72, 0.008], [0.98, 0.64, 0.98]);
-
-      for (const side of [-1, 1]) {
-        const eyeX = side * 0.064;
-        this.addPart({ geometries }, mesh, new THREE.SphereGeometry(0.034, 10, 8), mats.eyeWhite, [eyeX, 0.643, -0.163], [1.05, 0.72, 0.62]);
-        this.addPart({ geometries }, mesh, new THREE.SphereGeometry(0.018, 8, 6), mats.iris, [eyeX, 0.642, -0.185]);
-        this.addPart({ geometries }, mesh, new THREE.SphereGeometry(0.009, 7, 5), mats.pupil, [eyeX, 0.642, -0.198]);
-        this.addPart({ geometries }, mesh, new THREE.BoxGeometry(0.076, 0.018, 0.018), mats.hair, [eyeX, 0.694, -0.16], [1, 1, 1], [0, 0, side * -0.08]);
-        this.addPart({ geometries }, mesh, new THREE.SphereGeometry(0.061, 8, 7), mats.skin, [side * 0.168, 0.62, -0.005], [0.58, 0.86, 0.55]);
-        this.addPart({ geometries }, mesh, new THREE.BoxGeometry(0.045, 0.12, 0.06), mats.armorDark, [side * 0.198, 0.64, -0.006]);
-        this.addPart({ geometries }, mesh, new THREE.SphereGeometry(0.115, 10, 8), mats.armor, [side * 0.31, 0.18, 0], [1, 0.72, 1.03]);
-        this.addPart({ geometries }, mesh, new THREE.CapsuleGeometry(0.07, 0.31, 3, 7), mats.armorDark, [side * 0.37, -0.06, -0.025], [1, 1, 1], [0.08, 0, side * -0.18]);
-        this.addPart({ geometries }, mesh, new THREE.CapsuleGeometry(0.052, 0.23, 3, 7), mats.armorLight, [side * 0.4, -0.24, -0.07], [1, 1, 1], [0.14, 0, side * -0.12]);
-        this.addPart({ geometries }, mesh, new THREE.SphereGeometry(0.066, 8, 7), mats.glove, [side * 0.41, -0.4, -0.12], [1, 0.82, 1.1]);
-        this.addPart({ geometries }, mesh, new THREE.CapsuleGeometry(0.09, 0.31, 3, 7), mats.armorDark, [side * 0.12, -0.6, 0.012]);
-        this.addPart({ geometries }, mesh, new THREE.BoxGeometry(0.14, 0.11, 0.18), mats.armor, [side * 0.12, -0.78, -0.015]);
-        this.addPart({ geometries }, mesh, new THREE.BoxGeometry(0.145, 0.06, 0.2), mats.sole, [side * 0.12, -0.86, -0.018]);
-        this.addPart({ geometries }, mesh, new THREE.BoxGeometry(0.19, 0.11, 0.055), mats.armorLight, [side * 0.12, -0.59, -0.105]);
-      }
-
-      const nose = new THREE.ConeGeometry(0.031, 0.09, 6);
-      this.addPart({ geometries }, mesh, nose, mats.skin, [0, 0.61, -0.194], [1, 1, 1], [-Math.PI / 2, 0, 0]);
-      this.addPart({ geometries }, mesh, new THREE.BoxGeometry(0.086, 0.015, 0.013), mats.mouth, [0, 0.535, -0.174]);
-      this.addPart({ geometries }, mesh, new THREE.BoxGeometry(0.12, 0.025, 0.015), mats.hair, [0, 0.49, -0.164]);
-      this.addPart({ geometries }, mesh, new THREE.BoxGeometry(0.13, 0.06, 0.07), mats.armorDark, [0, -0.47, -0.025]);
-
-      gunSocket = new THREE.Group();
-      gunSocket.position.set(0.33, -0.015, -0.22);
-      mesh.add(gunSocket);
+      const procedural = createFallbackOperator(data.color);
+      operator = null;
+      group = procedural.group;
+      socket = procedural.socket;
+      group.userData.fallback = procedural;
     }
 
-    muzzleFlash = new THREE.Mesh(
-      new THREE.SphereGeometry(0.048, 8, 6),
+    const muzzleFlash = new THREE.Mesh(
+      new THREE.SphereGeometry(0.05, 8, 6),
       new THREE.MeshBasicMaterial({ color: '#ffe3a0', transparent: true, opacity: 0.95 }),
     );
     muzzleFlash.visible = false;
-    gunSocket.add(muzzleFlash);
+    socket.add(muzzleFlash);
 
-    const shieldGeometry = new THREE.SphereGeometry(0.49, 12, 8);
-    const shieldMaterial = new THREE.MeshBasicMaterial({ color: '#59d8ff', wireframe: true, transparent: true, opacity: 0.36, depthWrite: false });
+    const shieldGeometry = new THREE.SphereGeometry(0.52, 14, 10);
+    const shieldMaterial = new THREE.MeshBasicMaterial({
+      color: '#59d8ff', wireframe: true, transparent: true, opacity: 0.32, depthWrite: false,
+    });
     const shield = new THREE.Mesh(shieldGeometry, shieldMaterial);
-    geometries.push(shieldGeometry);
-    materials.push(shieldMaterial);
-    shield.scale.y = 1.8;
-    mesh.add(shield);
+    shield.scale.y = 1.7;
+    shield.position.y = 0.95;
     shield.visible = false;
+    group.add(shield);
 
     const label = document.createElement('div');
     label.className = 'name-tag';
@@ -342,143 +304,93 @@ export class RemotePlayers {
     const weaponLabel = document.createElement('span');
     weaponLabel.className = 'name-tag-weapon';
     label.append(nameLabel, weaponLabel);
+    this.nameTagRoot.append(label);
 
+    this.scene.add(group);
     const record = {
-      mesh,
-      characterInstance,
-      materials,
-      geometries,
-      name: data.name,
-      color: data.color,
-      weaponId: null,
-      pendingWeaponId: data.currentWeaponId,
-      weaponModel: null,
-      weaponTransition: null,
-      gunSocket,
+      id: data.id,
+      group,
+      operator,
+      rig,
+      socket,
       muzzleFlash,
       muzzleFlashUntil: 0,
       shield,
       label,
       nameLabel,
       weaponLabel,
-      currentAnim: 'idle',
-      lastAnimUpdate: performance.now(),
+      weaponId: null,
+      pendingWeaponId: data.currentWeaponId,
+      weaponModel: null,
+      weaponTransition: null,
+      dead: false,
+      lastPoseAlive: true,
     };
-
-    this.nameTagRoot.append(label);
-    this.scene.add(mesh);
     this.players.set(data.id, record);
-    this.equipWeapon(record, data.currentWeaponId);
+    this.equipWeapon(record, data.currentWeaponId, true);
     return record;
   }
 
   ensurePlayer(data) {
-    return this.players.get(data.id) ?? this.createOperator(data);
+    return this.players.get(data.id) ?? this.createRecord(data);
   }
 
-  equipWeapon(record, weaponId) {
+  equipWeapon(record, weaponId, immediate = false) {
     if (!weaponId) return;
     record.pendingWeaponId = weaponId;
-    if (record.weaponModel?.userData.weaponId === weaponId) return;
-    const next = this.weaponModels?.createModel(weaponId);
+    if (record.weaponId === weaponId && record.weaponModel) return;
+    const next = this.weaponModels?.createModel?.(weaponId);
     if (!next) return;
 
     const previous = record.weaponModel;
-    if (record.weaponTransition) {
-      const { from, to } = record.weaponTransition;
-      if (from && from !== previous) record.gunSocket.remove(from);
-      if (to && to !== previous) record.gunSocket.remove(to);
-      record.weaponTransition = null;
+    if (previous) previous.removeFromParent();
+    if (record.operator) {
+      record.operator.setWeapon(next);
+    } else {
+      record.socket.add(next);
     }
-    if (previous) {
-      previous.scale.copy(previous.userData.baseScale);
-      previous.position.set(0, 0, 0);
-      previous.rotation.set(0, 0, 0);
-    }
-    next.scale.multiplyScalar(REMOTE_MODEL_SCALE);
-    next.userData.baseScale = next.scale.clone();
-    record.gunSocket.add(next);
     record.weaponModel = next;
     record.weaponId = weaponId;
-    if (previous) {
-      record.weaponTransition = { from: previous, to: next, startedAt: performance.now() };
-    } else {
-      next.scale.multiplyScalar(0.88);
-      next.position.y = 0.08;
-      record.weaponTransition = { from: null, to: next, startedAt: performance.now() };
+
+    // Muzzle flash rides at the weapon's own tip, in the socket's local space.
+    const muzzleOffset = (this.weaponModels?.getLength?.(weaponId) ?? 0.5) / 2;
+    // The socket is yawed 180°, so the muzzle end is at local +Z.
+    record.muzzleFlash.position.set(0, 0.02, muzzleOffset);
+
+    if (!immediate) {
+      const now = performance.now();
+      record.weaponTransition = { startedAt: now, from: previous ?? null };
     }
   }
 
-  updateWeapon(record, now) {
-    if (record.pendingWeaponId && record.weaponModel?.userData.weaponId !== record.pendingWeaponId) {
-      this.equipWeapon(record, record.pendingWeaponId);
+  updateWeaponTransition(record, now) {
+    if (!record.weaponTransition) return;
+    const { startedAt, from } = record.weaponTransition;
+    const progress = Math.max(0, Math.min(1, (now - startedAt) / WEAPON_SWITCH_MS));
+    if (from) {
+      from.position.y = -progress * 0.18;
+      from.scale.setScalar(1 - progress * 0.2);
     }
-    if (record.weaponTransition) {
-      const { from, to, startedAt } = record.weaponTransition;
-      const progress = Math.max(0, Math.min(1, (now - startedAt) / WEAPON_SWITCH_MS));
-      if (from) {
-        from.position.y = -progress * 0.12;
-        from.rotation.x = -progress * 0.12;
-        from.scale.copy(from.userData.baseScale).multiplyScalar(1 - progress * 0.12);
-      }
-      to.position.y = (1 - progress) * 0.08;
-      to.rotation.x = (1 - progress) * 0.08;
-      to.scale.copy(to.userData.baseScale).multiplyScalar(0.88 + progress * 0.12);
-      if (progress >= 1) {
-        if (from) record.gunSocket.remove(from);
-        to.position.set(0, 0, 0);
-        to.rotation.set(0, 0, 0);
-        to.scale.copy(to.userData.baseScale);
-        record.weaponTransition = null;
-      }
+    if (record.weaponModel) {
+      record.weaponModel.position.y = (1 - progress) * 0.18;
+      record.weaponModel.scale.setScalar(0.8 + progress * 0.2);
     }
-    record.muzzleFlash.visible = now < record.muzzleFlashUntil;
-  }
-
-  updatePlayerAnimation(record, pose, delta) {
-    if (!record.characterInstance?.mixer) return;
-    record.characterInstance.mixer.update(delta);
-
-    const speed = Math.hypot(pose.vx ?? 0, pose.vz ?? 0);
-    let targetAnim = 'idle';
-    if (!pose.alive) {
-      targetAnim = 'death';
-    } else if (speed > 4.5) {
-      targetAnim = 'run';
-    } else if (speed > 0.3) {
-      targetAnim = 'walk';
-    }
-
-    if (record.currentAnim !== targetAnim) {
-      const targetClip = assetManager.getAnimation(targetAnim)
-        || (targetAnim === 'run' ? assetManager.getAnimation('walk') : null)
-        || assetManager.getAnimation('idle')
-        || assetManager.getAnimation('pose');
-      if (targetClip) {
-        const nextAction = record.characterInstance.mixer.clipAction(targetClip);
-        if (targetAnim === 'death') {
-          nextAction.setLoop(THREE.LoopOnce, 1);
-          nextAction.clampWhenFinished = true;
-        } else {
-          nextAction.setLoop(THREE.LoopRepeat);
-        }
-        if (record.characterInstance.currentAction) {
-          record.characterInstance.currentAction.crossFadeTo(nextAction, 0.2, true);
-        }
-        nextAction.play();
-        record.characterInstance.currentAction = nextAction;
-        record.currentAnim = targetAnim;
+    if (progress >= 1) {
+      if (from) from.removeFromParent();
+      if (record.weaponModel) {
+        record.weaponModel.position.set(0, 0, 0);
+        record.weaponModel.scale.setScalar(1);
       }
+      record.weaponTransition = null;
     }
   }
 
   flashWeapon(playerId, weaponId, bundleId, now = performance.now()) {
     const record = this.players.get(playerId);
-    if (!record || !weaponId || ['KNIFE', 'GOD_FIST', 'SMOKE_GRENADE', 'COMBAT_SHIELD'].includes(weaponId)) return;
-    this.equipWeapon(record, weaponId);
+    if (!record || !HITSCAN_FLASH.has(weaponId)) return;
+    this.equipWeapon(record, weaponId, true);
     record.muzzleFlash.material.color.set(FLASH_COLORS[bundleId] ?? FLASH_COLORS.RUSHER);
-    record.muzzleFlashUntil = now + 65;
-    record.muzzleFlash.position.set(0, 0.015, -((this.weaponModels?.getLength(weaponId) ?? 0.36) * REMOTE_MODEL_SCALE) / 2);
+    record.muzzleFlashUntil = now + 60;
   }
 
   update(players, interpolator, camera, renderAt, localPlayerId) {
@@ -497,38 +409,61 @@ export class RemotePlayers {
       if (data.id === localPlayerId) continue;
       const record = this.ensurePlayer(data);
       const pose = interpolator.sample(data.id, renderAt) ?? data;
-      record.name = data.name;
-      record.nameLabel.textContent = data.name;
-      const weaponName = data.currentWeaponName ?? data.currentWeaponId ?? '';
-      const weaponIcon = data.currentWeaponIcon ?? '';
-      record.weaponLabel.textContent = pose.connected === false
-        ? 'OFFLINE · RECONNECTING'
-        : weaponName ? `${weaponIcon} ${weaponName}` : '';
-      record.label.classList.toggle('is-offline', pose.connected === false);
-      record.color = data.color;
-      record.label.style.setProperty('--player-color', data.color || '#57d8ff');
-      this.equipWeapon(record, data.currentWeaponId);
-      this.updateWeapon(record, now);
-      this.updatePlayerAnimation(record, pose, delta);
-      record.gunSocket.rotation.x = Number(pose.pitch) || 0;
-
-      const showingKnockback = !pose.alive && Math.hypot(pose.vx ?? 0, pose.vz ?? 0) > 1.5;
       const connected = pose.connected !== false;
-      record.mesh.visible = Boolean(connected && (pose.alive || showingKnockback));
-      record.label.hidden = !pose.alive;
-      if (!pose.alive && !showingKnockback) continue;
+      const alive = pose.alive !== false;
 
-      record.mesh.position.set(pose.x, pose.y + PLAYER.height / 2, pose.z);
-      record.mesh.rotation.y = pose.yaw;
-      record.mesh.rotation.z = showingKnockback ? Math.sign(pose.vx || pose.vz) * 0.5 : 0;
-      record.shield.visible = Boolean(connected && pose.alive && pose.spawnProtected);
+      record.nameLabel.textContent = data.name;
+      record.label.style.setProperty('--player-color', data.color || '#57d8ff');
+      const weaponName = data.currentWeaponName ?? data.currentWeaponId ?? '';
+      record.weaponLabel.textContent = !connected
+        ? 'OFFLINE · RECONNECTING'
+        : pose.spawnProtected
+          ? 'PROTECTED'
+          : weaponName;
+      record.label.classList.toggle('is-offline', !connected);
       record.label.classList.toggle('is-protected', Boolean(pose.spawnProtected));
 
-      if (!pose.alive) continue;
-      this.projected.set(pose.x, pose.y + PLAYER.height + 0.36, pose.z).project(camera);
+      this.equipWeapon(record, data.currentWeaponId);
+      this.updateWeaponTransition(record, now);
+      record.muzzleFlash.visible = now < record.muzzleFlashUntil;
+
+      const speed = Math.hypot(pose.vx ?? 0, pose.vz ?? 0);
+      if (record.rig) {
+        if (alive) {
+          if (record.dead) {
+            record.rig.revive();
+            record.dead = false;
+          }
+          record.rig.setLocomotion(connected ? speed : 0);
+        } else if (!record.dead) {
+          record.rig.setDead();
+          record.dead = true;
+        }
+        record.rig.update(delta);
+      }
+      record.lastPoseAlive = alive;
+
+      record.group.position.set(pose.x, pose.y, pose.z);
+      record.group.rotation.y = Number(pose.yaw) || 0;
+      record.group.visible = connected;
+      record.shield.visible = Boolean(connected && alive && pose.spawnProtected);
+
+      if (!connected) {
+        record.label.style.display = 'none';
+        continue;
+      }
+
+      if (!alive) {
+        // The body stays on the floor while the respawn timer runs; the tag is
+        // hidden so the arena does not fill with dead labels.
+        record.label.style.display = 'none';
+        continue;
+      }
+
+      this.projected.set(pose.x, pose.y + PLAYER.height + 0.34, pose.z).project(camera);
       const onScreen = this.projected.z > -1 && this.projected.z < 1
         && this.projected.x > -1.2 && this.projected.x < 1.2
-        && this.projected.y > -1.15 && this.projected.y < 1.2;
+        && this.projected.y > -1.15 && this.projected.y < 1.25;
       record.label.style.display = onScreen ? 'block' : 'none';
       if (onScreen) {
         record.label.style.left = `${(this.projected.x * 0.5 + 0.5) * width}px`;
@@ -539,19 +474,23 @@ export class RemotePlayers {
 
   removePlayer(id, record = this.players.get(id)) {
     if (!record) return;
-    this.scene.remove(record.mesh);
-    if (record.characterInstance) {
-      record.characterInstance.dispose();
+    this.scene.remove(record.group);
+    if (record.operator) {
+      record.operator.dispose();
+    } else {
+      const fallback = record.group.userData.fallback;
+      for (const geometry of fallback?.geometries ?? []) geometry.dispose();
+      for (const material of fallback?.materials ?? []) material.dispose();
     }
-    record.geometries.forEach((geometry) => geometry.dispose());
-    record.materials.forEach((material) => material.dispose());
     record.muzzleFlash.geometry.dispose();
     record.muzzleFlash.material.dispose();
-    this.nameTagRoot.removeChild(record.label);
+    record.shield.geometry.dispose();
+    record.shield.material.dispose();
+    record.label.remove();
     this.players.delete(id);
   }
 
   clear() {
-    for (const [id, record] of this.players) this.removePlayer(id, record);
+    for (const [id, record] of [...this.players]) this.removePlayer(id, record);
   }
 }

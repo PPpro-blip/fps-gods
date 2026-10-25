@@ -1,3 +1,72 @@
+# FPS GODS — Phase 1 "Operation: Reforge" status
+
+> This section supersedes the older sprint notes below wherever they disagree.
+> The sprint notes are kept as history.
+
+## What changed in Phase 1
+
+**Front end (visual + interaction)**
+- `client/index.html` and `client/style.css` were rebuilt as a full menu shell: a
+  vertical nav rail, six screens (PLAY, ROOMS, INVENTORY, STORE, PROFILE,
+  SETTINGS), first-run onboarding, a lobby view, a match HUD, and overlays for
+  pause, redeploy, scoreboard and match end.
+- Every screen is wired to real data. The room browser is fed by a new
+  `LIST_ROOMS` / `ROOM_LIST` event pair and a `RoomManager.listRooms()` query, so
+  lobbies are listed from the server, never invented. The store screen shows
+  server-verified GODS TIER progress and states plainly that purchases do not
+  exist yet.
+- `client/ui.js` is a single presentation controller with a `setHandlers()` API,
+  a room-list poller, kill-feed timers, action timeouts, a scoreboard that only
+  re-renders when the data actually changed, and a `dispose()` that stops the
+  room poller and clears every pending timer. It also reports any element id it
+  could not find, so a renamed id in the markup fails loudly instead of quietly
+  doing nothing.
+
+**3D / gameplay presentation**
+- `client/animation.js` measures each of the twelve shipped clips (ground speed,
+  vertical travel, collapse depth/timing) and assigns idle / walk / run / jump /
+  death from those measurements, then strips horizontal root motion. This is
+  what stops the operators from T-posing or sliding out of their capsules.
+- `client/operator.js` dresses the bare Mixamo rig in procedural armour attached
+  to real bones (helmet, visor, chest plate, pack, canisters, belt, pouches,
+  shoulder pads, knee pads, boots) and gives it a right-hand weapon socket. The
+  bone-space maths accounts for the armature's 0.01 scale and for the model's +Z
+  facing, both of which previously put gear and weapons in the wrong place.
+- `client/MenuStage.js` replaces `LobbyScene.js` (deleted): a menu-only Three.js
+  scene assembled from the real environment kit — 28 floor tiles, four back-wall
+  modules, eight side-wall modules, four columns, a ceiling run and ten props —
+  lit for the operator, with the bundle's three weapons on rotating plinths.
+  Measured kit dimensions are used, and the camera is computed rather than
+  hard-coded so the operator is framed on any aspect ratio.
+- `client/AssetManager.js` loads each GLB exactly once, reports progress, hands
+  out cheap clones, and disposes what it owns. `client/settings.js` and
+  `client/audio.js` are new: local preferences with clamping, and synthesised
+  weapon/UI audio (the repo ships no audio files, so none are faked).
+- `client/main.js` was reorganised around a single `syncInputState()` gate for
+  pointer lock, death, respawn, pointer-lock loss, disconnect and the weapon
+  wheel — the old duplicate/independent listeners are gone — plus `Tab`
+  scoreboard, `Q` weapon wheel, `R` reload, real settings application and a
+  teardown path.
+
+**Server**
+- `LIST_ROOMS` handler with a throttle, `RoomManager.listRooms()` (joinable and
+  in-progress rooms, host names, occupancy, age), and shared event constants.
+  Nothing about authority changed: damage, hits, ammo, reloads and unlocks are
+  still resolved on the server.
+
+## Still outstanding (Phase 1 does not pretend otherwise)
+
+- Rendering and pointer-lock behaviour have not been verified in a real browser
+  from this environment; the client boots headlessly, and the UI, 3D modules and
+  live match state are covered by tests, but the visual result needs a manual
+  pass.
+- The STORE has no currency, inventory ownership or transactions (by design for
+  this phase), and the PROFILE has no match history because none is persisted.
+- Bot and player characters share one rig; there is no per-bundle armour
+  silhouette yet.
+- `arena_map.glb` is a modular kit, not a finished arena, so the arena itself is
+  still built procedurally from `shared/gameConfig.js` geometry.
+
 # FPS GODS - Sprint Implementation Summary
 
 ## Overview

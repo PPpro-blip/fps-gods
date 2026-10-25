@@ -7,8 +7,12 @@ import { World } from './world.js';
 import { WeaponEffects, WeaponModelLibrary } from './weapons.js';
 import { GameUI } from './ui.js';
 import { WeaponTrigger } from './trigger.js';
-import { LobbyScene } from './LobbyScene.js';
+import { MenuStage } from './MenuStage.js';
 import { assetManager } from './AssetManager.js';
+import { QUALITY_PRESETS, SettingsStore, sensitivityToRadiansPerPixel } from './settings.js';
+import { AudioEngine } from './audio.js';
+
+/* ────────────────────────────── local identity ───────────────────────────── */
 
 function getOrCreateProfileId() {
   const stored = localStorage.getItem('fps-gods-profile-id');
@@ -23,7 +27,9 @@ function readRoomSession() {
   try {
     const session = JSON.parse(localStorage.getItem('fps-gods-room-session') ?? 'null');
     if (session && /^[A-Z2-9]{6}$/.test(session.roomCode)
-      && typeof session.resumeToken === 'string' && /^[A-Za-z0-9_-]{40,48}$/.test(session.resumeToken)) return session;
+      && typeof session.resumeToken === 'string' && /^[A-Za-z0-9_-]{40,48}$/.test(session.resumeToken)) {
+      return session;
+    }
   } catch {
     localStorage.removeItem('fps-gods-room-session');
   }
@@ -34,21 +40,23 @@ function clearRoomSession() {
   localStorage.removeItem('fps-gods-room-session');
 }
 
-const canvas = document.querySelector('#game-canvas');
+/* ───────────────────────────────── ui + audio ────────────────────────────── */
+
 const profileId = getOrCreateProfileId();
 const urlParams = new URLSearchParams(window.location.search);
 const roomCodeFromUrl = urlParams.get('room');
-const ui = new GameUI({ profileId });
 
-// Initialize asset manager and lobby scene
-let lobbyScene = null;
-let assetsLoaded = false;
-
-// Kick the assets off immediately so they download while the renderer and
-// world are constructed; the lobby itself waits on this promise below.
-const assetBoot = assetManager.init().catch((error) => {
-  console.error('[FPS GODS] Failed to load assets:', error);
+const audio = new AudioEngine();
+const settings = new SettingsStore({ onChange: (next) => applySettings(next) });
+const ui = new GameUI({
+  profileId,
+  settings: settings.snapshot,
+  onChange: (patch) => settings.update(patch),
 });
+
+/* ───────────────────────────────── scene setup ───────────────────────────── */
+
+const canvas = document.querySelector('#game-canvas');
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(77, window.innerWidth / window.innerHeight, 0.05, 125);
 camera.rotation.order = 'YXZ';
@@ -56,45 +64,62 @@ scene.add(camera);
 
 let renderer = null;
 try {
-  renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false, powerPreference: 'high-performance' });
+  renderer = new THREE.WebGLRenderer({
+    canvas, antialias: true, alpha: false, powerPreference: 'high-performance', stencil: false,
+  });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
   renderer.setSize(window.innerWidth, window.innerHeight, false);
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.12;
 } catch (error) {
-  console.warn('WebGL renderer could not be initialized:', error);
+  console.warn('[FPS GODS] WebGL renderer could not be initialised:', error);
   ui.showWebGLWarning();
 }
 
 const world = new World(scene);
 const controller = new PlayerController(camera, canvas);
 const nameTagRoot = document.querySelector('#name-tags');
-
 const weaponModels = new WeaponModelLibrary();
-const remotePlayers = new RemotePlayers(scene, nameTagRoot, weaponModels);
 const interpolator = new StateInterpolator();
 const weaponEffects = new WeaponEffects(scene, camera, weaponModels);
-weaponModels.ready.then((loaded) => {
-  if (!loaded) ui.showToast('One or more weapon models could not be loaded. Check the game asset files.');
+const remotePlayers = new RemotePlayers(scene, nameTagRoot, weaponModels, assetManager);
+const trigger = new WeaponTrigger();
+
+let menuStage = null;
+const assetBoot = assetManager.init().catch((error) => {
+  console.error('[FPS GODS] Asset boot failed:', error);
+  return false;
+});
+assetManager.onProgress((progress) => ui.setLoadingProgress(progress));
+
+// The menu stage needs the operator rig and the environment kit; the weapon
+// library is awaited as well so the stands are populated on the first frame.
+Promise.allSettled([assetBoot, weaponModels.ready]).then(() => {
+  menuStage = new MenuStage(assetManager, { weaponModels });
+  const built = menuStage.build();
+  menuStage.resize(window.innerWidth / Math.max(1, window.innerHeight));
+  menuStage.show();
+  if (menuStage) menuStage.setBundle(ui.selectedBundleId);
+  if (!built) console.warn('[FPS GODS] Menu stage running without the operator asset.');
+  if (!assetManager.ready) ui.showToast('Operator model unavailable — using fallback operators.');
+  if (!weaponModels.settled) ui.showToast('Weapon models are still loading…');
+  ui.finishLoading();
 });
 
-// The lobby needs the character GLB and the weapon library, so it boots when
-// both settle. allSettled also builds the lobby when an asset fails, because
-// LobbyScene degrades gracefully rather than throwing.
-Promise.allSettled([assetBoot, weaponModels.ready]).then(() => {
-  assetsLoaded = assetManager.ready;
-  lobbyScene = new LobbyScene(scene, camera, { weaponModels });
-  const initialBundle = BUNDLE_BY_ID[ui.selectedBundleId];
-  if (initialBundle?.weapons?.[0]?.id) {
-    lobbyScene.loadLobbyWeapon(initialBundle.weapons[0].id);
-  }
-  console.log(`[FPS GODS] Lobby booted; assets ${assetsLoaded ? 'loaded' : 'partially unavailable'}`);
-});
+function describeTarget(target) {
+  if (!target) return 'resolving…';
+  const source = target.source === 'same-origin'
+    ? 'same origin'
+    : target.source === 'invalid-override' ? 'invalid VITE_SOCKET_URL' : 'VITE_SOCKET_URL';
+  return `${target.url} (${source})`;
+}
+
+/* ───────────────────────────── match / input state ───────────────────────── */
+
 let currentRoom = null;
 let matchActive = false;
 let matchEnded = false;
-const trigger = new WeaponTrigger();
 let weaponWheelOpen = false;
 let wheelPointer = { x: 0, y: 0 };
 let nextClientShotAt = 0;
@@ -108,16 +133,20 @@ function canPlay() {
   return matchActive && !matchEnded && currentRoom?.state === 'PLAYING';
 }
 
-function closeWeaponWheel(equip = true) {
-  if (!weaponWheelOpen) return;
-  const selectedWeaponId = ui.closeWeaponWheel();
-  weaponWheelOpen = false;
-  wheelPointer = { x: 0, y: 0 };
-  controller.setEnabled(document.pointerLockElement === canvas && canPlay());
-  if (equip && selectedWeaponId && latestLocalPlayer
-    && selectedWeaponId !== latestLocalPlayer.currentWeaponId && network.connected) {
-    network.switchWeapon(selectedWeaponId);
-  }
+/**
+ * The single place that decides whether the mouse/keyboard are captured.
+ *
+ * Called on every transition that can change the answer — pointer lock,
+ * death, respawn, disconnect, room state, weapon wheel, tab focus — so a
+ * respawned operator never ends up with a camera that ignores the mouse, and a
+ * dead one never keeps a held key that walks them around.
+ */
+function syncInputState() {
+  const locked = document.pointerLockElement === canvas;
+  const playable = canPlay() && !weaponWheelOpen && latestPlayerAlive;
+  controller.setEnabled(locked && playable);
+  if (!locked || !playable) trigger.release();
+  if (canPlay()) ui.setPaused(!locked && latestPlayerAlive && !matchEnded);
 }
 
 function clearMatchPresentation() {
@@ -134,17 +163,22 @@ function clearMatchPresentation() {
   remotePlayers.clear();
   weaponEffects.updateSmokeClouds([]);
   world.resetCover();
+  controller.reset();
   controller.setEnabled(false);
   if (document.pointerLockElement === canvas) document.exitPointerLock();
   ui.setScoreboard(false);
+  ui.setMatchVisible(false);
+  ui.setPaused(false);
+  if (menuStage) menuStage.show();
 }
 
 function enterMatch(room = currentRoom) {
   if (!room) return;
   currentRoom = room;
-  if (!matchActive || matchEnded) {
-    matchActive = true;
-    matchEnded = false;
+  const wasActive = matchActive && !matchEnded;
+  matchActive = true;
+  matchEnded = false;
+  if (!wasActive) {
     latestPlayers = [];
     latestLocalPlayer = null;
     latestPlayerAlive = false;
@@ -154,64 +188,113 @@ function enterMatch(room = currentRoom) {
     world.resetCover();
     nextClientShotAt = 0;
   }
+  if (menuStage) menuStage.hide();
   ui.showMatch(room);
-  controller.setEnabled(document.pointerLockElement === canvas);
-  ui.setPaused(document.pointerLockElement !== canvas);
+  ui.setLobbyVisible(false);
+  syncInputState();
 }
+
+function closeWeaponWheel(equip = true) {
+  if (!weaponWheelOpen) return;
+  const selectedWeaponId = ui.closeWeaponWheel();
+  weaponWheelOpen = false;
+  wheelPointer = { x: 0, y: 0 };
+  syncInputState();
+  if (equip && selectedWeaponId && latestLocalPlayer
+    && selectedWeaponId !== latestLocalPlayer.currentWeaponId && network.connected) {
+    network.switchWeapon(selectedWeaponId);
+    trigger.release();
+  }
+}
+
+/* ──────────────────────────────── settings ───────────────────────────────── */
+
+function applySettings(next) {
+  controller.setSensitivity(sensitivityToRadiansPerPixel(next.sensitivity));
+  controller.setInvertY(next.invertY);
+  camera.fov = next.fov;
+  camera.updateProjectionMatrix();
+  audio.setVolume(next.volume);
+  const preset = QUALITY_PRESETS[next.quality] ?? QUALITY_PRESETS.high;
+  if (renderer) {
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, preset.pixelRatio));
+    renderer.setSize(window.innerWidth, window.innerHeight, false);
+  }
+  if (scene.fog) scene.fog.density = preset.fog;
+  if (menuStage?.scene?.fog) menuStage.scene.fog.density = preset.fog * 3.4;
+  ui.applySettings(next);
+}
+applySettings(settings.snapshot);
+
+// Audio may only start inside a user gesture; arm it once and forget.
+function unlockAudio() {
+  if (audio.unlock()) return;
+}
+for (const eventName of ['pointerdown', 'keydown']) {
+  window.addEventListener(eventName, unlockAudio, { once: true, passive: true });
+}
+
+/* ───────────────────────────────── network ───────────────────────────────── */
 
 let autoJoinAttempted = false;
 
 const network = new GameNetwork({
   onConnect: (_socketId, recovered) => {
     ui.setConnectionState('connected');
+    ui.setServerTarget(describeTarget(network.connectionTarget));
     network.requestProfile(profileId, ui.playerName);
     if (!recovered) network.resumeRoom(readRoomSession());
-    // Auto-join from URL parameter if present
-    if (roomCodeFromUrl && ui.playerName && !autoJoinAttempted) {
+    if (roomCodeFromUrl && !autoJoinAttempted) {
       autoJoinAttempted = true;
-      setTimeout(() => {
-        network.joinRoom(roomCodeFromUrl, ui.playerName, ui.bundleId, profileId);
-      }, 500);
+      ui.showToast(`Joining room ${roomCodeFromUrl.toUpperCase()}…`);
+      window.setTimeout(() => {
+        network.joinRoom(roomCodeFromUrl, ui.playerName, ui.bundleId, ui.profileId);
+      }, 400);
     }
   },
   onDisconnect: (reason) => {
-    // Routed through setConnectionState so this respects the same toast cooldown
-    // as the probe verdict that replaces it a moment later.
     if (reason === 'io client disconnect') ui.setConnectionState('offline');
-    else ui.setConnectionState('offline', 'Connection interrupted. Trying to reconnect…');
+    else ui.setConnectionState('offline', 'Connection interrupted. Reconnecting…');
+    controller.reset();
     controller.setEnabled(false);
     trigger.release();
     closeWeaponWheel(false);
+    if (matchActive) {
+      latestPlayerAlive = false;
+      ui.setPaused(true);
+    }
   },
-  // The adapter has already decided whether the arena host is down or this build
-  // is aimed at the wrong address, so the badge states that instead of a shrug.
   onConnectionError: (detail = {}) => ui.setConnectionState(detail.badge ?? 'offline', detail.message),
-  onProfileUpdate: (profile) => ui.setProfile(profile),
+  onProfileUpdate: (profile) => {
+    ui.setProfile(profile);
+    if (menuStage) menuStage.setBundle(ui.selectedBundleId);
+  },
   onRoomSession: (session) => localStorage.setItem('fps-gods-room-session', JSON.stringify(session)),
   onRoomResumeFailed: (error) => {
     clearRoomSession();
     currentRoom = null;
     if (matchActive) clearMatchPresentation();
-    ui.setRoom(null, network.id);
-    ui.showHome();
+    ui.showScreen('play');
     ui.showToast(error?.message ?? 'The previous room session has expired.');
   },
   onRoomLeft: () => {
     clearRoomSession();
     currentRoom = null;
     clearMatchPresentation();
-    ui.setRoom(null, network.id);
-    ui.showHome();
+    ui.showScreen('play');
   },
+  onRoomList: (payload) => ui.setRoomList(payload),
   onRoomState: (room) => {
     const previousState = currentRoom?.state;
     currentRoom = room;
-    ui.setRoom(room, network.id);
+    ui.room = room;
+    ui.selfId = network.id;
 
     if (room.state === 'PLAYING') {
       enterMatch(room);
     } else if (room.state === 'LOBBY') {
       if (previousState === 'PLAYING' || previousState === 'ENDED' || matchActive) clearMatchPresentation();
+      if (menuStage) menuStage.show();
       currentRoom = room;
       ui.showLobby(room, network.id);
     } else if (room.state === 'ENDED') {
@@ -231,14 +314,27 @@ const network = new GameNetwork({
     interpolator.push(latestPlayers, receivedAt);
     serverClockOffset = (state.serverTime ?? Date.now()) - Date.now();
     latestLocalPlayer = latestPlayers.find((player) => player.id === network.id) ?? null;
-    latestPlayerAlive = Boolean(latestLocalPlayer?.alive);
+    const aliveNow = Boolean(latestLocalPlayer?.alive);
+    if (aliveNow !== latestPlayerAlive) {
+      latestPlayerAlive = aliveNow;
+      if (!aliveNow) {
+        controller.reset();
+        trigger.release();
+        closeWeaponWheel(false);
+      }
+      syncInputState();
+    }
     trigger.sync(latestLocalPlayer?.currentWeaponId, latestLocalPlayer?.auto);
     world.updateCover(state.cover);
     weaponEffects.updateSmokeClouds(state.smokeClouds ?? []);
     if (latestLocalPlayer) {
       weaponEffects.setWeapon(latestLocalPlayer.currentWeaponId, latestLocalPlayer.bundleId);
       weaponEffects.setMovementSpeed(Math.hypot(latestLocalPlayer.vx ?? 0, latestLocalPlayer.vz ?? 0));
-      ui.updateHud(latestLocalPlayer, Date.now() + serverClockOffset, latestPlayers.filter((player) => player.alive && player.connected !== false).length);
+      ui.updateHud(
+        latestLocalPlayer,
+        Date.now() + serverClockOffset,
+        latestPlayers.filter((player) => player.alive && player.connected !== false).length,
+      );
     }
     ui.updateScoreboard(latestPlayers, network.id);
   },
@@ -246,31 +342,50 @@ const network = new GameNetwork({
     matchEnded = true;
     trigger.release();
     closeWeaponWheel(false);
+    controller.reset();
     controller.setEnabled(false);
     if (document.pointerLockElement === canvas) document.exitPointerLock();
     ui.showGameEnd(result, network.id);
   },
   onReturnToLobby: () => {
     clearMatchPresentation();
+    if (menuStage) menuStage.show();
     if (currentRoom) ui.showLobby(currentRoom, network.id);
   },
   onPlayerDied: (data) => {
-    if (data.victimId === network.id && latestLocalPlayer) {
+    if (data.victimId !== network.id) return;
+    latestPlayerAlive = false;
+    if (latestLocalPlayer) {
       latestLocalPlayer.alive = false;
       latestLocalPlayer.health = 0;
       latestLocalPlayer.respawnAt = data.respawnAt;
-      latestPlayerAlive = false;
-      trigger.release();
-      closeWeaponWheel(false);
-      ui.updateHud(latestLocalPlayer, Date.now() + serverClockOffset, latestPlayers.filter((player) => player.alive && player.connected !== false).length);
+      ui.updateHud(
+        latestLocalPlayer,
+        Date.now() + serverClockOffset,
+        latestPlayers.filter((player) => player.alive && player.connected !== false).length,
+      );
     }
+    controller.reset();
+    trigger.release();
+    closeWeaponWheel(false);
+    syncInputState();
   },
   onPlayerRespawned: (data) => {
-    if (data.id === network.id) ui.showToast('Re-deployed. Two seconds of spawn protection.');
+    if (data.id !== network.id) return;
+    latestPlayerAlive = true;
+    controller.reset();
+    // Rebind input immediately: the pointer is still locked, so the operator
+    // should be able to aim and move on the first frame after redeploying.
+    syncInputState();
+    audio.play('spawn');
+    ui.showToast('Redeployed. Two seconds of spawn protection.');
   },
   onKillFeed: (entry) => ui.addKillFeed(entry, network.id),
   onScoreUpdate: (data) => ui.updateScoreboard(data?.players, network.id),
-  onHitConfirmed: (hit) => ui.showHitMarker(hit),
+  onHitConfirmed: (hit) => {
+    ui.showHitMarker(hit);
+    if (hit?.hit) audio.play(hit.killed ? 'kill' : 'hit');
+  },
   onAmmoUpdate: (data) => {
     if (!latestLocalPlayer) return;
     Object.assign(latestLocalPlayer, data);
@@ -278,8 +393,13 @@ const network = new GameNetwork({
     weaponEffects.setWeapon(latestLocalPlayer.currentWeaponId, latestLocalPlayer.bundleId);
     if (data.reloading) {
       weaponEffects.startReload((data.reloadCompletesAt ?? Date.now() + 900) - (Date.now() + serverClockOffset));
+      audio.play('reload');
     }
-    ui.updateHud(latestLocalPlayer, Date.now() + serverClockOffset, latestPlayers.filter((player) => player.alive && player.connected !== false).length);
+    ui.updateHud(
+      latestLocalPlayer,
+      Date.now() + serverClockOffset,
+      latestPlayers.filter((player) => player.alive && player.connected !== false).length,
+    );
   },
   onWeaponUpdate: (data) => {
     const player = latestPlayers.find((candidate) => candidate.id === data.playerId);
@@ -299,7 +419,11 @@ const network = new GameNetwork({
       });
       trigger.sync(data.weaponId, data.auto);
       weaponEffects.setWeapon(data.weaponId, data.bundleId);
-      ui.updateHud(latestLocalPlayer, Date.now() + serverClockOffset, latestPlayers.filter((candidate) => candidate.alive && candidate.connected !== false).length);
+      ui.updateHud(
+        latestLocalPlayer,
+        Date.now() + serverClockOffset,
+        latestPlayers.filter((candidate) => candidate.alive && candidate.connected !== false).length,
+      );
     }
   },
   onWeaponOverheated: (data) => {
@@ -308,6 +432,7 @@ const network = new GameNetwork({
   onWeaponFired: (data) => {
     if (data.playerId === network.id) {
       weaponEffects.fire(performance.now(), data.weaponId, data.bundleId, data);
+      audio.play('shot', { weaponClass: weaponEffects.weaponClass });
       return;
     }
     remotePlayers.flashWeapon(data.playerId, data.weaponId, data.bundleId);
@@ -317,46 +442,84 @@ const network = new GameNetwork({
   onCoverDestroyed: (data) => world.destroyCover(data.blockId),
   onHealthUpdate: (data) => {
     if (!latestLocalPlayer) return;
+    const previous = latestLocalPlayer.health;
     latestLocalPlayer.health = data.health;
-    ui.updateHud(latestLocalPlayer, Date.now() + serverClockOffset, latestPlayers.filter((player) => player.alive && player.connected !== false).length);
+    if (typeof previous === 'number' && data.health < previous) audio.play('damage');
+    ui.updateHud(
+      latestLocalPlayer,
+      Date.now() + serverClockOffset,
+      latestPlayers.filter((player) => player.alive && player.connected !== false).length,
+    );
   },
 });
 
+// The deployment badge is filled in as soon as the socket target is known; it
+// must not wait for (or be coupled to) the asset promises above.
+ui.setServerTarget(describeTarget(network.connectionTarget));
+
+/* ───────────────────────────────── ui wiring ─────────────────────────────── */
+
 ui.setHandlers({
+  onUiSound: () => audio.play('ui'),
   onCallsignContinue: (name, id) => {
     if (network.connected) network.requestProfile(id, name);
   },
+  onProfileCallsign: (name) => {
+    localStorage.setItem('fps-gods-callsign', name);
+    if (network.connected) network.requestProfile(ui.profileId, name);
+  },
+  onBundleSelected: (bundleId) => {
+    if (menuStage) menuStage.setBundle(bundleId);
+  },
+  onBundleChange: (bundleId) => {
+    if (menuStage) menuStage.setBundle(bundleId);
+    ui.setServerTarget(describeTarget(network.connectionTarget));
+  },
   onPlayNow: (name, bundleId, id) => {
-    if (!network.connected) return ui.showError('Still connecting to the game server. Try again in a moment.');
+    if (!network.connected) {
+      ui.clearAction();
+      ui.showError('Still connecting to the game server. Try again in a moment.');
+      return;
+    }
+    unlockAudio();
     network.playNow(name, bundleId, id);
   },
   onCreate: (name, bundleId, id) => {
-    if (!network.connected) return ui.showError('Still connecting to the game server. Try again in a moment.');
+    if (!network.connected) {
+      ui.clearAction();
+      ui.showError('Still connecting to the game server. Try again in a moment.');
+      return;
+    }
     network.createRoom(name, bundleId, id);
   },
   onJoin: (name, code, bundleId, id) => {
-    if (!network.connected) return ui.showError('Still connecting to the game server. Try again in a moment.');
+    if (!network.connected) {
+      ui.clearAction();
+      ui.showError('Still connecting to the game server. Try again in a moment.');
+      return;
+    }
     network.joinRoom(code, name, bundleId, id);
   },
-  onJoinFromUrl: (name, code, bundleId, id) => {
-    if (!network.connected) return;
-    network.joinRoom(code, name, bundleId, id);
+  onListRooms: () => {
+    if (!network.connected) {
+      ui.setRoomListError('Not connected to the game server yet.');
+      return;
+    }
+    network.listRooms();
   },
   onLeaveRoom: () => network.leaveRoom(),
   onReady: (ready) => network.setReady(ready),
   onStart: () => network.startGame(),
   onReturnToLobby: () => network.returnToLobby(),
   onPlayAgain: () => {
-    if (!network.connected) return ui.showError('Still reconnecting to the game server. Try again in a moment.');
+    if (!network.connected) {
+      ui.showError('Still reconnecting to the game server. Try again in a moment.');
+      return;
+    }
     network.playAgain();
   },
-  onBundleChange: (bundleId) => {
-    const bundle = BUNDLE_BY_ID[bundleId];
-    if (bundle && bundle.weapons?.[0]?.id && lobbyScene) {
-      lobbyScene.loadLobbyWeapon(bundle.weapons[0].id);
-    }
-  },
   onResume: () => {
+    unlockAudio();
     if (canPlay() && document.pointerLockElement !== canvas) {
       const request = canvas.requestPointerLock?.();
       request?.catch?.(() => ui.showToast('Click the arena again to enable pointer lock.'));
@@ -364,20 +527,32 @@ ui.setHandlers({
   },
 });
 
-// The player can only look/fire while pointer-locked. Movement packets are
-// still sent every rendered frame, but become neutral when the game is paused.
+/* ───────────────────────────────── input ─────────────────────────────────── */
+
 canvas.addEventListener('click', () => {
+  unlockAudio();
   if (canPlay() && document.pointerLockElement !== canvas) canvas.requestPointerLock?.();
 });
 
 document.addEventListener('pointerlockchange', () => {
-  const locked = document.pointerLockElement === canvas;
-  controller.setEnabled(locked && canPlay() && !weaponWheelOpen);
-  if (!locked) {
+  if (document.pointerLockElement !== canvas) {
     trigger.release();
     closeWeaponWheel(false);
   }
-  if (canPlay()) ui.setPaused(!locked);
+  syncInputState();
+});
+
+document.addEventListener('pointerlockerror', () => {
+  ui.showToast('Pointer lock was refused. Click the arena to try again.');
+  syncInputState();
+});
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    trigger.release();
+    closeWeaponWheel(false);
+    controller.reset();
+  }
 });
 
 document.addEventListener('mousemove', (event) => {
@@ -398,17 +573,22 @@ document.addEventListener('mousedown', (event) => {
   trigger.press();
   fireOnce(performance.now());
 });
+
 document.addEventListener('mouseup', (event) => {
   if (event.button === 0) trigger.release();
 });
+
 window.addEventListener('blur', () => {
   trigger.release();
   closeWeaponWheel(false);
+  controller.reset();
 });
+
 window.addEventListener('contextmenu', (event) => event.preventDefault());
 
 document.addEventListener('keydown', (event) => {
   if (event.target instanceof HTMLElement && ['INPUT', 'TEXTAREA', 'SELECT'].includes(event.target.tagName)) return;
+
   if (event.code === 'KeyQ' && !event.repeat && canPlay() && latestPlayerAlive
     && document.pointerLockElement === canvas) {
     event.preventDefault();
@@ -416,59 +596,41 @@ document.addEventListener('keydown', (event) => {
     wheelPointer = { x: 0, y: 0 };
     trigger.release();
     ui.openWeaponWheel(latestLocalPlayer?.bundleId, latestLocalPlayer?.currentWeaponId);
-    controller.setEnabled(false);
+    syncInputState();
     return;
   }
+
   if (event.code !== 'KeyR' || event.repeat || !canPlay()
     || document.pointerLockElement !== canvas || weaponWheelOpen) return;
   event.preventDefault();
+  if (!latestLocalPlayer || latestLocalPlayer.reloading || latestLocalPlayer.overheated) return;
   weaponEffects.startReload();
+  audio.play('reload');
   network.reload();
-});
-
-// Mouse scroll weapon cycling
-document.addEventListener('wheel', (event) => {
-  if (!canPlay() || weaponWheelOpen || !latestPlayerAlive
-    || document.pointerLockElement !== canvas) return;
-  
-  const deltaY = controller.getWheelDelta();
-  if (deltaY === 0) return;
-  
-  event.preventDefault();
-  
-  // Get current bundle weapons
-  const bundleId = latestLocalPlayer?.bundleId;
-  if (!bundleId) return;
-  
-  const bundle = BUNDLE_BY_ID[bundleId];
-  if (!bundle) return;
-  
-  const weapons = bundle.weapons;
-  const currentIndex = weapons.findIndex(w => w.id === latestLocalPlayer?.currentWeaponId);
-  
-  if (currentIndex === -1) return;
-  
-  // Scroll down (deltaY > 0) cycles forward
-  // Scroll up (deltaY < 0) cycles backward
-  let nextIndex;
-  if (deltaY > 0) {
-    nextIndex = (currentIndex + 1) % weapons.length;
-  } else {
-    nextIndex = (currentIndex - 1 + weapons.length) % weapons.length;
-  }
-  
-  const nextWeaponId = weapons[nextIndex].id;
-  if (nextWeaponId && nextWeaponId !== latestLocalPlayer?.currentWeaponId && network.connected) {
-    network.switchWeapon(nextWeaponId);
-    // Require fresh click to fire after weapon swap
-    trigger.release();
-    trigger.sync(nextWeaponId, false);
-  }
 });
 
 document.addEventListener('keyup', (event) => {
   if (event.code === 'KeyQ') closeWeaponWheel(true);
 });
+
+document.addEventListener('wheel', (event) => {
+  if (!canPlay() || weaponWheelOpen || !latestPlayerAlive
+    || document.pointerLockElement !== canvas) return;
+  const deltaY = controller.getWheelDelta();
+  if (deltaY === 0) return;
+  event.preventDefault();
+  const bundle = BUNDLE_BY_ID[latestLocalPlayer?.bundleId];
+  if (!bundle) return;
+  const weapons = bundle.weapons;
+  const currentIndex = weapons.findIndex((weapon) => weapon.id === latestLocalPlayer?.currentWeaponId);
+  if (currentIndex === -1) return;
+  const nextIndex = (currentIndex + (deltaY > 0 ? 1 : -1) + weapons.length) % weapons.length;
+  const nextWeaponId = weapons[nextIndex]?.id;
+  if (!nextWeaponId || nextWeaponId === latestLocalPlayer?.currentWeaponId || !network.connected) return;
+  network.switchWeapon(nextWeaponId);
+  trigger.release();
+  trigger.sync(nextWeaponId, false);
+}, { passive: false });
 
 function fireOnce(now) {
   if (!canPlay() || weaponWheelOpen || !latestPlayerAlive || !latestLocalPlayer
@@ -477,39 +639,38 @@ function fireOnce(now) {
     || latestLocalPlayer.currentWeaponId === 'COMBAT_SHIELD'
     || document.pointerLockElement !== canvas || now < nextClientShotAt) return;
   nextClientShotAt = now + 50;
+  if (!latestLocalPlayer.unlimitedAmmo && latestLocalPlayer.maxAmmo > 0 && latestLocalPlayer.ammo <= 0) {
+    audio.play('empty');
+    return;
+  }
   network.shoot();
 }
 
+/* ────────────────────────────────── loop ─────────────────────────────────── */
+
 function resize() {
-  camera.aspect = window.innerWidth / Math.max(1, window.innerHeight);
+  const aspect = window.innerWidth / Math.max(1, window.innerHeight);
+  camera.aspect = aspect;
   camera.updateProjectionMatrix();
   if (renderer) {
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.setSize(window.innerWidth, window.innerHeight, false);
   }
+  menuStage?.resize(aspect);
 }
 window.addEventListener('resize', resize);
 
-// Render the arena as a slow orbit while players are in menus. During matches,
-// the local camera position is interpolated from authoritative server snapshots.
+let frameCount = 0;
+let fpsWindowStart = performance.now();
+let lastFrameTime = performance.now();
+
 function animate(now = performance.now()) {
   requestAnimationFrame(animate);
+  const delta = Math.min((now - lastFrameTime) / 1000, 0.1);
+  lastFrameTime = now;
 
-  const delta = Math.min((now - (window.lastFrameTime || now)) / 1000, 0.1);
-  window.lastFrameTime = now;
-
-  // Update asset manager animations
-  if (assetsLoaded) {
-    assetManager.update(delta);
-  }
-
-  // Update lobby scene if active
-  if (lobbyScene && !matchActive) {
-    lobbyScene.update(delta);
-  }
+  if (!matchActive && menuStage?.built && !menuStage.visible) menuStage.show();
 
   if (matchActive) {
-    if (lobbyScene) lobbyScene.hide();
     if (canPlay() && network.connected) {
       const input = controller.getInput(inputSequence++);
       if (!latestPlayerAlive) {
@@ -530,20 +691,43 @@ function animate(now = performance.now()) {
     if (localPose) camera.position.set(localPose.x, localPose.y + PLAYER.eyeHeight, localPose.z);
     camera.updateMatrixWorld(true);
     remotePlayers.update(latestPlayers, interpolator, camera, renderAt, network.id);
-  } else {
-    if (lobbyScene) {
-      lobbyScene.show();
-      camera.position.set(0, 1.25, 3.2);
-      camera.lookAt(0, 0.85, 0);
-    } else {
-      const orbit = now * 0.000035;
-      camera.position.set(Math.sin(orbit) * 31, 22 + Math.sin(orbit * 0.7) * 1.3, Math.cos(orbit) * 31);
-      camera.lookAt(0, 0.65, 0);
-    }
   }
 
   weaponEffects.gun.visible = matchActive && !matchEnded;
-  if (renderer) renderer.render(scene, camera);
-  weaponEffects.update(now);
+  if (menuStage?.built) {
+    if (matchActive) menuStage.hide();
+    menuStage.update(delta);
+  }
+  weaponEffects.update(now, delta);
+
+  if (renderer) {
+    if (matchActive) renderer.render(scene, camera);
+    else if (menuStage?.built) renderer.render(menuStage.scene, menuStage.camera);
+  }
+
+  frameCount += 1;
+  if (now - fpsWindowStart >= 500) {
+    ui.setFps((frameCount * 1000) / (now - fpsWindowStart));
+    frameCount = 0;
+    fpsWindowStart = now;
+  }
 }
 requestAnimationFrame(animate);
+
+// Console breadcrumb for the deployment badge; matches the README's guidance.
+console.info(`[FPS GODS] Socket.IO target: ${network.connectionTarget.url} (source: ${network.connectionTarget.source})`);
+
+window.addEventListener('beforeunload', () => {
+  // Release GPU resources, sockets and timers on a full page teardown.
+  trigger.release();
+  controller.dispose();
+  weaponEffects.dispose();
+  remotePlayers.clear();
+  menuStage?.dispose();
+  weaponModels.dispose();
+  world.dispose();
+  assetManager.dispose();
+  audio.dispose();
+  ui.dispose();
+  network.disconnect?.();
+});

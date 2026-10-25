@@ -148,6 +148,15 @@ export function createGameServer(options = {}) {
       if (room) launchRoom(room);
     });
 
+    socket.on(EVENTS.LIST_ROOMS, () => {
+      // Cheap request, but it is still client-driven: throttle so a scripted
+      // client cannot turn the lobby browser into a busy loop.
+      const now = Date.now();
+      if (now - (socket.data.lastRoomListAt ?? 0) < 500) return;
+      socket.data.lastRoomListAt = now;
+      socket.emit(EVENTS.ROOM_LIST, { rooms: roomManager.listRooms(now), now });
+    });
+
     socket.on(EVENTS.PLAYER_INPUT, (payload) => {
       const room = roomManager.getRoomForSocket(socket);
       if (room?.state === ROOM_STATES.PLAYING) room.game?.setInput(socket.id, payload, Date.now());

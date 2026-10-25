@@ -85,21 +85,26 @@ test('every weapon model referenced by weapons.js exists', () => {
   }
 });
 
-test('every weapon the code can attach to the lobby exists as a GLB', () => {
-  const weaponsJs = readFileSync(resolve(clientDir, 'weapons.js'), 'utf8');
-  const lobbySource = readFileSync(resolve(clientDir, 'LobbyScene.js'), 'utf8');
-  const lobbyDefault = lobbySource
-    .match(/loadLobbyWeapon\(weaponId\s*=\s*'([A-Z_]+)'\)/)?.[1];
-  assert.ok(lobbyDefault, 'LobbyScene must declare an explicit default lobby weapon id');
-
+test('every bundle weapon resolves to a GLB that ships with the client', () => {
+  // The lobby stage was replaced by MenuStage, which also uses this table, so the
+  // table itself is now the single thing worth pinning.
+  const modelSource = readFileSync(resolve(repoRoot, 'shared', 'weaponModels.js'), 'utf8');
   const realWeaponIds = new Set(
     Object.values(BUNDLE_INFO).flatMap((bundle) => bundle.weapons.map((weapon) => weapon.id)),
   );
-  assert.ok(realWeaponIds.has(lobbyDefault), `'${lobbyDefault}' is not a weapon id the server knows`);
 
-  const modelFile = weaponsJs.match(new RegExp(`${lobbyDefault}:\\s*'([^']+\\.glb)'`))?.[1];
-  assert.ok(modelFile, `weapons.js has no model mapping for ${lobbyDefault}`);
-  assert.ok(existsSync(resolve(clientDir, 'assets/weapons', modelFile)), `assets/weapons/${modelFile} is missing`);
+  for (const weaponId of realWeaponIds) {
+    const modelFile = modelSource.match(new RegExp(`${weaponId}:\\s*'([^']+\\.glb)'`))?.[1];
+    assert.ok(modelFile, `shared/weaponModels.js has no model mapping for ${weaponId}`);
+    assert.ok(
+      existsSync(resolve(clientDir, 'assets/weapons', modelFile)),
+      `client/assets/weapons/${modelFile} is missing for ${weaponId}`,
+    );
+    assert.ok(
+      modelSource.includes(`'${modelFile}':`),
+      `${modelFile} has no measured length in shared/weaponModels.js`,
+    );
+  }
 });
 
 test('main.js gates the lobby on the asset API that actually exists', () => {
