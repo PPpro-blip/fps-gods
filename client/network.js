@@ -101,7 +101,10 @@ export class GameNetwork {
     this.graceElapsed = false;
     this.graceTimer = null;
     this.issue = null;
-    const target = resolveSocketTarget(import.meta.env.VITE_SOCKET_URL, window.location.origin);
+    // `import.meta.env` only exists under Vite; the optional chain keeps the
+    // module importable by the Node test suite and by any non-bundled consumer.
+    const configuredUrl = import.meta.env?.VITE_SOCKET_URL;
+    const target = resolveSocketTarget(configuredUrl, window.location.origin);
     this.target = target;
     const socketUrl = target.url;
 
@@ -141,6 +144,7 @@ export class GameNetwork {
     });
 
     this.socket.on(EVENTS.ROOM_STATE, (state) => this.handlers.onRoomState?.(state));
+    this.socket.on(EVENTS.ROOM_LIST, (payload) => this.handlers.onRoomList?.(payload));
     this.socket.on(EVENTS.ROOM_ERROR, (error) => this.handlers.onRoomError?.(error));
     this.socket.on(EVENTS.ROOM_SESSION, (session) => this.handlers.onRoomSession?.(session));
     this.socket.on(EVENTS.ROOM_RESUME_FAILED, (error) => this.handlers.onRoomResumeFailed?.(error));
@@ -351,6 +355,11 @@ export class GameNetwork {
 
   leaveRoom() {
     this.socket.emit(EVENTS.LEAVE_ROOM);
+  }
+
+  /** Ask the server for its read-only lobby browser. */
+  listRooms() {
+    this.socket.emit(EVENTS.LIST_ROOMS);
   }
 
   createRoom(name, bundleId, profileId) {

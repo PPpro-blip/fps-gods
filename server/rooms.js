@@ -128,6 +128,45 @@ export class RoomManager {
     return room;
   }
 
+  /**
+   * Public lobby browser payload.
+   *
+   * Only multiplayer rooms are advertised: solo-vs-bots rooms are private to the
+   * operator who started them and cannot be joined. Every field here is either
+   * already broadcast to room members or derived from it — resume tokens, profile
+   * ids, and per-player records never leave the room.
+   */
+  listRooms(now = Date.now()) {
+    const rooms = [];
+    for (const room of this.rooms.values()) {
+      if (room.mode !== ROOM_MODES.MULTIPLAYER) continue;
+      const joined = [...room.players.values()];
+      const connected = joined.filter((player) => player.connected);
+      const host = connected.find((player) => player.id === room.hostId);
+      rooms.push({
+        code: room.code,
+        state: room.state,
+        mode: room.mode,
+        players: connected.length,
+        seats: joined.length,
+        maxPlayers: PLAYER.maxPlayers,
+        targetKills: PLAYER.targetKills,
+        // A started match cannot be joined (the server rejects it), so the
+        // browser must not present it as an option.
+        joinable: room.state === ROOM_STATES.LOBBY && joined.length < PLAYER.maxPlayers,
+        hostName: host?.name ?? connected[0]?.name ?? 'HOST',
+        ageMs: Math.max(0, now - (room.createdAt ?? now)),
+      });
+    }
+
+    rooms.sort((left, right) => {
+      if (left.joinable !== right.joinable) return left.joinable ? -1 : 1;
+      if (left.players !== right.players) return right.players - left.players;
+      return left.ageMs - right.ageMs;
+    });
+    return rooms.slice(0, 40);
+  }
+
   resumeRoom(socket, payload = {}, now = Date.now()) {
     const code = String(payload.roomCode ?? '').trim().toUpperCase();
     const token = typeof payload.resumeToken === 'string' ? payload.resumeToken : '';

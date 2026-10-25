@@ -1,215 +1,696 @@
-import { BUNDLE_BY_ID, BUNDLE_INFO, BUNDLE_UNLOCK_KILLS, DEFAULT_BUNDLE_ID, WEAPON_PRESENTATION } from '../shared/bundles.js';
+import {
+  BUNDLE_BY_ID,
+  BUNDLE_INFO,
+  BUNDLE_UNLOCK_KILLS,
+  DEFAULT_BUNDLE_ID,
+  WEAPON_PRESENTATION,
+} from '../shared/bundles.js';
 import { ROOM_MODES } from '../shared/events.js';
+import { WEAPON_MODEL_FILE } from '../shared/weaponModels.js';
+import { CROSSHAIR_STYLES, DEFAULT_SETTINGS, QUALITY_PRESETS } from './settings.js';
 
-// Minimum gap between connection toasts. The badge is the persistent signal; the
-// toast only has to land once per verdict change.
 const CONNECTION_TOAST_COOLDOWN_MS = 6_000;
+const ROOM_POLL_INTERVAL_MS = 5_000;
+const ACTION_TIMEOUT_MS = 12_000;
+const ONBOARDED_KEY = 'fps-gods-onboarded';
 
-// All presentation is plain DOM/CSS. Socket payloads are inserted with
-// textContent rather than HTML so player names never become markup.
+const NAV_SCREENS = ['play', 'rooms', 'inventory', 'store', 'profile', 'settings'];
+
+// All presentation is plain DOM. Socket payloads go in through textContent, so
+// a player name can never become markup.
 export class GameUI {
-  constructor({ profileId } = {}) {
+  constructor({ profileId = null, settings = DEFAULT_SETTINGS, onChange = null } = {}) {
     this.handlers = {};
+    this.onSettingsChange = onChange;
+    this.settings = settings;
     this.room = null;
-    this.profile = { profileId: profileId ?? null, lifetimeKills: 0, godsTierUnlocked: false };
+    this.selfId = null;
+    this.screen = 'play';
+    this.profile = {
+      profileId: profileId ?? null,
+      callsign: '',
+      lifetimeKills: 0,
+      godsTierUnlocked: false,
+    };
+    this.rooms = { status: 'idle', entries: [], error: '' };
+    this.roomPollTimer = null;
+    this.actionTimer = null;
+    this.toastTimeout = null;
+    this.hitMarkerTimer = null;
+    this.feedTimers = new Map();
+    this.wheelWeapons = [];
+    this.selectedWheelWeaponId = null;
+    this.activeWheelWeaponId = null;
+    this.scoreboardOpen = false;
+    this.scoreboardSignature = null;
+    this.lastHudPlayer = null;
+    this.lastHealth = null;
+    this.damageTimer = null;
+    this.fps = 0;
+    this.startedAt = Date.now();
+
     const savedBundle = localStorage.getItem('fps-gods-bundle');
     this.selectedBundleId = BUNDLE_BY_ID[savedBundle] ? savedBundle : DEFAULT_BUNDLE_ID;
-    this.wheelWeapons = [];
-    this.activeWheelWeaponId = null;
-    this.selectedWheelWeaponId = null;
-    this.selfId = null;
-    this.scoreboardOpen = false;
-    this.toastTimeout = null;
-    this.feedTimers = new Map();
-    this.lastHudPlayer = null;
-    this.latestScoreboard = null;
-    this.scoreboardSignature = null;
 
-    this.elements = {
-      shell: document.querySelector('.app-shell'),
-      callsignScreen: document.querySelector('#callsign-screen'),
-      callsignContinue: document.querySelector('#callsign-continue-button'),
-      callsignError: document.querySelector('#callsign-error'),
-      cryzenNav: document.querySelector('#cryzen-nav'),
-      modeSelectorModal: document.querySelector('#mode-selector-modal'),
-      modeCards: document.querySelectorAll('.mode-card'),
-      modeSelectorClose: document.querySelector('#mode-selector-close'),
-      roomUrlDisplay: document.querySelector('#room-url-display'),
-      roomUrlText: document.querySelector('#room-url-text'),
-      bundleScreen: document.querySelector('#bundle-screen'),
-      bundleOptions: document.querySelector('#bundle-options'),
-      bundleBack: document.querySelector('#bundle-back-button'),
-      bundleContinue: document.querySelector('#bundle-continue-button'),
-      bundleError: document.querySelector('#bundle-error'),
-      lifetimeKills: document.querySelector('#lifetime-kills'),
-      godsUnlockProgress: document.querySelector('#gods-unlock-progress'),
-      home: document.querySelector('#home-screen'),
-      lobby: document.querySelector('#lobby-screen'),
-      match: document.querySelector('#match-hud'),
-      connection: document.querySelector('#connection-pill'),
-      connectionLabel: document.querySelector('#connection-label'),
-      name: document.querySelector('#player-name'),
-      roomCodeInput: document.querySelector('#room-code-input'),
-      playNow: document.querySelector('#play-now-button'),
-      create: document.querySelector('#create-room-button'),
-      joinForm: document.querySelector('#join-room-form'),
-      homeError: document.querySelector('#home-error'),
-      roomError: document.querySelector('#room-error'),
-      lobbyCode: document.querySelector('#lobby-room-code'),
-      lobbyCodeSmall: document.querySelector('#lobby-room-code-small'),
-      copyCode: document.querySelector('#copy-room-code-button'),
-      playerList: document.querySelector('#lobby-player-list'),
-      playerCount: document.querySelector('#player-count'),
-      leaveRoom: document.querySelector('#leave-room-button'),
-      ready: document.querySelector('#ready-button'),
-      start: document.querySelector('#start-button'),
-      lobbyHint: document.querySelector('#lobby-hint'),
-      hudCode: document.querySelector('#hud-room-code'),
-      targetKills: document.querySelector('#target-kills'),
-      aliveCount: document.querySelector('#alive-count'),
-      healthValue: document.querySelector('#health-value'),
-      healthFill: document.querySelector('#health-fill'),
-      healthTrack: document.querySelector('.health-track'),
-      healthState: document.querySelector('#health-state'),
-      ammo: document.querySelector('#ammo-value'),
-      ammoTotal: document.querySelector('#ammo-total'),
-      ammoStatus: document.querySelector('#ammo-status'),
-      ammoWidget: document.querySelector('.ammo-widget'),
-      reloadHint: document.querySelector('#reload-hint'),
-      weaponIcon: document.querySelector('#weapon-icon'),
-      weaponName: document.querySelector('#weapon-name'),
-      weaponBundle: document.querySelector('#weapon-bundle'),
-      weaponWheel: document.querySelector('#weapon-wheel'),
-      weaponWheelOptions: document.querySelector('#weapon-wheel-options'),
-      wheelCenterIcon: document.querySelector('#wheel-center-icon'),
-      wheelCenterName: document.querySelector('#wheel-center-name'),
-      wheelCenterState: document.querySelector('#wheel-center-state'),
-      killFeed: document.querySelector('#kill-feed'),
-      crosshair: document.querySelector('#crosshair'),
-      pause: document.querySelector('#pause-panel'),
-      resume: document.querySelector('#resume-button'),
-      death: document.querySelector('#death-panel'),
-      countdown: document.querySelector('#respawn-countdown'),
-      scoreboard: document.querySelector('#scoreboard-panel'),
-      scoreboardBody: document.querySelector('#scoreboard-body'),
-      scoreboardRoom: document.querySelector('#scoreboard-room'),
-      end: document.querySelector('#end-panel'),
-      winner: document.querySelector('#winner-name'),
-      winnerSummary: document.querySelector('#winner-summary'),
-      endScoreboard: document.querySelector('#end-scoreboard'),
-      returnLobby: document.querySelector('#return-lobby-button'),
-      endWaiting: document.querySelector('#end-waiting'),
-      toast: document.querySelector('#toast'),
-      webglWarning: document.querySelector('#webgl-warning'),
-    };
+    this.el = {};
+    for (const id of [
+      'app-shell', 'game-canvas', 'connection-pill', 'connection-label', 'profile-chip',
+      'profile-avatar', 'profile-callsign', 'profile-kills', 'brand-home', 'nav-rail',
+      'menu-shell', 'hero-copy', 'stage-note', 'play-bundle-tag', 'play-now-button',
+      'create-room-button', 'browse-rooms-button', 'join-room-form', 'room-code-input',
+      'join-room-button', 'play-error', 'play-loadout-line', 'play-server-line',
+      'refresh-rooms-button', 'room-list', 'rooms-create-button', 'rooms-join-button',
+      'rooms-error', 'inventory-kills-tag', 'bundle-grid', 'inventory-error',
+      'store-kills-value', 'store-kills-fill', 'store-goto-play', 'profile-title',
+      'profile-tier-tag', 'profile-key', 'profile-stat-kills', 'profile-stat-unlock',
+      'profile-stat-bundle', 'profile-server-target', 'profile-progress',
+      'profile-progress-value', 'profile-progress-fill', 'profile-callsign-form',
+      'profile-callsign-input', 'profile-message', 'settings-reset',
+      'setting-sensitivity', 'setting-sensitivity-value', 'setting-fov',
+      'setting-fov-value', 'setting-volume', 'setting-volume-value', 'setting-quality',
+      'setting-crosshair', 'setting-invert', 'setting-fps', 'onboarding',
+      'onboarding-identity', 'onboarding-loadout', 'step-one', 'step-two',
+      'player-name', 'callsign-error', 'callsign-continue-button', 'onboarding-bundles',
+      'bundle-error', 'bundle-back-button', 'bundle-continue-button', 'lobby-shell',
+      'lobby-room-code', 'lobby-room-code-small', 'lobby-mode-tag', 'copy-room-code-button',
+      'lobby-player-list', 'lobby-hint', 'room-error', 'leave-room-button', 'ready-button',
+      'start-button', 'match-hud', 'hud-room-code', 'target-kills', 'alive-count',
+      'fps-value', 'kill-feed', 'name-tags', 'crosshair', 'health-value', 'health-fill',
+      'health-state', 'shield-state', 'spawn-note', 'weapon-name', 'weapon-bundle',
+      'ammo-mode', 'ammo-value', 'ammo-total', 'ammo-status', 'reload-hint',
+      'weapon-wheel', 'weapon-wheel-options', 'wheel-center-name', 'wheel-center-state',
+      'pause-panel', 'resume-button', 'death-panel', 'respawn-countdown',
+      'scoreboard-panel', 'scoreboard-room', 'scoreboard-body', 'end-panel', 'end-kicker',
+      'winner-name', 'winner-summary', 'end-scoreboard', 'return-lobby-button',
+      'end-waiting', 'loading-overlay', 'loading-label', 'loading-fill', 'toast',
+      'webgl-warning', 'damage-vignette', 'build-stamp',
+    ]) {
+      this.el[id] = document.getElementById(id);
+    }
+    // Camel-case aliases for the hyphenated ids used by hot-path render code.
+    this.el.bundleGrid = this.el['bundle-grid'];
+    this.el.onboardingBundles = this.el['onboarding-bundles'];
+    this.el.onboarding = this.el['onboarding'];
+    this.el.crosshair = this.el['crosshair'];
+    this.el.toast = this.el['toast'];
+    // A renamed id in index.html used to fail silently, because every renderer
+    // simply skipped a null element. Collect them once and shout about it.
+    this.missingElements = Object.entries(this.el)
+      .filter(([, node]) => !node)
+      .map(([id]) => id);
+    if (this.missingElements.length) {
+      console.warn(`[ui] index.html is missing: ${this.missingElements.join(', ')}`);
+    }
+    this.el.ammoWidget = document.querySelector('.ammo');
+    this.el.healthTrack = document.querySelector('.health-track');
+    this.el.vitalState = document.querySelector('.vitals-head em');
 
     this.loadCallsign();
-    this.buildBundleOptions();
-    this.bindControls();
-    this.bindCryzenNavigation();
-    this.showCallsign();
+    this.renderBundles(this.el.bundleGrid, { compact: false });
+    this.renderBundles(this.el.onboardingBundles, { compact: true });
+    this.bindNavigation();
+    this.bindPlayControls();
+    this.bindOnboarding();
+    this.bindSettings();
+    this.bindProfile();
+    this.bindRoomControls();
+    this.bindHud();
+    this.applySettings(this.settings);
+    this.updateProfileChipsToBundle();
+    this.el['build-stamp'].textContent = `v1.0 · ${new Date(this.startedAt).getFullYear()}`;
+
+    const onboarded = localStorage.getItem(ONBOARDED_KEY) === '1' && Boolean(this.playerName);
+    this.showOnboarding(!onboarded);
+    if (onboarded) this.showScreen('play');
   }
 
-  buildBundleOptions() {
-    this.elements.bundleOptions.replaceChildren();
-    const godsUnlocked = this.profile.godsTierUnlocked === true
-      || this.profile.lifetimeKills >= BUNDLE_UNLOCK_KILLS;
+  /* ─────────────────────────────── settings ─────────────────────────────── */
 
-    for (const bundle of BUNDLE_INFO) {
-      const locked = bundle.id === 'GODS_TIER' && !godsUnlocked;
-      const card = document.createElement('button');
-      card.type = 'button';
-      card.className = `bundle-card${locked ? ' is-locked' : ''}`;
-      card.setAttribute('role', 'radio');
-      card.setAttribute('aria-checked', String(this.selectedBundleId === bundle.id));
-      card.disabled = locked;
-      card.style.setProperty('--bundle-accent', bundle.accent);
-      card.dataset.bundleId = bundle.id;
+  bindSettings() {
+    const { el } = this;
+    el['setting-sensitivity'].addEventListener('input', () => {
+      this.emitSettings({ sensitivity: Number(el['setting-sensitivity'].value) });
+    });
+    el['setting-fov'].addEventListener('input', () => {
+      this.emitSettings({ fov: Number(el['setting-fov'].value) });
+    });
+    el['setting-volume'].addEventListener('input', () => {
+      this.emitSettings({ volume: Number(el['setting-volume'].value) });
+    });
+    el['setting-quality'].addEventListener('change', () => {
+      this.emitSettings({ quality: el['setting-quality'].value });
+    });
+    el['setting-crosshair'].addEventListener('change', () => {
+      this.emitSettings({ crosshair: el['setting-crosshair'].value });
+    });
+    el['setting-invert'].addEventListener('change', () => {
+      this.emitSettings({ invertY: el['setting-invert'].checked });
+    });
+    el['setting-fps'].addEventListener('change', () => {
+      this.emitSettings({ showFps: el['setting-fps'].checked });
+    });
+    el['settings-reset'].addEventListener('click', () => {
+      this.emitSettings({ ...DEFAULT_SETTINGS });
+      this.showToast('Settings restored to defaults.');
+    });
+  }
 
-      const heading = document.createElement('span');
-      heading.className = 'bundle-card-heading';
-      const name = document.createElement('strong');
-      name.textContent = bundle.name;
-      const state = document.createElement('small');
-      state.textContent = locked ? 'LOCKED' : this.selectedBundleId === bundle.id ? 'SELECTED' : 'AVAILABLE';
-      heading.append(name, state);
+  emitSettings(patch) {
+    this.playUiSound();
+    const next = this.onSettingsChange ? this.onSettingsChange(patch) : { ...this.settings, ...patch };
+    this.applySettings(next);
+  }
 
-      const title = document.createElement('span');
-      title.className = 'bundle-card-title';
-      title.textContent = bundle.title;
-      const description = document.createElement('span');
-      description.className = 'bundle-card-description';
-      description.textContent = bundle.description;
+  /** Reflect settings in the controls and in the live HUD. */
+  applySettings(settings) {
+    this.settings = { ...this.settings, ...settings };
+    const { el } = this;
+    const s = this.settings;
+    el['setting-sensitivity'].value = String(s.sensitivity);
+    el['setting-sensitivity-value'].textContent = `${s.sensitivity.toFixed(2)}×`;
+    el['setting-fov'].value = String(s.fov);
+    el['setting-fov-value'].textContent = `${s.fov}°`;
+    el['setting-volume'].value = String(s.volume);
+    el['setting-volume-value'].textContent = `${Math.round(s.volume * 100)}%`;
+    el['setting-quality'].value = QUALITY_PRESETS[s.quality] ? s.quality : 'high';
+    el['setting-crosshair'].value = CROSSHAIR_STYLES.includes(s.crosshair) ? s.crosshair : 'standard';
+    el['setting-invert'].checked = s.invertY === true;
+    el['setting-fps'].checked = s.showFps === true;
+    el.crosshair.dataset.crosshair = s.crosshair;
+    el['fps-value'].hidden = !s.showFps;
+  }
 
-      const weaponList = document.createElement('span');
-      weaponList.className = 'bundle-weapon-list';
-      for (const weapon of bundle.weapons) {
-        const row = document.createElement('span');
-        row.className = 'bundle-weapon-row';
-        const icon = document.createElement('span');
-        icon.className = 'bundle-weapon-icon';
-        icon.textContent = weapon.icon;
-        const copy = document.createElement('span');
-        copy.className = 'bundle-weapon-copy';
-        const weaponName = document.createElement('strong');
-        weaponName.textContent = weapon.name;
-        const role = document.createElement('small');
-        role.textContent = weapon.role;
-        copy.append(weaponName, role);
-        row.append(icon, copy);
-        weaponList.append(row);
+  playUiSound() {
+    this.handlers.onUiSound?.();
+  }
+
+  /* ────────────────────────────── navigation ────────────────────────────── */
+
+  bindNavigation() {
+    const navigate = (screen) => {
+      if (!screen) return;
+      this.playUiSound();
+      this.showScreen(screen);
+    };
+
+    for (const button of this.el['nav-rail'].querySelectorAll('[data-nav]')) {
+      button.addEventListener('click', () => navigate(button.dataset.nav));
+    }
+    this.el['profile-chip'].addEventListener('click', () => navigate('profile'));
+    this.el['brand-home'].addEventListener('click', (event) => {
+      event.preventDefault();
+      navigate('play');
+    });
+    this.el['browse-rooms-button'].addEventListener('click', () => navigate('rooms'));
+    this.el['rooms-join-button'].addEventListener('click', () => {
+      navigate('play');
+      this.el['room-code-input'].focus();
+    });
+    this.el['rooms-create-button'].addEventListener('click', () => this.requestCreateRoom());
+    this.el['create-room-button'].addEventListener('click', () => this.requestCreateRoom());
+    this.el['store-goto-play'].addEventListener('click', () => navigate('play'));
+
+    this.el['refresh-rooms-button'].addEventListener('click', () => this.loadRooms(true));
+  }
+
+  setScreenState(screen) {
+    this.screen = screen;
+    this.el['app-shell'].dataset.screen = screen;
+    for (const name of NAV_SCREENS) {
+      const panel = document.getElementById(`screen-${name}`);
+      if (panel) {
+        panel.hidden = name !== screen;
+        panel.classList.toggle('is-active', name === screen);
       }
+    }
+    for (const button of this.el['nav-rail'].querySelectorAll('[data-nav]') || []) {
+      button.classList.toggle('is-active', button.dataset.nav === screen);
+    }
+  }
 
-      card.append(heading, title, description, weaponList);
-      if (locked) {
-        const unlock = document.createElement('span');
-        unlock.className = 'bundle-unlock-message';
-        const remaining = Math.max(0, BUNDLE_UNLOCK_KILLS - this.profile.lifetimeKills);
-        unlock.textContent = `${remaining} MORE LIFETIME KILLS TO UNLOCK`;
-        card.append(unlock);
+  showScreen(screen) {
+    // A live match owns the viewport. The menu screens are only reachable once
+    // the match has been torn down (clearMatchPresentation hides the HUD first),
+    // so a stray click can never drop a player into the lobby mid-firefight.
+    if (!this.el['match-hud'].hidden) return;
+    const target = NAV_SCREENS.includes(screen) ? screen : 'play';
+    this.setScreenState(target);
+    this.setMenuVisible(true);
+    this.setLobbyVisible(false);
+    this.setMatchVisible(false);
+    this.clearErrors();
+    if (target === 'rooms') {
+      this.loadRooms();
+      this.startRoomPolling();
+    } else {
+      this.stopRoomPolling();
+    }
+    if (target === 'inventory') this.renderBundles(this.el.bundleGrid, { compact: false });
+    if (target === 'profile') this.renderProfile();
+    if (target === 'play') this.refreshPlaySummary();
+  }
+
+  /* ────────────────────────────── onboarding ────────────────────────────── */
+
+  bindOnboarding() {
+    const { el } = this;
+    el['player-name'].addEventListener('input', () => {
+      localStorage.setItem('fps-gods-callsign', el['player-name'].value.slice(0, 16));
+      el['callsign-error'].hidden = true;
+    });
+
+    el['callsign-continue-button'].addEventListener('click', () => {
+      const name = this.playerName;
+      if (!name) {
+        this.showOnboardingError('callsign-error', 'Enter a callsign to continue.');
+        el['player-name'].focus();
+        return;
       }
-      card.addEventListener('click', () => this.selectBundle(bundle.id));
-      this.elements.bundleOptions.append(card);
+      this.playUiSound();
+      this.handlers.onCallsignContinue?.(name, this.profileId);
+      el['onboarding-identity'].hidden = true;
+      el['onboarding-loadout'].hidden = false;
+      el['step-one'].classList.remove('is-active');
+      el['step-two'].classList.add('is-active');
+      this.renderBundles(el['onboarding-bundles'], { compact: true });
+    });
+
+    el['bundle-back-button'].addEventListener('click', () => {
+      el['onboarding-identity'].hidden = false;
+      el['onboarding-loadout'].hidden = true;
+      el['step-one'].classList.add('is-active');
+      el['step-two'].classList.remove('is-active');
+    });
+
+    el['bundle-continue-button'].addEventListener('click', () => {
+      if (!BUNDLE_BY_ID[this.selectedBundleId]
+        || (this.selectedBundleId === 'GODS_TIER' && !this.isGodsTierUnlocked)) {
+        this.showOnboardingError('bundle-error', 'Choose an unlocked bundle to continue.');
+        return;
+      }
+      this.playUiSound();
+      this.handlers.onBundleSelected?.(this.selectedBundleId);
+      localStorage.setItem(ONBOARDED_KEY, '1');
+      this.showOnboarding(false);
+      this.showScreen('play');
+      this.handlers.onProfileCallsign?.(this.playerName);
+    });
+  }
+
+  showOnboarding(visible) {
+    this.el.onboarding.hidden = !visible;
+    if (visible) {
+      this.el['player-name'].value = this.playerName;
+      this.el['onboarding-identity'].hidden = false;
+      this.el['onboarding-loadout'].hidden = true;
+      this.el['step-one'].classList.add('is-active');
+      this.el['step-two'].classList.remove('is-active');
+    }
+  }
+
+  showOnboardingError(id, message) {
+    const target = this.el[id];
+    if (!target) return;
+    target.textContent = message;
+    target.hidden = false;
+  }
+
+  /* ────────────────────────────── room actions ──────────────────────────── */
+
+  bindPlayControls() {
+    this.el['play-now-button'].addEventListener('click', () => {
+      this.playUiSound();
+      this.beginAction('play-now-button');
+      this.handlers.onPlayNow?.(this.playerName, this.selectedBundleId, this.profileId);
+    });
+
+    this.el['join-room-form'].addEventListener('submit', (event) => {
+      event.preventDefault();
+      const code = this.el['room-code-input'].value.trim().toUpperCase();
+      if (code.length !== 6) {
+        this.showError('Enter all six characters of the room code.');
+        return;
+      }
+      this.playUiSound();
+      this.beginAction('join-room-button');
+      this.handlers.onJoin?.(this.playerName, code, this.selectedBundleId, this.profileId);
+    });
+
+    this.el['room-code-input'].addEventListener('input', () => {
+      this.el['room-code-input'].value = this.el['room-code-input'].value
+        .toUpperCase().replace(/[^A-Z2-9]/g, '').slice(0, 6);
+      this.clearErrors();
+    });
+  }
+
+  requestCreateRoom() {
+    this.playUiSound();
+    this.beginAction('create-room-button');
+    this.handlers.onCreate?.(this.playerName, this.selectedBundleId, this.profileId);
+  }
+
+  bindRoomControls() {
+    this.el['leave-room-button'].addEventListener('click', () => {
+      this.playUiSound();
+      this.handlers.onLeaveRoom?.();
+    });
+    this.el['ready-button'].addEventListener('click', () => {
+      const self = this.room?.players?.find((player) => player.id === this.selfId);
+      this.playUiSound();
+      this.handlers.onReady?.(!(self?.ready ?? false));
+    });
+    this.el['start-button'].addEventListener('click', () => {
+      this.playUiSound();
+      this.handlers.onStart?.();
+    });
+    this.el['copy-room-code-button'].addEventListener('click', () => this.copyRoomCode());
+    this.el['resume-button'].addEventListener('click', () => this.handlers.onResume?.());
+    this.el['return-lobby-button'].addEventListener('click', () => {
+      if (this.room?.mode === ROOM_MODES.SOLO_VS_BOTS) {
+        this.handlers.onPlayAgain?.();
+        return;
+      }
+      this.handlers.onReturnToLobby?.();
+    });
+  }
+
+  /** Disable the pressed control until the server answers, then re-enable. */
+  beginAction(buttonId) {
+    this.clearErrors();
+    const button = this.el[buttonId];
+    if (button) {
+      button.dataset.pending = '1';
+      button.disabled = true;
+    }
+    window.clearTimeout(this.actionTimer);
+    this.actionTimer = window.setTimeout(() => {
+      this.clearAction();
+      this.showError('The server did not answer in time. Check your connection and try again.');
+    }, ACTION_TIMEOUT_MS);
+  }
+
+  clearAction() {
+    window.clearTimeout(this.actionTimer);
+    this.actionTimer = null;
+    for (const button of document.querySelectorAll('[data-pending="1"]')) {
+      button.disabled = false;
+      delete button.dataset.pending;
+    }
+  }
+
+  /* ──────────────────────────────── rooms ───────────────────────────────── */
+
+  loadRooms(force = false) {
+    if (this.rooms.status === 'loading' && !force) return;
+    this.rooms = { ...this.rooms, status: 'loading', error: '' };
+    this.renderRoomList();
+    this.handlers.onListRooms?.();
+    window.clearTimeout(this.roomListTimeout);
+    this.roomListTimeout = window.setTimeout(() => {
+      if (this.rooms.status !== 'loading') return;
+      this.rooms = { ...this.rooms, status: 'error', error: 'No answer from the game server.' };
+      this.renderRoomList();
+    }, ACTION_TIMEOUT_MS);
+  }
+
+  startRoomPolling() {
+    this.stopRoomPolling();
+    this.roomPollTimer = window.setInterval(() => {
+      if (this.screen === 'rooms' && !document.hidden) this.loadRooms();
+    }, ROOM_POLL_INTERVAL_MS);
+  }
+
+  stopRoomPolling() {
+    if (this.roomPollTimer) window.clearInterval(this.roomPollTimer);
+    this.roomPollTimer = null;
+  }
+
+  setRoomList(payload) {
+    if (!payload || !Array.isArray(payload.rooms)) {
+      this.rooms = { ...this.rooms, status: 'error', error: 'Malformed room list from the server.' };
+      this.renderRoomList();
+      return;
+    }
+    this.rooms = { status: 'ready', entries: payload.rooms, error: '', receivedAt: payload.now ?? Date.now() };
+    this.renderRoomList();
+  }
+
+  setRoomListError(message) {
+    this.rooms = { ...this.rooms, status: 'error', error: String(message || 'Could not load rooms.') };
+    this.renderRoomList();
+  }
+
+  renderRoomList() {
+    const container = this.el['room-list'];
+    if (!container) return;
+    container.replaceChildren();
+    const { status, entries, error } = this.rooms;
+
+    if (status === 'loading' && !entries.length) {
+      for (let index = 0; index < 3; index += 1) {
+        const skeleton = document.createElement('div');
+        skeleton.className = 'room-skeleton';
+        container.append(skeleton);
+      }
+      return;
     }
 
-    this.updateBundleSelection();
-    this.elements.lifetimeKills.textContent = String(this.profile.lifetimeKills ?? 0);
-    this.elements.godsUnlockProgress.textContent = godsUnlocked
-      ? 'GODS TIER UNLOCKED'
-      : `${Math.max(0, BUNDLE_UNLOCK_KILLS - (this.profile.lifetimeKills ?? 0))} kills to GODS TIER`;
-  }
+    if (status === 'error') {
+      const banner = document.createElement('div');
+      banner.className = entries.length ? 'room-banner is-error' : 'room-empty';
+      const title = document.createElement('strong');
+      title.textContent = 'Room list unavailable';
+      const copy = document.createElement('span');
+      copy.textContent = entries.length
+        ? `${error} Showing the last list received.`
+        : error;
+      const retry = document.createElement('button');
+      retry.className = 'button button-secondary';
+      retry.type = 'button';
+      retry.textContent = 'TRY AGAIN';
+      retry.addEventListener('click', () => this.loadRooms(true));
+      banner.append(title, copy, retry);
+      container.append(banner);
+      if (!entries.length) return;
+    }
 
-  updateBundleSelection() {
-    for (const card of this.elements.bundleOptions.querySelectorAll('.bundle-card')) {
-      const selected = card.dataset.bundleId === this.selectedBundleId;
-      card.classList.toggle('is-selected', selected);
-      card.setAttribute('aria-checked', String(selected));
-      const label = card.querySelector('.bundle-card-heading small');
-      if (label && !card.disabled) label.textContent = selected ? 'SELECTED' : 'AVAILABLE';
+    if (!entries.length) {
+      const empty = document.createElement('div');
+      empty.className = 'room-empty';
+      const title = document.createElement('strong');
+      title.textContent = 'No open lobbies right now';
+      const copy = document.createElement('span');
+      copy.textContent = 'Create a room and share its six-character code, or deploy solo against bots.';
+      empty.append(title, copy);
+      container.append(empty);
+      return;
+    }
+
+    for (const room of entries) {
+      const row = document.createElement('div');
+      row.className = 'room-row';
+
+      const code = document.createElement('span');
+      code.className = 'room-code';
+      code.textContent = room.code;
+
+      const meta = document.createElement('span');
+      meta.className = 'room-meta';
+      const host = document.createElement('strong');
+      host.textContent = `${room.hostName}’s lobby`;
+      const detail = document.createElement('small');
+      detail.textContent = room.joinable
+        ? `${room.mode === 'MULTIPLAYER' ? 'DEATHMATCH' : room.mode} · FIRST TO ${room.targetKills}`
+        : `${room.state === 'LOBBY' ? 'FULL' : 'IN PROGRESS'} · FIRST TO ${room.targetKills}`;
+      meta.append(host, detail);
+
+      const capacity = document.createElement('span');
+      capacity.className = 'room-capacity';
+      capacity.textContent = `${room.players}/${room.maxPlayers}`;
+
+      const join = document.createElement('button');
+      join.className = 'button button-secondary room-join';
+      join.type = 'button';
+      join.textContent = room.joinable ? 'JOIN' : 'LOCKED';
+      join.disabled = !room.joinable;
+      join.addEventListener('click', () => {
+        this.playUiSound();
+        this.beginAction('join-room-button');
+        this.handlers.onJoin?.(this.playerName, room.code, this.selectedBundleId, this.profileId);
+      });
+
+      row.append(code, meta, capacity, join);
+      container.append(row);
     }
   }
 
-  selectBundle(bundleId) {
-    const bundle = BUNDLE_BY_ID[bundleId];
-    if (!bundle || (bundleId === 'GODS_TIER' && !this.isGodsTierUnlocked)) return false;
-    this.selectedBundleId = bundleId;
-    localStorage.setItem('fps-gods-bundle', bundleId);
-    this.updateBundleSelection();
-    this.clearError();
-    this.handlers.onBundleChange?.(bundleId);
-    return true;
-  }
+  /* ─────────────────────────────── bundles ─────────────────────────────── */
 
   get isGodsTierUnlocked() {
     return this.profile.godsTierUnlocked === true || this.profile.lifetimeKills >= BUNDLE_UNLOCK_KILLS;
   }
 
-  get profileId() {
-    return this.profile.profileId;
+  renderBundles(container, { compact = false } = {}) {
+    if (!container) return;
+    container.replaceChildren();
+    for (const bundle of BUNDLE_INFO) {
+      const locked = bundle.id === 'GODS_TIER' && !this.isGodsTierUnlocked;
+      const card = document.createElement('button');
+      card.type = 'button';
+      card.className = 'bundle-card';
+      card.dataset.bundleId = bundle.id;
+      card.style.setProperty('--bundle-accent', bundle.accent);
+      card.setAttribute('aria-pressed', String(this.selectedBundleId === bundle.id));
+      card.disabled = locked;
+      card.classList.toggle('is-locked', locked);
+      card.classList.toggle('is-selected', this.selectedBundleId === bundle.id);
+      card.addEventListener('click', () => this.selectBundle(bundle.id));
+
+      const head = document.createElement('span');
+      head.className = 'bundle-card-head';
+      const name = document.createElement('strong');
+      name.textContent = bundle.name;
+      const state = document.createElement('small');
+      state.className = 'bundle-select-label';
+      state.textContent = 'EQUIPPED';
+      head.append(name, state);
+
+      const title = document.createElement('h3');
+      title.textContent = bundle.title;
+
+      const weapons = document.createElement('span');
+      weapons.className = 'bundle-weapons';
+      for (const weapon of bundle.weapons) {
+        const row = document.createElement('span');
+        row.className = 'bundle-weapon';
+        const glyph = document.createElement('span');
+        glyph.className = 'glyph';
+        glyph.textContent = weapon.icon;
+        const label = document.createElement('strong');
+        label.textContent = weapon.name;
+        const model = document.createElement('em');
+        model.textContent = WEAPON_MODEL_FILE[weapon.id] ?? '';
+        const role = document.createElement('small');
+        role.textContent = weapon.role;
+        row.append(glyph, label, role);
+        if (!compact) row.append(model);
+        weapons.append(row);
+      }
+
+      card.append(head, title, weapons);
+
+      if (!compact) {
+        const description = document.createElement('p');
+        description.textContent = bundle.description;
+        card.append(description);
+      }
+
+      if (bundle.id === 'GODS_TIER') {
+        const lock = document.createElement('span');
+        lock.className = 'bundle-lock';
+        lock.textContent = locked
+          ? `LOCKED · ${Math.max(0, BUNDLE_UNLOCK_KILLS - this.profile.lifetimeKills)} MORE LIFETIME ELIMS`
+          : 'UNLOCKED · SERVER VERIFIED';
+        card.append(lock);
+      }
+
+      container.append(card);
+    }
   }
 
-  get bundleId() {
-    return this.selectedBundleId;
+  selectBundle(bundleId) {
+    const bundle = BUNDLE_BY_ID[bundleId];
+    if (!bundle) return false;
+    if (bundleId === 'GODS_TIER' && !this.isGodsTierUnlocked) {
+      this.showToast(`GODS TIER unlocks at ${BUNDLE_UNLOCK_KILLS} lifetime eliminations.`);
+      return false;
+    }
+    this.playUiSound();
+    this.selectedBundleId = bundleId;
+    localStorage.setItem('fps-gods-bundle', bundleId);
+    this.renderBundles(this.el.bundleGrid, { compact: false });
+    this.renderBundles(this.el.onboardingBundles, { compact: true });
+    this.clearErrors();
+    this.updateProfileChipsToBundle();
+    this.refreshPlaySummary();
+    this.renderProfile();
+    this.handlers.onBundleChange?.(bundleId);
+    this.showToast(`${bundle.name} equipped. The server validates it when you join.`);
+    return true;
+  }
+
+  updateProfileChipsToBundle() {
+    const bundle = BUNDLE_BY_ID[this.selectedBundleId] ?? BUNDLE_BY_ID[DEFAULT_BUNDLE_ID];
+    this.el['play-bundle-tag'].textContent = bundle.name;
+    this.el['play-loadout-line'].textContent = `${bundle.name} — ${bundle.weapons.map((weapon) => weapon.name).join(' · ')}`;
+  }
+
+  refreshPlaySummary() {
+    const bundle = BUNDLE_BY_ID[this.selectedBundleId] ?? BUNDLE_BY_ID[DEFAULT_BUNDLE_ID];
+    this.el['play-bundle-tag'].textContent = bundle.name;
+    this.el['play-loadout-line'].textContent = `${bundle.name} — ${bundle.weapons.map((weapon) => weapon.name).join(' · ')}`;
+  }
+
+  /* ─────────────────────────────── profile ─────────────────────────────── */
+
+  bindProfile() {
+    this.el['profile-callsign-form'].addEventListener('submit', (event) => {
+      event.preventDefault();
+      const name = this.el['profile-callsign-input'].value.trim().slice(0, 16);
+      if (!name) {
+        this.setProfileMessage('Enter a callsign first.', true);
+        return;
+      }
+      localStorage.setItem('fps-gods-callsign', name);
+      this.el['player-name'].value = name;
+      this.el['profile-callsign'].textContent = name;
+      this.el['profile-avatar'].textContent = [...name][0]?.toUpperCase() ?? 'R';
+      this.el['profile-title'].textContent = name;
+      this.handlers.onProfileCallsign?.(name);
+      this.setProfileMessage('Callsign saved.', false);
+    });
+  }
+
+  setProfileMessage(message, isError) {
+    const target = this.el['profile-message'];
+    target.textContent = message;
+    target.className = `inline-message${isError ? ' is-error' : ' is-success'}`;
+    target.hidden = false;
+    window.clearTimeout(this.profileMessageTimer);
+    this.profileMessageTimer = window.setTimeout(() => { target.hidden = true; }, 4_000);
+  }
+
+  renderProfile() {
+    const { profile } = this;
+    const kills = profile.lifetimeKills ?? 0;
+    const unlocked = this.isGodsTierUnlocked;
+    const bundle = BUNDLE_BY_ID[this.selectedBundleId] ?? BUNDLE_BY_ID[DEFAULT_BUNDLE_ID];
+    const percent = Math.min(100, (kills / BUNDLE_UNLOCK_KILLS) * 100);
+
+    this.el['profile-title'].textContent = profile.callsign || this.playerName || 'Operator';
+    this.el['profile-key'].textContent = profile.profileId ?? 'not assigned yet';
+    this.el['profile-stat-kills'].textContent = String(kills);
+    this.el['profile-stat-unlock'].textContent = unlocked ? 'UNLOCKED' : 'LOCKED';
+    this.el['profile-stat-unlock'].style.color = unlocked ? 'var(--ok)' : '';
+    this.el['profile-stat-bundle'].textContent = bundle.name;
+    this.el['profile-tier-tag'].textContent = unlocked ? 'GODS TIER' : 'TIER 1';
+    this.el['profile-progress-value'].textContent = `${Math.min(kills, BUNDLE_UNLOCK_KILLS)} / ${BUNDLE_UNLOCK_KILLS}`;
+    this.el['profile-progress-fill'].style.width = `${percent}%`;
+    this.el['profile-server-target'].textContent = this.serverTarget ?? 'resolving…';
+    this.el['profile-callsign-input'].value = profile.callsign || this.playerName || '';
+
+    this.el['store-kills-value'].textContent = `${Math.min(kills, BUNDLE_UNLOCK_KILLS)} / ${BUNDLE_UNLOCK_KILLS}`;
+    this.el['store-kills-fill'].style.width = `${percent}%`;
+    this.el['inventory-kills-tag'].textContent = `${kills} LIFETIME`;
+    this.el['profile-kills'].textContent = String(kills);
+    this.el['profile-callsign'].textContent = profile.callsign || this.playerName || 'OPERATOR';
+    this.el['profile-avatar'].textContent = [...(profile.callsign || this.playerName || 'R')][0]?.toUpperCase() ?? 'R';
+  }
+
+  setServerTarget(label) {
+    this.serverTarget = label;
+    this.el['play-server-line'].textContent = label;
+    this.el['profile-server-target'].textContent = label;
   }
 
   setProfile(profile) {
@@ -217,560 +698,257 @@ export class GameUI {
     const lifetimeKills = Math.max(0, Math.floor(Number(profile.lifetimeKills) || 0));
     this.profile = {
       profileId: typeof profile.profileId === 'string' ? profile.profileId : this.profile.profileId,
+      callsign: typeof profile.callsign === 'string' && profile.callsign
+        ? profile.callsign
+        : this.profile.callsign,
       lifetimeKills,
       godsTierUnlocked: profile.godsTierUnlocked === true || lifetimeKills >= BUNDLE_UNLOCK_KILLS,
     };
     if (this.profile.profileId) localStorage.setItem('fps-gods-profile-id', this.profile.profileId);
-    if (this.selectedBundleId === 'GODS_TIER' && !this.isGodsTierUnlocked) this.selectedBundleId = DEFAULT_BUNDLE_ID;
-    this.buildBundleOptions();
+    if (this.selectedBundleId === 'GODS_TIER' && !this.isGodsTierUnlocked) {
+      this.selectedBundleId = DEFAULT_BUNDLE_ID;
+      localStorage.setItem('fps-gods-bundle', DEFAULT_BUNDLE_ID);
+    }
+    this.renderBundles(this.el.bundleGrid, { compact: false });
+    this.renderBundles(this.el.onboardingBundles, { compact: true });
+    this.renderProfile();
+    this.updateProfileChipsToBundle();
   }
 
-  bindControls() {
-    this.elements.name.addEventListener('input', () => {
-      localStorage.setItem('fps-gods-callsign', this.elements.name.value.slice(0, 16));
-      this.clearError();
-    });
-    this.elements.callsignContinue.addEventListener('click', () => {
-      if (!this.playerName) {
-        this.elements.callsignError.textContent = 'Enter a callsign before choosing a weapon bundle.';
-        this.elements.callsignError.hidden = false;
-        this.elements.name.focus();
-        return;
-      }
-      this.elements.callsignError.hidden = true;
-      this.handlers.onCallsignContinue?.(this.playerName, this.profileId);
-      this.showBundleSelect();
-    });
-    this.elements.bundleBack.addEventListener('click', () => this.showCallsign());
-    this.elements.bundleContinue.addEventListener('click', () => {
-      if (!BUNDLE_BY_ID[this.selectedBundleId] || (this.selectedBundleId === 'GODS_TIER' && !this.isGodsTierUnlocked)) {
-        this.elements.bundleError.textContent = 'Choose an unlocked weapon bundle to continue.';
-        this.elements.bundleError.hidden = false;
-        return;
-      }
-      this.handlers.onBundleSelected?.(this.selectedBundleId);
-      this.showHome();
-    });
-    this.elements.playNow.addEventListener('click', () => this.handlers.onPlayNow?.(this.playerName, this.selectedBundleId, this.profileId));
-    this.elements.create.addEventListener('click', () => this.handlers.onCreate?.(this.playerName, this.selectedBundleId, this.profileId));
-    this.elements.joinForm.addEventListener('submit', (event) => {
-      event.preventDefault();
-      const code = this.elements.roomCodeInput.value.trim().toUpperCase();
-      if (code.length !== 6) {
-        this.showError('Enter all six characters of the room code.');
-        return;
-      }
-      this.handlers.onJoin?.(this.playerName, code, this.selectedBundleId, this.profileId);
-    });
-    this.elements.roomCodeInput.addEventListener('input', () => {
-      this.elements.roomCodeInput.value = this.elements.roomCodeInput.value.toUpperCase().replace(/[^A-Z2-9]/g, '').slice(0, 6);
-      this.clearError();
-    });
-    this.elements.leaveRoom.addEventListener('click', () => this.handlers.onLeaveRoom?.());
-    this.elements.ready.addEventListener('click', () => {
-      const self = this.room?.players.find((player) => player.id === this.selfId);
-      this.handlers.onReady?.(!(self?.ready ?? false));
-    });
-    this.elements.start.addEventListener('click', () => this.handlers.onStart?.());
-    this.elements.copyCode.addEventListener('click', () => this.copyRoomCode());
-    this.elements.resume.addEventListener('click', () => this.handlers.onResume?.());
-    this.elements.returnLobby.addEventListener('click', () => {
-      if (this.room?.mode === ROOM_MODES.SOLO_VS_BOTS) {
-        this.handlers.onPlayAgain?.();
-        return;
-      }
-      this.handlers.onReturnToLobby?.();
-    });
+  /* ──────────────────────────────── HUD ────────────────────────────────── */
 
+  bindHud() {
     window.addEventListener('keydown', (event) => {
-      if (event.code === 'Tab' && !event.repeat && !this.elements.match.hidden) {
-        event.preventDefault();
-        this.setScoreboard(!this.scoreboardOpen);
-      }
+      if (event.code !== 'Tab' || event.repeat) return;
+      if (this.el['match-hud'].hidden) return;
+      event.preventDefault();
+      this.setScoreboard(!this.scoreboardOpen);
     });
-  }
-
-  bindCryzenNavigation() {
-    if (!this.elements.cryzenNav) return;
-    
-    // Navigation item click handlers
-    this.elements.cryzenNav.querySelectorAll('.nav-item').forEach((item) => {
-      item.addEventListener('click', () => {
-        const mode = item.dataset.mode;
-        this.handleNavItemClick(mode);
-      });
-    });
-    
-    // Mode selector handlers
-    if (this.elements.modeCards) {
-      this.elements.modeCards.forEach((card) => {
-        card.addEventListener('click', () => {
-          const mode = card.dataset.mode;
-          this.handleModeSelect(mode);
-        });
-      });
-    }
-    
-    // Close button
-    if (this.elements.modeSelectorClose) {
-      this.elements.modeSelectorClose.addEventListener('click', () => {
-        this.hideModeSelector();
-      });
-    }
-  }
-
-  handleNavItemClick(mode) {
-    switch (mode) {
-      case 'play':
-        this.showModeSelector();
-        break;
-      case 'inventory':
-        this.showToast('Inventory coming soon!');
-        break;
-      case 'store':
-        this.showToast('Store coming soon!');
-        break;
-      case 'profile':
-        this.showToast('Profile coming soon!');
-        break;
-      case 'rooms':
-        // Show room creation/join
-        if (this.handlers.onCreate) {
-          this.handlers.onCreate(this.playerName, this.selectedBundleId, this.profileId);
-        }
-        break;
-      case 'settings':
-        this.showToast('Settings coming soon!');
-        break;
-    }
-  }
-
-  showModeSelector() {
-    if (this.elements.modeSelectorModal) {
-      this.elements.modeSelectorModal.hidden = false;
-    }
-  }
-
-  hideModeSelector() {
-    if (this.elements.modeSelectorModal) {
-      this.elements.modeSelectorModal.hidden = true;
-    }
-  }
-
-  handleModeSelect(mode) {
-    this.hideModeSelector();
-    this.showToast(`Selected: ${mode}`);
-    
-    // For now, all modes play the same - in the future we can differentiate
-    switch (mode) {
-      case 'DEATHMATCH':
-      case 'TEAM_DEATHMATCH':
-      case 'KNIFE_ONLY':
-        if (this.handlers.onPlayNow) {
-          this.handlers.onPlayNow(this.playerName, this.selectedBundleId, this.profileId);
-        }
-        break;
-    }
-  }
-
-  get playerName() {
-    return this.elements.name.value.trim().slice(0, 16);
-  }
-
-  loadCallsign() {
-    const saved = localStorage.getItem('fps-gods-callsign');
-    if (saved) this.elements.name.value = saved.slice(0, 16);
-  }
-
-  setHandlers(handlers) {
-    this.handlers = { ...this.handlers, ...handlers };
   }
 
   setConnectionState(state, detail = '') {
     const connected = state === 'connected';
     const offline = state === 'offline';
-    // A dead host and a misaimed client both fail the handshake, but only one of
-    // them fixes itself by waiting, so they must not share a label.
     const unreachable = state === 'unreachable';
-    this.elements.connection.classList.toggle('is-connected', connected);
-    this.elements.connection.classList.toggle('is-offline', offline);
-    this.elements.connection.classList.toggle('is-unreachable', unreachable);
+    const pill = this.el['connection-pill'];
+    pill.classList.toggle('is-connected', connected);
+    pill.classList.toggle('is-offline', offline);
+    pill.classList.toggle('is-unreachable', unreachable);
     const label = connected
       ? 'LIVE ARENA'
       : offline
         ? 'CONNECTION LOST'
         : unreachable
           ? 'SERVER OFFLINE'
-          : 'CONNECTING TO SERVER';
-    const changed = label !== this.elements.connectionLabel.textContent;
-    this.elements.connectionLabel.textContent = label;
-    if (connected) this.lastConnectionToastAt = 0;
+          : 'CONNECTING';
+    const changed = label !== this.el['connection-label'].textContent;
+    this.el['connection-label'].textContent = label;
+    if (connected) {
+      this.lastConnectionToastAt = 0;
+      this.clearAction();
+    }
 
-    // The badge carries the state permanently, so a toast is only worth its
-    // interruption the first time a verdict changes. Reconnection retries flip
-    // between offline and unreachable as probes time out, and without this
-    // cooldown the player gets a toast on every backoff attempt.
     const now = Date.now();
-    if (!detail || connected || !changed || now - (this.lastConnectionToastAt ?? 0) < CONNECTION_TOAST_COOLDOWN_MS) return;
+    if (!detail || connected || !changed
+      || now - (this.lastConnectionToastAt ?? 0) < CONNECTION_TOAST_COOLDOWN_MS) return;
     this.lastConnectionToastAt = now;
     this.showToast(detail);
   }
 
-  setRoom(room, selfId) {
-    this.room = room;
-    this.selfId = selfId;
-    if (!room) return;
-
-    if (room.state === 'LOBBY') {
-      this.showLobby(room, selfId);
-    } else if (room.state === 'PLAYING') {
-      this.showMatch(room);
-    } else if (room.state === 'ENDED' && !this.elements.end.hidden) {
-      this.showGameEnd({ winner: room.winner, scoreboard: room.players }, selfId);
-    }
+  setMenuVisible(visible) {
+    this.el['menu-shell'].hidden = !visible;
   }
 
-  showCallsign() {
-    this.elements.shell.classList.remove('is-in-match');
-    this.elements.callsignScreen.hidden = false;
-    this.elements.bundleScreen.hidden = true;
-    this.elements.home.hidden = true;
-    this.elements.lobby.hidden = true;
-    this.elements.match.hidden = true;
-    this.elements.end.hidden = true;
-    this.elements.pause.hidden = true;
-    this.elements.death.hidden = true;
-    this.elements.scoreboard.hidden = true;
-    this.elements.weaponWheel.hidden = true;
-    this.scoreboardOpen = false;
+  setLobbyVisible(visible) {
+    this.el['lobby-shell'].hidden = !visible;
   }
 
-  showBundleSelect() {
-    if (this.selectedBundleId === 'GODS_TIER' && !this.isGodsTierUnlocked) this.selectedBundleId = DEFAULT_BUNDLE_ID;
-    this.buildBundleOptions();
-    this.elements.shell.classList.remove('is-in-match');
-    this.elements.callsignScreen.hidden = true;
-    this.elements.bundleScreen.hidden = false;
-    this.elements.home.hidden = true;
-    this.elements.lobby.hidden = true;
-    this.elements.match.hidden = true;
-    this.elements.end.hidden = true;
-    this.elements.pause.hidden = true;
-    this.elements.death.hidden = true;
-    this.elements.scoreboard.hidden = true;
-    this.elements.weaponWheel.hidden = true;
-    this.scoreboardOpen = false;
-  }
-
-  showHome() {
-    this.elements.shell.classList.remove('is-in-match');
-    this.elements.callsignScreen.hidden = true;
-    this.elements.bundleScreen.hidden = true;
-    this.elements.home.hidden = false;
-    this.elements.lobby.hidden = true;
-    this.elements.match.hidden = true;
-    this.elements.end.hidden = true;
-    this.elements.pause.hidden = true;
-    this.elements.death.hidden = true;
-    this.elements.scoreboard.hidden = true;
-    this.elements.weaponWheel.hidden = true;
-    this.scoreboardOpen = false;
-    // Hide room URL display
-    if (this.elements.roomUrlDisplay) {
-      this.elements.roomUrlDisplay.hidden = true;
+  setMatchVisible(visible) {
+    this.el['match-hud'].hidden = !visible;
+    if (!visible) {
+      this.setScoreboard(false);
+      this.el['pause-panel'].hidden = true;
+      this.el['death-panel'].hidden = true;
+      this.el['weapon-wheel'].hidden = true;
     }
   }
 
   showLobby(room = this.room, selfId = this.selfId) {
     if (!room) return;
-    this.elements.shell.classList.remove('is-in-match');
     this.room = room;
     this.selfId = selfId;
-    this.lastHudPlayer = null;
-    this.elements.callsignScreen.hidden = true;
-    this.elements.bundleScreen.hidden = true;
-    this.elements.home.hidden = true;
-    this.elements.lobby.hidden = false;
-    this.elements.match.hidden = true;
-    this.elements.pause.hidden = true;
-    this.elements.death.hidden = true;
-    this.elements.scoreboard.hidden = true;
-    this.elements.end.hidden = true;
-    this.scoreboardOpen = false;
-    this.clearError();
-    
-    // Show room URL
-    if (this.elements.roomUrlDisplay) {
-      const roomUrl = `${window.location.origin}?room=${room.code}`;
-      this.elements.roomUrlText.textContent = roomUrl;
-      this.elements.roomUrlDisplay.hidden = false;
-    }
+    this.stopRoomPolling();
+    this.setMenuVisible(false);
+    this.setMatchVisible(false);
+    this.setLobbyVisible(true);
+    this.clearErrors();
 
-    this.elements.lobbyCode.textContent = room.code;
-    this.elements.lobbyCodeSmall.textContent = room.code;
-    this.elements.hudCode.textContent = room.code;
-    
-    // Show room URL
-    if (this.elements.roomUrlDisplay) {
-      const roomUrl = `${window.location.origin}?room=${room.code}`;
-      this.elements.roomUrlText.textContent = roomUrl;
-      this.elements.roomUrlDisplay.hidden = false;
-    }
-    this.elements.playerCount.textContent = `${room.players.length} / ${room.maxPlayers}`;
-    this.elements.playerList.replaceChildren();
+    this.el['lobby-room-code'].textContent = room.code;
+    this.el['lobby-room-code-small'].textContent = room.code;
+    this.el['lobby-mode-tag'].textContent = room.mode === ROOM_MODES.SOLO_VS_BOTS ? 'SOLO' : 'MULTIPLAYER';
 
+    const list = this.el['lobby-player-list'];
+    list.replaceChildren();
+    const connectedPlayers = room.players.filter((player) => player.connected !== false);
+    const everyoneReady = connectedPlayers.length >= (room.minPlayers ?? 2)
+      && room.players.length === connectedPlayers.length
+      && room.players.every((player) => player.ready);
     const isHost = room.hostId === selfId;
     const self = room.players.find((player) => player.id === selfId);
-    const connectedPlayers = room.players.filter((player) => player.connected !== false);
-    const offlineCount = room.players.length - connectedPlayers.length;
-    const everyoneReady = connectedPlayers.length >= room.minPlayers && offlineCount === 0
-      && room.players.every((player) => player.ready);
-    const waitingCount = room.players.filter((player) => player.connected === false || !player.ready).length;
 
     for (const player of room.players) {
       const row = document.createElement('li');
       row.className = `lobby-player-row${player.connected === false ? ' is-offline' : ''}`;
 
-      const swatch = document.createElement('span');
-      swatch.className = 'player-color-swatch';
-      swatch.style.setProperty('--player-color', player.color);
+      const identity = document.createElement('span');
+      identity.className = 'lobby-identity';
       const avatar = document.createElement('span');
       avatar.className = 'player-avatar';
       avatar.style.setProperty('--player-color', player.color);
       avatar.textContent = [...player.name][0]?.toUpperCase() ?? '?';
-      const information = document.createElement('span');
-      const name = document.createElement('span');
-      name.className = 'player-name';
+      const copy = document.createElement('span');
+      const name = document.createElement('strong');
       name.textContent = player.name;
-      const subtitle = document.createElement('span');
-      subtitle.className = 'player-subtitle';
-      const bundleName = BUNDLE_BY_ID[player.bundleId]?.name ?? 'BUNDLE';
-      subtitle.textContent = `${player.id === selfId ? 'YOU' : 'OPERATOR'} · ${bundleName}`;
-      information.append(name, document.createElement('br'), subtitle);
+      const sub = document.createElement('small');
+      sub.textContent = player.id === selfId ? 'YOU' : player.isBot ? 'BOT' : 'OPERATOR';
+      copy.append(name, document.createElement('br'), sub);
+      identity.append(avatar, copy);
 
-      const spacer = document.createElement('span');
-      spacer.className = 'player-row-spacer';
-      if (player.id === room.hostId) {
-        const hostTag = document.createElement('span');
-        hostTag.className = 'player-host-tag';
-        hostTag.textContent = 'HOST';
-        row.append(swatch, avatar, information, spacer, hostTag);
+      const bundle = document.createElement('span');
+      bundle.className = 'lobby-bundle';
+      bundle.textContent = BUNDLE_BY_ID[player.bundleId]?.name ?? 'BUNDLE';
+
+      const status = document.createElement('span');
+      status.className = 'player-status';
+      if (player.connected === false) {
+        status.classList.add('is-offline');
+        status.textContent = 'OFFLINE';
+      } else if (player.id === room.hostId) {
+        status.classList.add('is-host');
+        status.textContent = 'HOST';
+      } else if (player.ready) {
+        status.classList.add('is-ready');
+        status.textContent = 'READY';
       } else {
-        row.append(swatch, avatar, information, spacer);
+        status.textContent = 'WAITING';
       }
 
-      const ready = document.createElement('span');
-      ready.className = `player-ready-status${player.ready ? ' is-ready' : ''}${player.connected === false ? ' is-offline' : ''}`;
-      const check = document.createElement('span');
-      check.className = 'status-check';
-      check.textContent = player.connected === false ? '↻' : player.ready ? '✓' : '·';
-      const status = document.createElement('span');
-      status.textContent = player.connected === false ? 'RECONNECTING' : player.ready ? 'READY' : 'NOT READY';
-      ready.append(check, status);
-      row.append(ready);
-      this.elements.playerList.append(row);
+      row.append(identity, bundle, status);
+      list.append(row);
     }
 
-    this.elements.ready.hidden = false;
-    this.elements.start.hidden = !isHost;
-    this.elements.ready.textContent = self?.ready ? 'READY' : 'MARK READY';
-    this.elements.ready.classList.toggle('is-ready', Boolean(self?.ready));
-    this.elements.ready.querySelector('span')?.remove();
-    const readyMark = document.createElement('span');
-    readyMark.textContent = '✓';
-    this.elements.ready.append(readyMark);
-    this.elements.ready.setAttribute('aria-pressed', String(Boolean(self?.ready)));
-    this.elements.start.disabled = !everyoneReady;
-    this.elements.start.title = everyoneReady ? 'Start the free-for-all' : 'Wait for at least two ready players';
-    this.elements.start.querySelector('span')?.remove();
-    const startArrow = document.createElement('span');
-    startArrow.textContent = '↗';
-    this.elements.start.append(startArrow);
-    this.elements.start.parentElement.classList.toggle('is-host', isHost);
-
-    if (offlineCount > 0) {
-      this.elements.lobbyHint.textContent = `${offlineCount} operator${offlineCount === 1 ? ' is' : 's are'} reconnecting. The room is reserved for 45 seconds.`;
-    } else if (connectedPlayers.length < room.minPlayers) {
-      this.elements.lobbyHint.textContent = 'Waiting for one more operator. At least 2 connected players are required.';
-    } else if (everyoneReady) {
-      this.elements.lobbyHint.textContent = isHost ? 'All operators ready. Launch when you are.' : 'All operators ready. The host can launch the match.';
-    } else {
-      this.elements.lobbyHint.textContent = `${waitingCount} operator${waitingCount === 1 ? '' : 's'} still need to ready up.`;
-    }
+    this.el['ready-button'].textContent = self?.ready ? 'CANCEL READY' : 'MARK READY';
+    this.el['ready-button'].disabled = self?.connected === false;
+    this.el['start-button'].hidden = !isHost;
+    this.el['start-button'].disabled = !everyoneReady;
+    this.el['lobby-hint'].textContent = !isHost
+      ? 'The host launches once every operator is ready.'
+      : everyoneReady
+        ? 'Everyone is ready. Launch when you are.'
+        : `At least ${room.minPlayers ?? 2} operators, all ready. ${room.players.length}/${room.maxPlayers ?? 16} connected.`;
+    this.el['player-name']?.blur?.();
+    this.clearAction();
   }
 
   showMatch(room = this.room) {
-    this.elements.shell.classList.add('is-in-match');
-    if (room) {
-      this.room = room;
-      this.elements.hudCode.textContent = room.code;
-      this.elements.targetKills.textContent = String(room.targetKills ?? 30);
-      this.elements.scoreboardRoom.textContent = room.code;
-    }
-    this.elements.callsignScreen.hidden = true;
-    this.elements.bundleScreen.hidden = true;
-    this.elements.home.hidden = true;
-    this.elements.lobby.hidden = true;
-    this.elements.match.hidden = false;
-    this.elements.end.hidden = true;
-    if (!this.lastHudPlayer || this.lastHudPlayer.alive) this.elements.death.hidden = true;
+    if (room) this.room = room;
+    this.setLobbyVisible(false);
+    this.setMenuVisible(false);
+    this.setMatchVisible(true);
+    this.el['hud-room-code'].textContent = room?.code ?? '------';
+    this.el['scoreboard-room'].textContent = room?.code ?? '------';
+    this.el['target-kills'].textContent = String(room?.targetKills ?? 30);
+    this.lastHealth = null;
   }
 
   setPaused(paused) {
-    this.elements.pause.hidden = !paused || this.elements.match.hidden || !this.elements.end.hidden;
-  }
-
-  setScoreboard(open) {
-    this.scoreboardOpen = Boolean(open);
-    this.elements.scoreboard.hidden = !this.scoreboardOpen;
-    // Scores are buffered while the panel is hidden so the 20 Hz game state
-    // never causes DOM churn. Opening Tab renders the freshest buffered list.
-    if (this.scoreboardOpen && this.latestScoreboard) {
-      this.scoreboardSignature = null;
-      this.updateScoreboard(this.latestScoreboard.players, this.latestScoreboard.localId);
+    if (this.el['match-hud'].hidden) {
+      this.el['pause-panel'].hidden = true;
+      return;
     }
+    this.el['pause-panel'].hidden = !paused;
   }
 
-  openWeaponWheel(bundleId, activeWeaponId) {
-    const bundle = BUNDLE_BY_ID[bundleId];
-    if (!bundle) return null;
-    this.wheelWeapons = bundle.weapons;
-    this.activeWheelWeaponId = activeWeaponId;
-    this.selectedWheelWeaponId = activeWeaponId;
-    this.elements.weaponWheelOptions.replaceChildren();
-
-    const radius = Math.min(116, window.innerWidth * 0.29, window.innerHeight * 0.25);
-    this.wheelWeapons.forEach((weapon, index) => {
-      const angle = -Math.PI / 2 + (index * Math.PI * 2) / this.wheelWeapons.length;
-      const option = document.createElement('button');
-      option.type = 'button';
-      option.className = 'weapon-wheel-option';
-      option.dataset.weaponId = weapon.id;
-      option.style.setProperty('--wheel-x', `${Math.cos(angle) * radius}px`);
-      option.style.setProperty('--wheel-y', `${Math.sin(angle) * radius}px`);
-      option.setAttribute('aria-label', `${weapon.name}${weapon.id === activeWeaponId ? ', active' : ''}`);
-
-      const icon = document.createElement('span');
-      icon.className = 'weapon-wheel-option-icon';
-      icon.textContent = weapon.icon;
-      const name = document.createElement('span');
-      name.className = 'weapon-wheel-option-name';
-      name.textContent = weapon.name;
-      const state = document.createElement('span');
-      state.className = 'weapon-wheel-option-state';
-      state.textContent = weapon.id === activeWeaponId ? 'ACTIVE' : 'SELECT';
-      option.append(icon, name, state);
-      option.addEventListener('click', () => this.selectWheelWeapon(weapon.id));
-      this.elements.weaponWheelOptions.append(option);
-    });
-
-    this.elements.weaponWheel.hidden = false;
-    this.updateWeaponWheel();
-    return this.selectedWheelWeaponId;
-  }
-
-  selectWheelWeapon(weaponId) {
-    if (!this.wheelWeapons.some((weapon) => weapon.id === weaponId)) return;
-    this.selectedWheelWeaponId = weaponId;
-    this.updateWeaponWheel();
-  }
-
-  selectWeaponByDirection(x, y) {
-    if (Math.hypot(x, y) < 15 || this.wheelWeapons.length === 0) return;
-    let nearestIndex = 0;
-    let nearestDot = -Infinity;
-    const magnitude = Math.hypot(x, y);
-    const directionX = x / magnitude;
-    const directionY = y / magnitude;
-    this.wheelWeapons.forEach((_weapon, index) => {
-      const angle = -Math.PI / 2 + (index * Math.PI * 2) / this.wheelWeapons.length;
-      const dot = directionX * Math.cos(angle) + directionY * Math.sin(angle);
-      if (dot > nearestDot) {
-        nearestDot = dot;
-        nearestIndex = index;
-      }
-    });
-    this.selectWheelWeapon(this.wheelWeapons[nearestIndex].id);
-  }
-
-  updateWeaponWheel() {
-    for (const option of this.elements.weaponWheelOptions.querySelectorAll('.weapon-wheel-option')) {
-      const active = option.dataset.weaponId === this.activeWheelWeaponId;
-      const selected = option.dataset.weaponId === this.selectedWheelWeaponId;
-      option.classList.toggle('is-active', active);
-      option.classList.toggle('is-selected', selected);
-      option.setAttribute('aria-pressed', String(selected));
-      const state = option.querySelector('.weapon-wheel-option-state');
-      if (state) state.textContent = selected ? (active ? 'ACTIVE' : 'RELEASE TO EQUIP') : active ? 'CURRENT' : 'SELECT';
-    }
-    const selectedWeapon = this.wheelWeapons.find((weapon) => weapon.id === this.selectedWheelWeaponId);
-    if (selectedWeapon) {
-      this.elements.wheelCenterIcon.textContent = selectedWeapon.icon;
-      this.elements.wheelCenterName.textContent = selectedWeapon.name;
-      this.elements.wheelCenterState.textContent = selectedWeapon.id === this.activeWheelWeaponId ? 'ACTIVE' : 'RELEASE Q';
-    }
-  }
-
-  closeWeaponWheel() {
-    const weaponId = this.selectedWheelWeaponId;
-    this.elements.weaponWheel.hidden = true;
-    this.wheelWeapons = [];
-    this.activeWheelWeaponId = null;
-    this.selectedWheelWeaponId = null;
-    return weaponId;
-  }
-
-  updateHud(player, estimatedServerNow = Date.now(), playerCount = 0) {
+  updateHud(player, estimatedServerNow = Date.now(), aliveCount = 0) {
     if (!player) return;
     this.lastHudPlayer = player;
     const maxHealth = player.maxHealth || 100;
     const health = Math.max(0, Math.min(maxHealth, player.health ?? maxHealth));
     const percent = (health / maxHealth) * 100;
-    this.elements.healthValue.textContent = String(Math.ceil(health));
-    this.elements.healthFill.style.width = `${percent}%`;
-    this.elements.healthTrack.classList.toggle('is-low', percent <= 32);
-    this.elements.healthState.textContent = health <= 0 ? 'OPERATOR DOWN' : percent <= 32 ? 'CRITICAL' : 'COMBAT READY';
-    this.elements.aliveCount.textContent = String(playerCount);
+
+    if (this.lastHealth !== null && health < this.lastHealth) this.flashDamage();
+    this.lastHealth = health;
+
+    this.el['health-value'].textContent = String(Math.ceil(health));
+    this.el['health-fill'].style.width = `${percent}%`;
+    this.el.healthTrack.classList.toggle('is-low', percent <= 32);
+    const state = health <= 0 ? 'DOWN' : percent <= 32 ? 'CRITICAL' : 'READY';
+    this.el['health-state'].textContent = state;
+    this.el.vitalState.classList.toggle('is-low', percent <= 32);
+    this.el['shield-state'].textContent = player.spawnProtected ? 'SPAWN SHIELD ACTIVE' : 'NO SHIELD';
+    this.el['spawn-note'].textContent = player.alive ? `ALIVE · ${aliveCount}` : 'REDEPLOYING';
+    this.el['alive-count'].textContent = String(aliveCount);
 
     const weaponId = player.currentWeaponId ?? 'SMG';
     const weapon = WEAPON_PRESENTATION[weaponId];
     const noMagazine = !player.unlimitedAmmo && !(player.maxAmmo > 0);
-    this.elements.weaponIcon.textContent = player.currentWeaponIcon ?? weapon?.icon ?? '◌';
-    this.elements.weaponName.textContent = player.currentWeaponName ?? weapon?.name ?? weaponId;
-    this.elements.weaponBundle.textContent = BUNDLE_BY_ID[player.bundleId]?.name ?? 'BUNDLE';
-    this.elements.ammo.textContent = player.unlimitedAmmo ? '∞' : noMagazine ? '—' : String(player.ammo ?? 0);
-    this.elements.ammoTotal.textContent = player.unlimitedAmmo
+    this.el['weapon-name'].textContent = player.currentWeaponName ?? weapon?.name ?? weaponId;
+    this.el['weapon-bundle'].textContent = BUNDLE_BY_ID[player.bundleId]?.name ?? 'BUNDLE';
+    this.el['ammo-mode'].textContent = player.auto ? 'AUTO' : 'SEMI';
+    this.el['ammo-value'].textContent = player.unlimitedAmmo ? '∞' : noMagazine ? '—' : String(player.ammo ?? 0);
+    this.el['ammo-total'].textContent = player.unlimitedAmmo
       ? '∞'
       : noMagazine
         ? '—'
         : String(player.totalAmmo ?? ((player.ammo ?? 0) + (player.reserveAmmo ?? 0)));
-    this.elements.ammoWidget.classList.toggle('is-reloading', Boolean(player.reloading));
-    this.elements.ammoWidget.classList.toggle('is-overheated', Boolean(player.overheated));
-    this.elements.ammoStatus.textContent = player.reloading
+
+    this.el.ammoWidget.classList.toggle('is-reloading', Boolean(player.reloading));
+    this.el.ammoWidget.classList.toggle('is-overheated', Boolean(player.overheated));
+    this.el.ammoWidget.classList.toggle(
+      'is-empty',
+      !player.unlimitedAmmo && !noMagazine && (player.ammo ?? 0) <= 0,
+    );
+
+    this.el['ammo-status'].textContent = player.reloading
       ? 'RELOADING'
       : player.overheated
         ? 'OVERHEATED'
         : weaponId === 'COMBAT_SHIELD'
-          ? 'FRONTAL GUARD'
+          ? 'GUARD UP'
           : weaponId === 'KNIFE' || weaponId === 'GOD_FIST'
-            ? 'MELEE READY'
-            : 'READY';
-    this.elements.reloadHint.textContent = player.overheated
+            ? 'MELEE'
+            : (player.ammo ?? 0) <= 0 && !noMagazine
+              ? 'EMPTY'
+              : 'READY';
+    this.el['reload-hint'].textContent = player.overheated
       ? 'COOLING DOWN'
       : player.reloading
-        ? 'MAGAZINE INCOMING'
+        ? 'MAGAZINE INBOUND'
         : noMagazine
           ? 'Q WEAPON WHEEL'
-          : 'R RELOAD · Q WHEEL';
+          : 'R RELOAD';
 
     if (!player.alive && player.respawnAt) {
-      this.elements.death.hidden = false;
-      this.elements.pause.hidden = true;
+      this.el['death-panel'].hidden = false;
+      this.el['pause-panel'].hidden = true;
       const remaining = Math.max(0, player.respawnAt - estimatedServerNow) / 1_000;
-      this.elements.countdown.textContent = remaining.toFixed(1);
+      this.el['respawn-countdown'].textContent = remaining.toFixed(1);
     } else if (player.alive) {
-      this.elements.death.hidden = true;
+      this.el['death-panel'].hidden = true;
     }
+  }
+
+  flashDamage() {
+    const vignette = this.el['damage-vignette'];
+    vignette.classList.add('is-active');
+    window.clearTimeout(this.damageTimer);
+    this.damageTimer = window.setTimeout(() => vignette.classList.remove('is-active'), 140);
+  }
+
+  setFps(value) {
+    this.fps = value;
+    this.el['fps-value'].textContent = `${Math.round(value)} FPS`;
+    this.el['fps-value'].hidden = !this.settings.showFps;
   }
 
   updateScoreboard(players, localId = this.selfId) {
@@ -778,22 +956,20 @@ export class GameUI {
     this.latestScoreboard = { players, localId };
     if (!this.scoreboardOpen) return;
 
-    const sorted = [...players].sort((left, right) => right.kills - left.kills || left.deaths - right.deaths || left.name.localeCompare(right.name));
+    const sorted = [...players].sort((left, right) => right.kills - left.kills
+      || left.deaths - right.deaths || left.name.localeCompare(right.name));
     const signature = sorted.map((player) => [
-      player.id,
-      player.kills,
-      player.deaths,
-      player.alive,
-      player.connected,
-      player.isBot,
+      player.id, player.kills, player.deaths, player.alive, player.connected, player.isBot,
     ].join(':')).join('|');
     if (signature === this.scoreboardSignature) return;
     this.scoreboardSignature = signature;
-    this.elements.scoreboardBody.replaceChildren();
 
+    const body = this.el['scoreboard-body'];
+    body.replaceChildren();
     sorted.forEach((player, index) => {
       const row = document.createElement('div');
       row.className = `scoreboard-row${player.id === localId ? ' is-self' : ''}`;
+
       const identity = document.createElement('div');
       identity.className = 'scoreboard-player';
       const rank = document.createElement('span');
@@ -807,10 +983,10 @@ export class GameUI {
       name.textContent = player.name;
       identity.append(rank, swatch, name);
       if (player.isBot) {
-        const botTag = document.createElement('span');
-        botTag.className = 'scoreboard-bot-tag';
-        botTag.textContent = '[BOT]';
-        identity.append(botTag);
+        const tag = document.createElement('span');
+        tag.className = 'scoreboard-bot-tag';
+        tag.textContent = 'BOT';
+        identity.append(tag);
       }
 
       const kills = document.createElement('span');
@@ -821,8 +997,19 @@ export class GameUI {
       status.className = `scoreboard-status${player.connected === false ? ' is-offline' : player.alive === false ? ' is-down' : ''}`;
       status.textContent = player.connected === false ? 'OFFLINE' : player.alive === false ? 'DOWN' : 'ACTIVE';
       row.append(identity, kills, deaths, status);
-      this.elements.scoreboardBody.append(row);
+      body.append(row);
     });
+  }
+
+  setScoreboard(open) {
+    this.scoreboardOpen = Boolean(open);
+    this.el['scoreboard-panel'].hidden = !this.scoreboardOpen;
+    if (this.scoreboardOpen) {
+      this.scoreboardSignature = null;
+      if (this.latestScoreboard) {
+        this.updateScoreboard(this.latestScoreboard.players, this.latestScoreboard.localId);
+      }
+    }
   }
 
   addKillFeed(entry, localId = this.selfId) {
@@ -845,54 +1032,55 @@ export class GameUI {
       row.append(tag);
     }
 
-    this.elements.killFeed.prepend(row);
-    while (this.elements.killFeed.children.length > 6) this.elements.killFeed.lastElementChild.remove();
-    const timer = window.setTimeout(() => row.classList.add('is-fading'), 3_500);
+    this.el['kill-feed'].prepend(row);
+    while (this.el['kill-feed'].children.length > 6) this.el['kill-feed'].lastElementChild.remove();
+    const fadeTimer = window.setTimeout(() => row.classList.add('is-fading'), 3_400);
     const removeTimer = window.setTimeout(() => {
       row.remove();
       this.feedTimers.delete(row);
-    }, 4_000);
-    this.feedTimers.set(row, [timer, removeTimer]);
+    }, 3_900);
+    this.feedTimers.set(row, [fadeTimer, removeTimer]);
   }
 
   showHitMarker(hit) {
     if (!hit?.hit) return;
-    const crosshair = this.elements.crosshair;
+    const crosshair = this.el.crosshair;
     crosshair.classList.remove('is-hit', 'is-kill', 'is-headshot');
     if (hit.killed) crosshair.classList.add('is-kill');
     else crosshair.classList.add('is-hit');
     if (hit.headshot) crosshair.classList.add('is-headshot');
     window.clearTimeout(this.hitMarkerTimer);
-    this.hitMarkerTimer = window.setTimeout(() => crosshair.classList.remove('is-hit', 'is-kill', 'is-headshot'), 180);
+    this.hitMarkerTimer = window.setTimeout(
+      () => crosshair.classList.remove('is-hit', 'is-kill', 'is-headshot'),
+      180,
+    );
   }
 
   showGameEnd(data, localId = this.selfId) {
-    const winner = data?.winner ?? { name: 'Unknown operator', kills: 30 };
-    this.elements.end.hidden = false;
-    this.elements.pause.hidden = true;
-    this.elements.death.hidden = true;
-    this.elements.scoreboard.hidden = true;
+    const winner = data?.winner ?? null;
+    this.el['end-panel'].hidden = false;
+    this.el['pause-panel'].hidden = true;
+    this.el['death-panel'].hidden = true;
+    this.el['scoreboard-panel'].hidden = true;
     this.scoreboardOpen = false;
-    this.elements.winner.textContent = winner.name;
-    this.elements.winnerSummary.textContent = `${winner.kills} eliminations secured${winner.id === localId ? ' — that was you.' : '.'}`;
-    this.renderEndScoreboard(data.scoreboard ?? []);
 
-    const mode = data?.mode ?? this.room?.mode;
-    const solo = mode === ROOM_MODES.SOLO_VS_BOTS;
+    this.el['end-kicker'].textContent = data?.reason ? 'MATCH STOPPED' : 'MATCH COMPLETE';
+    this.el['winner-name'].textContent = winner?.name ?? 'NO CONTEST';
+    this.el['winner-summary'].textContent = winner
+      ? `${winner.kills ?? 0} eliminations secured${winner.id === localId ? ' — that was you.' : '.'}`
+      : data?.reason ?? 'The match ended without a winner.';
+    this.renderEndScoreboard(data?.scoreboard ?? []);
+
+    const solo = (data?.mode ?? this.room?.mode) === ROOM_MODES.SOLO_VS_BOTS;
     const isHost = this.room?.hostId === localId;
-    this.setEndActionLabel(solo ? 'REDEPLOY' : 'RETURN TO LOBBY');
-    this.elements.returnLobby.hidden = !isHost;
-    this.elements.endWaiting.hidden = isHost;
-  }
-
-  setEndActionLabel(label) {
-    const first = this.elements.returnLobby.firstChild;
-    if (first?.nodeType === Node.TEXT_NODE) first.textContent = `${label} `;
-    else this.elements.returnLobby.prepend(document.createTextNode(`${label} `));
+    this.el['return-lobby-button'].textContent = solo ? 'REDEPLOY' : 'RETURN TO LOBBY';
+    this.el['return-lobby-button'].hidden = !isHost;
+    this.el['end-waiting'].hidden = isHost;
   }
 
   renderEndScoreboard(players) {
-    this.elements.endScoreboard.replaceChildren();
+    const container = this.el['end-scoreboard'];
+    container.replaceChildren();
     [...players].slice(0, 5).forEach((player, index) => {
       const row = document.createElement('div');
       row.className = 'end-score-row';
@@ -904,53 +1092,168 @@ export class GameUI {
       const deaths = document.createElement('span');
       deaths.textContent = `${player.deaths} D`;
       row.append(name, kills, deaths);
-      this.elements.endScoreboard.append(row);
+      container.append(row);
     });
   }
 
+  /* ───────────────────────────── weapon wheel ───────────────────────────── */
+
+  openWeaponWheel(bundleId = this.selectedBundleId, currentWeaponId = null) {
+    const bundle = BUNDLE_BY_ID[bundleId] ?? BUNDLE_BY_ID[DEFAULT_BUNDLE_ID];
+    this.wheelWeapons = bundle.weapons;
+    this.activeWheelWeaponId = currentWeaponId ?? bundle.weapons[0]?.id ?? null;
+    this.selectedWheelWeaponId = this.activeWheelWeaponId;
+    const container = this.el['weapon-wheel-options'];
+    container.replaceChildren();
+    for (const weapon of this.wheelWeapons) {
+      const option = document.createElement('div');
+      option.className = 'wheel-option';
+      option.dataset.weaponId = weapon.id;
+      option.classList.toggle('is-current', weapon.id === this.activeWheelWeaponId);
+      const glyph = document.createElement('span');
+      glyph.className = 'glyph';
+      glyph.textContent = weapon.icon;
+      const name = document.createElement('span');
+      name.textContent = weapon.name;
+      option.append(glyph, name);
+      container.append(option);
+    }
+    this.el['wheel-center-name'].textContent = WEAPON_PRESENTATION[this.activeWheelWeaponId]?.name ?? '—';
+    this.el['wheel-center-state'].textContent = 'ACTIVE';
+    this.el['weapon-wheel'].hidden = false;
+    this.paintWheelSelection();
+  }
+
+  paintWheelSelection() {
+    for (const option of this.el['weapon-wheel-options'].children) {
+      const selected = option.dataset.weaponId === this.selectedWheelWeaponId;
+      option.classList.toggle('is-selected', selected);
+      if (selected) {
+        this.el['wheel-center-name'].textContent = WEAPON_PRESENTATION[option.dataset.weaponId]?.name ?? '—';
+        this.el['wheel-center-state'].textContent = option.dataset.weaponId === this.activeWheelWeaponId
+          ? 'ACTIVE'
+          : 'SELECT';
+      }
+    }
+  }
+
+  selectWeaponByDirection(x, y) {
+    if (!this.wheelWeapons.length) return;
+    const distance = Math.hypot(x, y);
+    if (distance < 18) return;
+    const angle = Math.atan2(y, x);
+    const normalized = (angle + Math.PI * 2.5) % (Math.PI * 2);
+    const index = Math.round((normalized / (Math.PI * 2)) * this.wheelWeapons.length) % this.wheelWeapons.length;
+    const weapon = this.wheelWeapons[index];
+    if (!weapon || weapon.id === this.selectedWheelWeaponId) return;
+    this.selectedWheelWeaponId = weapon.id;
+    this.paintWheelSelection();
+  }
+
+  closeWeaponWheel() {
+    this.el['weapon-wheel'].hidden = true;
+    const selected = this.selectedWheelWeaponId;
+    this.wheelWeapons = [];
+    this.selectedWheelWeaponId = null;
+    this.activeWheelWeaponId = null;
+    return selected;
+  }
+
+  /* ─────────────────────────── messaging ──────────────────────────────── */
+
+  activeErrorTarget() {
+    if (!this.el['lobby-shell'].hidden) return this.el['room-error'];
+    if (this.screen === 'rooms') return this.el['rooms-error'];
+    if (this.screen === 'inventory') return this.el['inventory-error'];
+    if (this.screen === 'profile') return this.el['profile-message'];
+    if (!this.el.onboarding.hidden && !this.el['onboarding-loadout'].hidden) return this.el['bundle-error'];
+    if (!this.el.onboarding.hidden) return this.el['callsign-error'];
+    return this.el['play-error'];
+  }
+
   showError(message) {
-    const target = !this.elements.lobby.hidden
-      ? this.elements.roomError
-      : !this.elements.bundleScreen.hidden
-        ? this.elements.bundleError
-        : !this.elements.callsignScreen.hidden
-          ? this.elements.callsignError
-          : this.elements.homeError;
-    this.clearError();
+    this.clearAction();
+    const target = this.activeErrorTarget();
+    this.clearErrors();
     target.textContent = String(message || 'Something went wrong. Please try again.');
+    target.className = 'inline-message is-error';
     target.hidden = false;
   }
 
-  clearError() {
-    this.elements.callsignError.hidden = true;
-    this.elements.bundleError.hidden = true;
-    this.elements.homeError.hidden = true;
-    this.elements.roomError.hidden = true;
+  clearErrors() {
+    for (const id of ['play-error', 'rooms-error', 'inventory-error', 'room-error', 'callsign-error', 'bundle-error']) {
+      const node = this.el[id];
+      if (!node) continue;
+      node.hidden = true;
+      node.textContent = '';
+    }
   }
 
   showToast(message) {
-    this.elements.toast.textContent = String(message);
-    this.elements.toast.classList.add('is-visible');
+    this.el.toast.textContent = String(message);
+    this.el.toast.classList.add('is-visible');
     window.clearTimeout(this.toastTimeout);
-    this.toastTimeout = window.setTimeout(() => this.elements.toast.classList.remove('is-visible'), 3_000);
+    this.toastTimeout = window.setTimeout(() => this.el.toast.classList.remove('is-visible'), 3_200);
   }
 
   showWebGLWarning() {
-    this.elements.webglWarning.hidden = false;
+    this.el['webgl-warning'].hidden = false;
+  }
+
+  setLoadingProgress(progress) {
+    if (!progress) return;
+    const percent = Math.min(100, Math.round((progress.loaded / Math.max(1, progress.total)) * 100));
+    this.el['loading-label'].textContent = progress.label ?? 'LOADING';
+    this.el['loading-fill'].style.width = `${percent}%`;
+  }
+
+  finishLoading() {
+    this.el['loading-overlay'].classList.add('is-done');
+    window.setTimeout(() => { this.el['loading-overlay'].hidden = true; }, 500);
   }
 
   async copyRoomCode() {
     const code = this.room?.code;
     if (!code) return;
+    const url = `${window.location.origin}${window.location.pathname}?room=${code}`;
     try {
-      // Copy the full room URL
-      const roomUrl = `${window.location.origin}?room=${code}`;
-      await navigator.clipboard.writeText(roomUrl);
-      this.elements.copyCode.innerHTML = 'COPIED <span>✓</span>';
-      window.setTimeout(() => { this.elements.copyCode.innerHTML = 'COPY <span>▣</span>'; }, 1_500);
-      this.showToast(`Room link copied! Share: ${roomUrl}`);
+      await navigator.clipboard.writeText(url);
+      this.showToast(`Room link copied — ${url}`);
     } catch {
       this.showToast(`Room code: ${code}`);
     }
+  }
+
+  /* ─────────────────────────────── identity ───────────────────────────── */
+
+  get playerName() {
+    return this.el['player-name'].value.trim().slice(0, 16);
+  }
+
+  get profileId() {
+    return this.profile.profileId;
+  }
+
+  get bundleId() {
+    return this.selectedBundleId;
+  }
+
+  loadCallsign() {
+    const saved = localStorage.getItem('fps-gods-callsign');
+    if (saved) this.el['player-name'].value = saved.slice(0, 16);
+  }
+
+  setHandlers(handlers) {
+    this.handlers = { ...this.handlers, ...handlers };
+  }
+
+  dispose() {
+    this.stopRoomPolling();
+    window.clearTimeout(this.actionTimer);
+    window.clearTimeout(this.toastTimeout);
+    window.clearTimeout(this.hitMarkerTimer);
+    window.clearTimeout(this.damageTimer);
+    for (const timers of this.feedTimers.values()) timers.forEach((timer) => window.clearTimeout(timer));
+    this.feedTimers.clear();
   }
 }

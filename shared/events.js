@@ -3,6 +3,10 @@ export const EVENTS = Object.freeze({
   CREATE_ROOM: 'CREATE_ROOM',
   JOIN_ROOM: 'JOIN_ROOM',
   PLAY_NOW: 'PLAY_NOW',
+  // Read-only lobby browser. The server answers with public multiplayer rooms
+  // only; solo bot rooms and resume tokens are never part of that payload.
+  LIST_ROOMS: 'LIST_ROOMS',
+  ROOM_LIST: 'ROOM_LIST',
   ROOM_STATE: 'ROOM_STATE',
   ROOM_ERROR: 'ROOM_ERROR',
   ROOM_SESSION: 'ROOM_SESSION',

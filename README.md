@@ -2,6 +2,8 @@
 
 A browser-based, server-authoritative 3D free-for-all FPS built with vanilla JavaScript, Three.js, Vite, Express, and Socket.IO. Play instantly against server-driven bots or create/join a live multiplayer room. Choose one of four weapon bundles, use the supplied GLB weapon models, and race to 30 eliminations.
 
+Every operator on screen is the supplied rigged character (`character.glb`, twelve Mixamo clips) wearing procedurally generated tactical gear, holding one of the seven supplied weapon GLBs. The menu backdrop is assembled from the supplied modular environment kit.
+
 ## Quick start
 
 **Requirements:** Node.js 20.19+ (Node 22+ recommended) and npm.
@@ -20,10 +22,23 @@ npm run build   # production client into dist/client
 
 ## How to play
 
-1. Enter a callsign and select a weapon bundle. GODS TIER unlocks at 30 server-recorded lifetime kills.
-2. Choose **PLAY NOW** for a solo bot match, **CREATE ROOM** for a private lobby, or **JOIN ROOM** with a six-character code.
+1. Pick a callsign and a weapon bundle on the first-run screen. GODS TIER unlocks at 30 server-recorded lifetime kills.
+2. **PLAY** → `PLAY NOW` drops you into a solo bot match, `CREATE ROOM` opens a private lobby, and the code field joins an existing room. **ROOMS** lists every joinable lobby the server is hosting right now.
 3. In a multiplayer lobby, every connected player marks ready; the host starts when all players are ready.
-4. Click **Enter Arena** and allow pointer lock. First player to 30 match eliminations wins.
+4. Click the arena to capture the mouse and fight. First player to 30 match eliminations wins.
+
+### Screens
+
+| Screen | What it does |
+| --- | --- |
+| **PLAY** | Deploy solo, create a room, or join with a six-character code |
+| **ROOMS** | Live, server-provided lobby browser — refreshes every 5 s, shows host, occupancy, mode and state |
+| **INVENTORY** | The four bundles with their real weapon models, roles and asset files; equipping is saved locally and sent with your next join |
+| **STORE** | GODS TIER progress, measured from server-verified lifetime eliminations. It is not a checkout: currency and purchases are a later phase, and the screen says so |
+| **PROFILE** | Callsign, profile key, lifetime eliminations, unlock progress and the socket this client is dialling |
+| **SETTINGS** | Sensitivity, FOV, volume, quality, crosshair style, invert-Y, FPS counter. Stored in this browser only |
+
+Gameplay remains server-authoritative everywhere: the client sends input, trigger pulls, reloads and weapon switches, and draws whatever the server reports back.
 
 | Input | Action |
 | --- | --- |
@@ -61,7 +76,9 @@ The seven supplied GLBs are loaded with Three.js `GLTFLoader` and shared by firs
 | LMG / Railgun / Minigun | `lmg.glb` |
 | Rocket | `rocket.glb` |
 
-The local view shows the active gun and procedural hands at the bottom-right of the camera. Moving bobs the weapon; `R` animates reload; accepted shots flash at the muzzle; and weapon switches transition smoothly. Remote operators carry the matching room-synchronized weapon. Tracers use cyan for RUSHER, purple for GHOST, orange for HEAVY, and gold for GODS TIER. Player characters are procedural Three.js primitives with faces and armor details; no character GLBs are used.
+The local view shows the active gun and procedural hands at the bottom-right of the camera. Moving bobs the weapon; `R` animates reload; accepted shots flash at the muzzle; and weapon switches transition smoothly. Remote operators carry the matching room-synchronized weapon. Tracers use cyan for RUSHER, purple for GHOST, orange for HEAVY, and gold for GODS TIER.
+
+Operators are the real asset: `character.glb` is animated by clips that are chosen by measurement, not by name (all twelve are called `mixamo.com`). Each clip is sampled on a private mixer to derive its ground speed, vertical travel and collapse depth, then assigned to idle / walk / run / jump / death. Horizontal root motion is stripped before playback so a server-positioned operator cannot drift out of its collision capsule, and the local travel speed drives the playback rate so the feet keep up. Helmets, visors, chest plates, packs, shoulder pads, knee pads and boots are built procedurally and parented to the actual bones; the weapon sits in a socket on the right hand.
 
 ## Multiplayer and reconnection
 
@@ -81,13 +98,20 @@ The local view shows the active gun and procedural hands at the bottom-right of 
 ```text
 client/
   assets/weapons/        Seven supplied GLB weapon assets
-  index.html             Callsign, bundles, room menu, HUD, and overlays
-  main.js                Three.js renderer, controls, and app orchestration
+  index.html             Menu shell, screens, lobby, HUD, and overlays
+  main.js                Renderer, input, settings/audio wiring, app orchestration
   network.js             Socket.IO client adapter and room-session resume
-  player.js              Input, interpolation, procedural operators, remote guns
+  player.js              Mouse/keyboard input, snapshot interpolation, remote operators
+  animation.js           Clip measurement, state classification, CharacterRig
+  operator.js            Procedural tactical gear bound to the character's bones
+  MenuStage.js           Three.js menu backdrop built from the environment kit
+  AssetManager.js        One-shot GLB loading with progress, cloning and disposal
   world.js               Arena visuals and destructible cover presentation
   weapons.js             GLTFLoader rigs, hands, animations, tracers, and smoke
-  ui.js                  Bundle selection, lobby, scoreboard, and HUD
+  settings.js            Local preferences with clamping and persistence
+  audio.js               Synthesised weapon/UI cues (Web Audio, no asset files)
+  weaponAssets.js        Vite `?url` imports for the seven weapon GLBs
+  ui.js                  Screens, room browser, lobby, HUD, scoreboard, wheel
 server/
   index.js               Express/Socket.IO server and 20 Hz simulation loop
   rooms.js               Room lifecycle, recovery tokens, and host migration
@@ -99,7 +123,24 @@ shared/
   bundles.js             Client-safe bundle presentation and weapon mapping data
   events.js              Shared Socket.IO event contract
   gameConfig.js          Map and player constants
+  weaponModels.js        Weapon id -> GLB file and measured real-world length
 ```
+
+## Tests
+
+```bash
+npm test
+```
+
+108 tests run under `node --test`. Beyond the server room lifecycle and combat rules, the suite covers the things a build cannot:
+
+- `test/ui.test.js` boots the real `client/index.html` in jsdom and drives every screen, button and handler (including a check that no button in the shell is unbound and no duplicate element id exists).
+- `test/animation-state.test.js` loads `character.glb` and proves idle / walk / run / jump / death are recognised and that root motion is stripped.
+- `test/menu-stage.test.js` builds the menu stage from the real environment kit and character, and checks the operator is dressed on its bones, faces the camera and is inside the frame.
+- `test/viewmodel.test.js` checks the first-person weapon sits in front of the near plane for every weapon, that tracers expire and that smoke clouds are disposed.
+- `test/client-boot.test.js` and `test/client-match.test.js` boot `client/main.js` in jsdom — the second one against a live server, and asserts the HUD, room code, ammo, health and scoreboard come from real server ticks.
+
+WebGL rendering and pointer-lock behaviour cannot be exercised headlessly; those remain manual checks.
 
 ## Assets
 
@@ -107,7 +148,7 @@ Static GLB assets (maps, characters, animations, and weapon models) are provided
 
 - **Map** (`/assets/map/arena_map.glb`)
 - **Character** (`/assets/characters/character.glb`)
-- **Animations** (`/assets/animations/animations.glb`)
+- **Animations** — already embedded in `character.glb`; the separate `public/assets/animations/*.glb` files are byte-identical duplicates or cumulative subsets and are not downloaded at runtime
 - **Weapons** (`/assets/weapons/knife.glb`, `lmg.glb`, `pistol.glb`, `rifle.glb`, `rocket.glb`, `shotgun.glb`, `smg.glb`, `sniper.glb`)
 ## Deployment
 

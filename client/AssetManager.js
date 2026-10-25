@@ -1,54 +1,56 @@
 import * as THREE from 'three';
+import { buildAnimationSet, CharacterRig } from './animation.js';
 
-// Asset path configuration - pointing to web root /assets/...
+// Static GLB assets, served from the Vite `public/` directory so the paths are
+// identical in development and in the production build.
+//
+// `map/arena_map.glb` is a modular sci-fi environment kit (floors, walls,
+// columns, props) rather than a pre-assembled level; `MenuStage` instances those
+// modules. `characters/character.glb` already contains the full 12-clip
+// animation set, so the separate `animations/*.glb` files (which are byte
+// duplicates or subsets) are intentionally not downloaded at runtime.
 export const ASSET_PATHS = Object.freeze({
-  map: '/assets/map/arena_map.glb',
   character: '/assets/characters/character.glb',
-  animations: '/assets/animations/animations.glb',
-  weapons: {
-    rifle: '/assets/weapons/rifle.glb',
-    pistol: '/assets/weapons/pistol.glb',
-    knife: '/assets/weapons/knife.glb',
-    smg: '/assets/weapons/smg.glb',
-    shotgun: '/assets/weapons/shotgun.glb',
-    sniper: '/assets/weapons/sniper.glb',
-    lmg: '/assets/weapons/lmg.glb',
-    rocket: '/assets/weapons/rocket.glb',
-  },
+  map: '/assets/map/arena_map.glb',
+  mapFallback: '/assets/map/map-assets.glb',
 });
 
-// Standard animation states mapped to expected motion types
-export const ANIMATION_MAP = Object.freeze({
-  idle: 'Idle',
-  walk: 'Walk',
-  run: 'Run',
-  shoot: 'Shoot',
-  reload: 'Reload',
-  death: 'Death',
-  jump: 'Jump',
-  crouch: 'Crouch',
-  pose: 'Pose',
-  tactical: 'Tactical',
-  aim: 'Aim',
+export const KIT_MODULES = Object.freeze({
+  floor: 'FloorTile_Basic',
+  floorDouble: 'FloorTile_Double',
+  wall: 'Wall_1',
+  wallWindow: 'Window_Wall_SideA',
+  wallDoor: 'DoorSingle_Wall_SideA',
+  column: 'Column_3',
+  crate: 'Props_Crate',
+  container: 'Props_CrateLong',
+  pod: 'Props_Pod',
+  statue: 'Props_Statue',
+  computer: 'Props_Computer',
+  shelf: 'Props_Shelf',
+  lamp: 'Details_Light',
 });
 
+/**
+ * Loads every GLB the client needs exactly once and hands out cheap clones.
+ *
+ * Failure is reported, never thrown at the render loop: the game is still
+ * playable with procedural operators if the character asset is unavailable, and
+ * the menu stage falls back to a plain backdrop.
+ */
 export class AssetManager {
   constructor() {
-    this.assets = {
-      map: null,
-      character: null,
-      animations: null,
-      weapons: {},
-    };
-    this.animationMixer = null;
-    this.animations = {};
-    this.mixers = new Set();
-    this.loaded = false;
-    this.status = { requested: Object.keys(ASSET_PATHS), loaded: [], failed: [] };
-    this.glbLoader = null;
-    this.skeletonClone = null;
+    this.assets = { character: null, map: null };
+    this.characterGltf = null;
+    this.animationSet = null;
+    this.kitModules = new Map();
+    this.disposables = new Set();
+    this.status = { requested: ['character', 'map'], loaded: [], failed: [] };
+    this.progress = { loaded: 0, total: 2, label: 'CONNECTING' };
+    this.listeners = new Set();
     this.initialized = false;
     this.loadPromise = null;
+    this.glbLoader = null;
   }
 
   async init() {
@@ -59,187 +61,99 @@ export class AssetManager {
   }
 
   async loadAll() {
+    this.setProgress(0, 'LOADING ARMORY');
     try {
-      const [{ GLTFLoader }, skeletonModule] = await Promise.all([
-        import('three/addons/loaders/GLTFLoader.js'),
-        import('three/addons/utils/SkeletonUtils.js').catch(() => null),
-      ]);
+      const { GLTFLoader } = await import('three/addons/loaders/GLTFLoader.js');
       this.glbLoader = new GLTFLoader();
-      this.skeletonClone = skeletonModule?.clone ?? null;
     } catch (error) {
-      console.error('[AssetManager] Failed to load Three.js loader modules:', error);
+      console.error('[FPS GODS] Could not initialise the GLB loader:', error);
+      this.status.failed.push('character', 'map');
+      this.setProgress(0, 'ASSET LOADER UNAVAILABLE');
+      return false;
     }
 
-    if (!this.glbLoader) return false;
-
-    await Promise.allSettled([
-      this.loadCharacter(),
-      this.loadMap(),
-      this.loadAnimations(),
-    ]);
-
-    this.loaded = Boolean(this.assets.character || this.assets.animations);
-    return this.loaded;
+    // The character is the only gameplay-critical asset, so it is loaded first
+    // and its animation set is measured before the menu stage needs it.
+    await this.loadCharacter();
+    this.setProgress(this.status.loaded.includes('character') ? 1 : 0, 'BUILDING ANIMATION SET');
+    await this.loadMap();
+    this.setProgress(2, this.ready ? 'ASSETS READY' : 'RUNNING WITH FALLBACKS');
+    return this.ready;
   }
 
   async loadCharacter() {
     try {
-      const glb = await this.glbLoader.loadAsync(ASSET_PATHS.character);
-      this.assets.character = glb.scene;
-      this.setupCharacterMaterials(this.assets.character);
-      if (glb.animations?.length) {
-        this.extractAnimations(glb);
-      }
+      const gltf = await this.glbLoader.loadAsync(ASSET_PATHS.character);
+      this.characterGltf = gltf;
+      this.assets.character = gltf.scene;
+      this.trackSceneResources(gltf.scene);
+      this.animationSet = buildAnimationSet(gltf.scene, gltf.animations ?? []);
+      for (const warning of this.animationSet.warnings) console.warn(`[FPS GODS] ${warning}`);
       this.status.loaded.push('character');
-      console.log('[AssetManager] Character loaded successfully');
+      console.info(
+        `[FPS GODS] Operator ready: ${gltf.animations?.length ?? 0} clips -> `
+        + `${Object.keys(this.animationSet.states).join(', ')}`,
+      );
     } catch (error) {
-      console.error('[AssetManager] Failed to load character:', error);
+      console.error('[FPS GODS] Failed to load the operator model:', error);
       this.assets.character = null;
+      this.animationSet = null;
       this.status.failed.push('character');
     }
   }
 
   async loadMap() {
-    try {
-      let glb;
+    for (const path of [ASSET_PATHS.map, ASSET_PATHS.mapFallback]) {
       try {
-        glb = await this.glbLoader.loadAsync(ASSET_PATHS.map);
-      } catch {
-        glb = await this.glbLoader.loadAsync('/assets/map/map-assets.glb');
+        const gltf = await this.glbLoader.loadAsync(path);
+        this.assets.map = gltf.scene;
+        this.trackSceneResources(gltf.scene);
+        this.indexKitModules(gltf.scene);
+        this.status.loaded.push('map');
+        console.info(`[FPS GODS] Environment kit ready: ${this.kitModules.size} modules from ${path}`);
+        return;
+      } catch (error) {
+        console.warn(`[FPS GODS] Environment kit '${path}' unavailable:`, error?.message ?? error);
       }
-      this.assets.map = glb.scene;
-      this.setupMapMaterials(this.assets.map);
-      this.status.loaded.push('map');
-      console.log('[AssetManager] Map loaded successfully');
-    } catch (error) {
-      console.error('[AssetManager] Failed to load map:', error);
-      this.assets.map = null;
-      this.status.failed.push('map');
     }
+    this.status.failed.push('map');
   }
 
-  async loadAnimations() {
-    try {
-      let glb;
-      const animationCandidates = [
-        ASSET_PATHS.animations,
-        '/assets/animations/Animation_5.glb',
-        '/assets/animations/Animation_4.glb',
-        '/assets/animations/Animation_3.glb',
-        '/assets/animations/Animation_2.glb',
-        '/assets/animations/Animation_1.glb',
-      ];
-      for (const candidate of animationCandidates) {
-        try {
-          glb = await this.glbLoader.loadAsync(candidate);
-          if (glb?.animations?.length) break;
-        } catch {
-          // Try next candidate
-        }
-      }
-
-      if (glb) {
-        this.assets.animations = glb;
-        this.extractAnimations(glb);
-        if (!this.assets.character && glb.scene) {
-          this.assets.character = glb.scene;
-          this.setupCharacterMaterials(this.assets.character);
-        }
-      }
-      this.status.loaded.push('animations');
-      console.log('[AssetManager] Animations loaded successfully');
-    } catch (error) {
-      console.error('[AssetManager] Failed to load animations:', error);
-      this.assets.animations = null;
-      this.status.failed.push('animations');
-    }
-  }
-
-  extractAnimations(glb) {
-    if (!glb.animations || !glb.animations.length) {
-      return;
-    }
-
-    if (!this.animationMixer && glb.scene) {
-      this.animationMixer = new THREE.AnimationMixer(glb.scene);
-      this.registerMixer(this.animationMixer);
-    }
-
-    // Index-based animation mapping for Mixamo animation files:
-    // 0: idle stance, 1: walk, 2: shoot, 3: reload, 4: death, 5: run, 6: sprint,
-    // 7: pose / tactical, 8: aim, 9: strafe / walk_back, 10: shoot_alt, 11: jump
-    const clips = glb.animations;
-    const clipMap = {
-      idle: clips[0],
-      walk: clips[1] ?? clips[0],
-      shoot: clips[2] ?? clips[0],
-      reload: clips[3] ?? clips[0],
-      death: clips[4] ?? clips[0],
-      run: clips[5] ?? clips[1] ?? clips[0],
-      sprint: clips[6] ?? clips[5] ?? clips[0],
-      pose: clips[7] ?? clips[0],
-      tactical: clips[7] ?? clips[0],
-      aim: clips[8] ?? clips[0],
-      strafe: clips[9] ?? clips[1] ?? clips[0],
-      crouch: clips[5] ?? clips[0],
-      jump: clips[11] ?? clips[0],
-    };
-
-    for (const [key, clip] of Object.entries(clipMap)) {
-      if (clip) {
-        this.animations[key] = clip;
-        this.animations[key.toLowerCase()] = clip;
-      }
-    }
-
-    clips.forEach((clip, index) => {
-      this.animations[clip.name] = clip;
-      this.animations[`clip_${index}`] = clip;
-      const lowerName = clip.name.toLowerCase();
-      for (const [state, trackName] of Object.entries(ANIMATION_MAP)) {
-        if (lowerName.includes(trackName.toLowerCase())) {
-          this.animations[state.toLowerCase()] = clip;
-        }
-      }
-    });
-
-    console.log('[AssetManager] Available animations:', Object.keys(this.animations));
-  }
-
-  setupMapMaterials(scene) {
-    scene.traverse((child) => {
-      if (child.isMesh) {
-        child.receiveShadow = true;
-        child.castShadow = false;
-        if (child.material) {
-          const mats = Array.isArray(child.material) ? child.material : [child.material];
-          mats.forEach((mat) => {
-            if (mat && mat.emissive) {
-              mat.emissive.setHex(0x00f0ff);
-              mat.emissiveIntensity = 0.1;
-            }
-          });
-        }
-      }
+  /** Record geometry/material ownership so `dispose()` can release GPU memory. */
+  trackSceneResources(scene) {
+    scene.traverse((node) => {
+      if (!node.isMesh) return;
+      if (node.geometry) this.disposables.add(node.geometry);
+      const materials = Array.isArray(node.material) ? node.material : [node.material];
+      for (const material of materials) if (material) this.disposables.add(material);
     });
   }
 
-  setupCharacterMaterials(scene) {
-    scene.traverse((child) => {
-      if (child.isMesh) {
-        child.castShadow = true;
-        child.receiveShadow = true;
-        if (child.material) {
-          const mats = Array.isArray(child.material) ? child.material : [child.material];
-          mats.forEach((mat) => {
-            if (mat && mat.emissive) {
-              mat.emissive.setHex(0x00f0ff);
-              mat.emissiveIntensity = 0.08;
-            }
-          });
-        }
-      }
-    });
+  indexKitModules(scene) {
+    this.kitModules.clear();
+    for (const child of scene.children) {
+      // Kit parts are named `<Category>_<Variant>`; the GLTFLoader turns ':' and
+      // '.' into nothing for node names, so match case-insensitively too.
+      this.kitModules.set(child.name, child);
+    }
+  }
+
+  /** Clone one prefab module from the environment kit, or null when missing. */
+  createKitModule(name) {
+    const source = this.kitModules.get(name);
+    if (!source) return null;
+    const clone = source.clone(true);
+    clone.position.set(0, 0, 0);
+    clone.rotation.set(0, 0, 0);
+    return clone;
+  }
+
+  hasKitModule(name) {
+    return this.kitModules.has(name);
+  }
+
+  get kitReady() {
+    return this.kitModules.size > 0;
   }
 
   getMap() {
@@ -250,112 +164,54 @@ export class AssetManager {
     return this.assets.character;
   }
 
-  /**
-   * Clone the character model with proper skeletal rebinding for animation playback.
-   */
-  cloneCharacter() {
-    const source = this.assets.character ?? this.assets.animations?.scene;
-    if (!source) return null;
-    if (this.skeletonClone) {
-      return this.skeletonClone(source);
+  hasCharacter() {
+    return Boolean(this.assets.character);
+  }
+
+  get animations() {
+    return this.animationSet;
+  }
+
+  /** A fresh skinned clone with its own mixer, actions and materials. */
+  createCharacterRig(options = {}) {
+    if (!this.assets.character || !this.animationSet) return null;
+    try {
+      return new CharacterRig(this.assets.character, this.animationSet, options);
+    } catch (error) {
+      console.error('[FPS GODS] Could not instantiate an operator rig:', error);
+      return null;
     }
-    return source.clone(true);
-  }
-
-  /**
-   * Create an animated character instance with its own AnimationMixer and animation actions.
-   */
-  createCharacterInstance() {
-    const mesh = this.cloneCharacter();
-    if (!mesh) return null;
-
-    const mixer = new THREE.AnimationMixer(mesh);
-    this.registerMixer(mixer);
-
-    const actions = {};
-    for (const [name, clip] of Object.entries(this.animations)) {
-      if (clip) {
-        actions[name] = mixer.clipAction(clip);
-      }
-    }
-
-    let currentAction = null;
-    const playAnimation = (state, { loop = true, crossFade = 0.2, clamp = false } = {}) => {
-      const clip = this.getAnimation(state);
-      if (!clip) return null;
-      const nextAction = mixer.clipAction(clip);
-      if (clamp) {
-        nextAction.loop = THREE.LoopOnce;
-        nextAction.clampWhenFinished = true;
-      } else {
-        nextAction.loop = loop ? THREE.LoopRepeat : THREE.LoopOnce;
-      }
-      if (currentAction && currentAction !== nextAction) {
-        nextAction.reset().fadeIn(crossFade).play();
-        currentAction.fadeOut(crossFade);
-      } else {
-        nextAction.reset().play();
-      }
-      currentAction = nextAction;
-      return nextAction;
-    };
-
-    return {
-      mesh,
-      mixer,
-      actions,
-      playAnimation,
-      getCurrentAction: () => currentAction,
-      dispose: () => {
-        this.unregisterMixer(mixer);
-        mixer.stopAllAction();
-      },
-    };
-  }
-
-  getAnimation(state) {
-    if (!state) return this.animations['idle'] || Object.values(this.animations)[0] || null;
-    const lower = String(state).toLowerCase();
-    if (this.animations[lower]) return this.animations[lower];
-    if (this.animations[state]) return this.animations[state];
-    for (const [key, clip] of Object.entries(this.animations)) {
-      if (key.toLowerCase() === lower || key.toLowerCase().includes(lower)) {
-        return clip;
-      }
-    }
-    return this.animations['idle'] || this.animations['pose'] || Object.values(this.animations)[0] || null;
-  }
-
-  playAnimation(state, mesh, targetMixer = this.animationMixer) {
-    const clip = this.getAnimation(state);
-    if (!clip || !targetMixer) return null;
-    const action = targetMixer.clipAction(clip);
-    action.play();
-    return action;
-  }
-
-  registerMixer(mixer) {
-    if (mixer) this.mixers.add(mixer);
-  }
-
-  unregisterMixer(mixer) {
-    if (mixer) this.mixers.delete(mixer);
-  }
-
-  update(delta) {
-    for (const mixer of this.mixers) {
-      mixer.update(delta);
-    }
-  }
-
-  getAnimationMixer() {
-    return this.animationMixer;
   }
 
   get ready() {
-    return this.loaded;
+    return this.status.loaded.includes('character');
+  }
+
+  get loadFailed() {
+    return this.status.failed;
+  }
+
+  onProgress(listener) {
+    if (typeof listener !== 'function') return () => {};
+    this.listeners.add(listener);
+    listener(this.progress);
+    return () => this.listeners.delete(listener);
+  }
+
+  setProgress(loaded, label) {
+    this.progress = { loaded: Math.min(loaded, this.progress.total), total: this.progress.total, label };
+    for (const listener of this.listeners) listener(this.progress);
+  }
+
+  dispose() {
+    for (const resource of this.disposables) resource.dispose?.();
+    this.disposables.clear();
+    this.kitModules.clear();
+    this.assets.character = null;
+    this.assets.map = null;
+    this.animationSet = null;
   }
 }
 
-// Singleton instance
 export const assetManager = new AssetManager();
+export { THREE };
