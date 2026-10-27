@@ -2,10 +2,15 @@ import { createHash, randomBytes, randomInt } from 'node:crypto';
 import { EVENTS, ROOM_MODES, ROOM_STATES } from '../shared/events.js';
 import { DEFAULT_BUNDLE_ID, BUNDLE_UNLOCK_KILLS } from '../shared/bundles.js';
 import { PLAYER } from '../shared/gameConfig.js';
+import { DEFAULT_MAP_ID, describeMap, isValidMapId, resolveMapId } from '../shared/maps.js';
 import { PlayerProfileStore } from './profiles.js';
 import { getBundleLoadout, isBundleId } from './weaponConfig.js';
 
 export const ROOM_RECONNECT_GRACE_MS = 45_000;
+
+function getMapName(mapId) {
+  return describeMap(mapId).mapName;
+}
 
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
@@ -83,6 +88,10 @@ export class RoomManager {
       code,
       state,
       mode,
+      // The arena is chosen once, here, and is authoritative from then on.
+      // An unknown or missing id falls back to the documented default instead
+      // of failing the request, so older clients keep working.
+      mapId: resolveMapId(selection?.mapId),
       hostId: socket.id,
       createdAt: Date.now(),
       players: new Map(),
@@ -147,6 +156,8 @@ export class RoomManager {
         code: room.code,
         state: room.state,
         mode: room.mode,
+        mapId: room.mapId ?? DEFAULT_MAP_ID,
+        mapName: getMapName(room.mapId),
         players: connected.length,
         seats: joined.length,
         maxPlayers: PLAYER.maxPlayers,
@@ -319,6 +330,36 @@ export class RoomManager {
   }
 
   /**
+   * Host-only arena change while the room is still in its lobby.
+   *
+   * Rejected once a match has started: players are already on a map, and
+   * silently teleporting everyone to different geometry mid-round would make
+   * the client's visuals disagree with the server's collision.
+   */
+  setRoomMap(socket, requestedMapId) {
+    const room = this.getRoomForSocket(socket);
+    if (!room) {
+      this.emitError(socket, 'You are no longer in a room.');
+      return null;
+    }
+    if (room.hostId !== socket.id) {
+      this.emitError(socket, 'Only the host can choose the arena.');
+      return null;
+    }
+    if (room.state !== ROOM_STATES.LOBBY) {
+      this.emitError(socket, 'The arena is locked once the match starts.');
+      return null;
+    }
+    if (!isValidMapId(requestedMapId)) {
+      this.emitError(socket, 'That arena does not exist. Pick one from the list.');
+      return null;
+    }
+    room.mapId = requestedMapId;
+    this.broadcastRoomState(room);
+    return room;
+  }
+
+  /**
    * Start a fresh bot match in an ended SOLO_VS_BOTS room.
    *
    * Solo rooms never contain a second human, so the shared lobby flow can never
@@ -466,6 +507,8 @@ export class RoomManager {
       code: room.code,
       state: room.state,
       mode: room.mode,
+      mapId: room.mapId ?? DEFAULT_MAP_ID,
+      mapName: getMapName(room.mapId),
       hostId: room.hostId,
       players,
       minPlayers: PLAYER.minPlayers,

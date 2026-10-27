@@ -20,6 +20,16 @@ const NO_TRACER = new Set(['PISTOL', 'KNIFE', 'GOD_FIST', 'SMOKE_GRENADE', 'COMB
 const NO_FLASH = new Set(['KNIFE', 'GOD_FIST', 'SMOKE_GRENADE', 'COMBAT_SHIELD']);
 const SWITCH_DURATION_MS = 200;
 const RECOIL_DECAY_PER_SECOND = 9;
+// Where each weapon class sits in first-person view. `reach` multiplies the
+// model length into the distance from the camera, so long guns stay in front of
+// the near plane without swallowing the frame.
+const WEAPON_PROFILES = Object.freeze({
+  light: Object.freeze({ x: 0.2, y: -0.2, reach: 0.4, handX: 0.0, handY: 0.0, handScale: 1 }),
+  heavy: Object.freeze({ x: 0.24, y: -0.26, reach: 0.4, handX: 0.01, handY: -0.01, handScale: 1.05 }),
+  melee: Object.freeze({ x: 0.19, y: -0.23, reach: 0.4, handX: 0.0, handY: -0.02, handScale: 0.95 }),
+  utility: Object.freeze({ x: 0.21, y: -0.24, reach: 0.32, handX: 0.0, handY: -0.01, handScale: 1 }),
+});
+
 const WEAPON_CLASS = Object.freeze({
   SMG: 'light', PISTOL: 'light', SHOTGUN: 'heavy', SNIPER: 'heavy', LMG: 'heavy',
   ROCKET: 'heavy', RAILGUN: 'heavy', MINIGUN: 'heavy', KNIFE: 'melee', GOD_FIST: 'melee',
@@ -196,38 +206,71 @@ export class WeaponEffects {
 
     this.buildHands();
     this.buildFlash();
+    this.buildViewModelLight();
     this.setWeapon('SMG', 'RUSHER', false);
     this.modelLibrary.onReady(() => this.installActiveModel(performance.now(), false));
   }
 
+  /**
+   * Gloved hands wrapped around the grip.
+   *
+   * Placement rule this method exists to enforce: nothing may sit closer than
+   * ~0.35 m to the camera. The previous rig put the forearm capsules at local
+   * z +0.42/+0.50, which after the group offset left them 0.10–0.20 m from the
+   * lens — straddling the near plane, so they were clipped into a screen-filling
+   * black mass. Every part below stays forward of the gun's rear face and the
+   * arms run back toward the bottom corners of the frame.
+   */
   buildHands() {
-    const sleeve = new THREE.MeshStandardMaterial({ color: '#232f3c', roughness: 0.85, metalness: 0.1 });
-    const glove = new THREE.MeshStandardMaterial({ color: '#141c25', roughness: 0.72, metalness: 0.22 });
-    const seam = new THREE.MeshStandardMaterial({ color: '#3a5367', roughness: 0.5, metalness: 0.5 });
-    this.materials.push(sleeve, glove, seam);
+    const sleeve = new THREE.MeshStandardMaterial({
+      color: '#3a5169', roughness: 0.82, metalness: 0.12, emissive: '#10222f', emissiveIntensity: 0.85,
+    });
+    const glove = new THREE.MeshStandardMaterial({
+      color: '#243141', roughness: 0.62, metalness: 0.28, emissive: '#0b2532', emissiveIntensity: 0.9,
+    });
+    const seam = new THREE.MeshStandardMaterial({
+      color: '#4a7891', roughness: 0.4, metalness: 0.55, emissive: '#123a4a', emissiveIntensity: 1,
+    });
+    const accent = new THREE.MeshStandardMaterial({
+      color: '#2b6b84', roughness: 0.35, metalness: 0.6, emissive: '#1e8fb0', emissiveIntensity: 1.2,
+    });
+    this.materials.push(sleeve, glove, seam, accent);
 
-    const armGeometry = new THREE.CapsuleGeometry(0.05, 0.3, 3, 8);
-    const palmGeometry = new THREE.SphereGeometry(0.068, 10, 8);
-    const fingerGeometry = new THREE.CapsuleGeometry(0.017, 0.08, 2, 6);
-    const cuffGeometry = new THREE.CylinderGeometry(0.058, 0.053, 0.07, 8);
-    const thumbGeometry = new THREE.CapsuleGeometry(0.018, 0.06, 2, 6);
-    this.geometries.push(armGeometry, palmGeometry, fingerGeometry, cuffGeometry, thumbGeometry);
+    const armGeometry = new THREE.CapsuleGeometry(0.055, 0.34, 4, 10);
+    const palmGeometry = new THREE.SphereGeometry(0.062, 12, 10);
+    const fingerGeometry = new THREE.CapsuleGeometry(0.016, 0.075, 2, 6);
+    const cuffGeometry = new THREE.CylinderGeometry(0.062, 0.056, 0.08, 10);
+    const thumbGeometry = new THREE.CapsuleGeometry(0.017, 0.055, 2, 6);
+    const knuckleGeometry = new THREE.BoxGeometry(0.05, 0.012, 0.05);
+    this.geometries.push(armGeometry, palmGeometry, fingerGeometry, cuffGeometry, thumbGeometry, knuckleGeometry);
 
-    this.leftArm = part(armGeometry, sleeve, this.handRig, [-0.22, -0.46, 0.42], [0.25, 0, -0.5]);
-    this.rightArm = part(armGeometry, sleeve, this.handRig, [0.28, -0.46, 0.5], [0.22, 0, 0.42]);
-    this.leftCuff = part(cuffGeometry, seam, this.handRig, [-0.14, -0.33, 0.2], [0.2, 0, -0.5]);
-    this.rightCuff = part(cuffGeometry, seam, this.handRig, [0.2, -0.33, 0.3], [0.2, 0, 0.42]);
-    this.leftPalm = part(palmGeometry, glove, this.handRig, [-0.06, -0.19, -0.04], [0.2, 0, 0], [1.1, 0.82, 0.9]);
-    this.rightPalm = part(palmGeometry, glove, this.handRig, [0.14, -0.17, 0.18], [0.2, 0, 0], [1, 0.8, 0.9]);
+    // Forearms enter from the bottom corners and converge on the grip. Their
+    // rear ends sit at z ≈ +0.2 in viewmodel space, i.e. ~0.45 m from the eye.
+    this.leftArm = part(armGeometry, sleeve, this.handRig, [-0.16, -0.30, 0.06], [0.45, 0, -0.42]);
+    this.rightArm = part(armGeometry, sleeve, this.handRig, [0.17, -0.28, 0.10], [0.4, 0, 0.4]);
+    this.leftCuff = part(cuffGeometry, seam, this.handRig, [-0.115, -0.19, -0.02], [0.35, 0, -0.4]);
+    this.rightCuff = part(cuffGeometry, seam, this.handRig, [0.125, -0.175, 0.035], [0.32, 0, 0.4]);
+
+    // Trigger hand on the grip, support hand on the handguard.
+    this.rightPalm = part(palmGeometry, glove, this.handRig, [0.085, -0.075, 0.115], [0.25, 0, 0], [1, 0.85, 0.95]);
+    this.leftPalm = part(palmGeometry, glove, this.handRig, [-0.085, -0.085, -0.145], [0.25, 0, 0], [1.05, 0.8, 0.9]);
 
     this.fingers = [];
     for (let finger = 0; finger < 4; finger += 1) {
-      const offset = (finger - 1.5) * 0.031;
-      this.fingers.push(part(fingerGeometry, glove, this.handRig, [-0.06 + offset * 0.6, -0.22, -0.11], [0.5, 0, 0.1]));
-      this.fingers.push(part(fingerGeometry, glove, this.handRig, [0.14 + offset * 0.5, -0.2, 0.11], [0.35, 0, -0.08]));
+      const offset = (finger - 1.5) * 0.024;
+      this.fingers.push(part(fingerGeometry, glove, this.handRig,
+        [0.055 + offset * 0.4, -0.055, 0.075 - offset], [0.9, 0, 0.15]));
+      this.fingers.push(part(fingerGeometry, glove, this.handRig,
+        [-0.055 + offset * 0.4, -0.045, -0.185 - offset], [1.1, 0, -0.15]));
     }
-    this.leftThumb = part(thumbGeometry, glove, this.handRig, [-0.12, -0.17, 0.0], [0.4, 0, -0.8]);
-    this.rightThumb = part(thumbGeometry, glove, this.handRig, [0.07, -0.16, 0.22], [0.3, 0, 0.8]);
+    this.leftThumb = part(thumbGeometry, glove, this.handRig, [-0.115, -0.065, -0.13], [0.5, 0, -0.9]);
+    this.rightThumb = part(thumbGeometry, glove, this.handRig, [0.045, -0.07, 0.15], [0.4, 0, 0.9]);
+
+    // Cyan knuckle plates: a readable accent that separates glove from weapon.
+    this.knuckles = [
+      part(knuckleGeometry, accent, this.handRig, [0.075, -0.028, 0.075], [0.9, 0, 0.15]),
+      part(knuckleGeometry, accent, this.handRig, [-0.075, -0.03, -0.19], [1.1, 0, -0.15]),
+    ];
   }
 
   buildFlash() {
@@ -242,16 +285,83 @@ export class WeaponEffects {
     this.muzzle.add(this.flashLight);
   }
 
+  /**
+   * Dedicated viewmodel lighting.
+   *
+   * The hands and gun are lit by their own small rig parented to the camera, so
+   * they keep their form and highlights on a dark map and never read as a flat
+   * black shape. Short range keeps it from flattening the arena itself.
+   */
+  buildViewModelLight() {
+    this.viewModelLight = new THREE.Group();
+    this.viewModelLight.position.set(0.18, 0.22, -0.12);
+
+    const key = new THREE.PointLight('#dff2ff', 3.4, 2.6, 2);
+    key.position.set(0.1, 0.18, 0.35);
+    const rim = new THREE.PointLight('#4fd8ff', 1.6, 2.2, 2);
+    rim.position.set(-0.35, -0.1, -0.6);
+    this.viewModelLight.add(key, rim);
+    this.camera.add(this.viewModelLight);
+    this.lights = [key, rim];
+  }
+
   /** Pull the viewmodel closer for short guns and push long guns forward. */
   layoutForWeapon(weaponId) {
     const length = this.modelLibrary.getLength(weaponId);
+    const weaponClass = WEAPON_CLASS[weaponId] ?? 'light';
+    // Bulky weapons sit lower and further out; sidearms sit tighter and higher.
+    const profile = WEAPON_PROFILES[weaponClass] ?? WEAPON_PROFILES.light;
     this.basePosition = {
-      x: 0.26,
-      y: -0.22,
-      z: -0.4 - length * 0.42,
+      x: profile.x,
+      y: profile.y,
+      z: -0.42 - length * profile.reach,
     };
-    this.handRig.position.set(0.02, 0.02, length * 0.12);
+    // Hands ride with the grip; the support hand only reaches as far as the
+    // handguard, which is why short weapons tuck it back.
+    this.handRig.position.set(profile.handX, profile.handY, Math.min(0.12, length * 0.1));
+    this.handRig.scale.setScalar(profile.handScale);
+    if (this.leftPalm) {
+      this.leftPalm.position.z = -Math.min(0.24, length * 0.34);
+    }
     this.updateMuzzlePosition();
+  }
+
+  /**
+   * Reset transient presentation (reload dip, recoil, switch animation).
+   * Called on respawn so a player never comes back mid-reload or mid-swap.
+   */
+  resetPresentation() {
+    this.reloadStartedAt = null;
+    this.recoil = 0;
+    if (this.switchTransition) {
+      const { from, to } = this.switchTransition;
+      from?.removeFromParent();
+      if (to) {
+        to.position.set(0, 0, 0);
+        to.rotation.set(0, 0, 0);
+        to.scale.copy(to.userData.baseScale ?? to.scale);
+      }
+      this.switchTransition = null;
+    }
+    this.flashUntil = 0;
+    this.flashMesh.visible = false;
+    this.flashLight.visible = false;
+    if (this.basePosition) this.viewModel.position.set(this.basePosition.x, this.basePosition.y, this.basePosition.z);
+  }
+
+  /**
+   * Show or hide the whole first-person rig (gun + hands + its light).
+   * Kept as one switch so hands can never float in the menu or over the
+   * scoreboard while the weapon is hidden.
+   */
+  setVisible(visible) {
+    const on = Boolean(visible);
+    this.viewModel.visible = on;
+    if (this.viewModelLight) this.viewModelLight.visible = on;
+    if (!on) {
+      this.flashMesh.visible = false;
+      this.flashLight.visible = false;
+    }
   }
 
   setWeapon(weaponId, bundleId = this.bundleId, animate = true) {
@@ -473,5 +583,6 @@ export class WeaponEffects {
     this.flashMesh.geometry.dispose();
     this.flashMaterial.dispose();
     this.camera.remove(this.viewModel);
+    if (this.viewModelLight) this.camera.remove(this.viewModelLight);
   }
 }

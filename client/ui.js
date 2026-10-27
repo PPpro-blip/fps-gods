@@ -6,6 +6,7 @@ import {
   WEAPON_PRESENTATION,
 } from '../shared/bundles.js';
 import { ROOM_MODES } from '../shared/events.js';
+import { DEFAULT_MAP_ID, MAP_LIST, getMap, resolveMapId } from '../shared/maps.js';
 import { WEAPON_MODEL_FILE } from '../shared/weaponModels.js';
 import { CROSSHAIR_STYLES, DEFAULT_SETTINGS, QUALITY_PRESETS } from './settings.js';
 
@@ -33,6 +34,8 @@ export class GameUI {
       godsTierUnlocked: false,
     };
     this.rooms = { status: 'idle', entries: [], error: '' };
+    this.selectedMapId = DEFAULT_MAP_ID;
+    this.arena = getMap(DEFAULT_MAP_ID);
     this.roomPollTimer = null;
     this.actionTimer = null;
     this.toastTimeout = null;
@@ -74,7 +77,10 @@ export class GameUI {
       'bundle-error', 'bundle-back-button', 'bundle-continue-button', 'lobby-shell',
       'lobby-room-code', 'lobby-room-code-small', 'lobby-mode-tag', 'copy-room-code-button',
       'lobby-player-list', 'lobby-hint', 'room-error', 'leave-room-button', 'ready-button',
-      'start-button', 'match-hud', 'hud-room-code', 'target-kills', 'alive-count',
+      'start-button', 'match-hud', 'hud-room', 'hud-room-code', 'hud-room-copy',
+      'hud-arena-name', 'map-grid', 'map-picker', 'map-picker-note',
+      'lobby-arena', 'lobby-map-name', 'lobby-map-grid',
+      'lobby-map-note', 'target-kills', 'alive-count',
       'fps-value', 'kill-feed', 'name-tags', 'crosshair', 'health-value', 'health-fill',
       'health-state', 'shield-state', 'spawn-note', 'weapon-name', 'weapon-bundle',
       'ammo-mode', 'ammo-value', 'ammo-total', 'ammo-status', 'reload-hint',
@@ -115,6 +121,7 @@ export class GameUI {
     this.bindSettings();
     this.bindProfile();
     this.bindRoomControls();
+    this.bindMapControls();
     this.bindHud();
     this.el['asset-warning-dismiss'].addEventListener('click', () => this.hideAssetWarning());
     this.applySettings(this.settings);
@@ -317,13 +324,103 @@ export class GameUI {
     target.hidden = false;
   }
 
+  /* ──────────────────────────────── arenas ──────────────────────────────── */
+
+  /**
+   * Render one selectable arena card per registered map. The picker is the only
+   * place a local map choice is made; in a room the server's `mapId` wins and
+   * this list reflects it.
+   */
+  renderMapPicker(container, { compact = false, selected = this.selectedMapId, locked = false } = {}) {
+    if (!container) return;
+    container.replaceChildren();
+    for (const map of MAP_LIST) {
+      const card = document.createElement('button');
+      card.type = 'button';
+      card.className = `map-card${map.id === selected ? ' is-selected' : ''}${compact ? ' is-compact' : ''}`;
+      card.dataset.map = map.id;
+      card.setAttribute('role', 'radio');
+      card.setAttribute('aria-checked', String(map.id === selected));
+      card.disabled = locked;
+      if (locked) card.setAttribute('aria-disabled', 'true');
+
+      const name = document.createElement('strong');
+      name.textContent = map.name;
+      const tag = document.createElement('small');
+      tag.textContent = map.tagline;
+      card.append(name, tag);
+
+      if (!compact) {
+        const copy = document.createElement('p');
+        copy.textContent = map.description;
+        card.append(copy);
+      }
+
+      card.addEventListener('click', () => {
+        if (locked) return;
+        this.playUiSound();
+        this.selectedMapId = map.id;
+        // Update the existing cards in place instead of re-rendering the grid.
+        // Re-rendering from inside a card's own click handler left a stale card
+        // appended after the rebuild, so the highlighted arena and the reported
+        // selection could disagree.
+        this.syncMapSelection();
+        this.handlers.onSelectMap?.(map.id);
+      });
+
+      container.append(card);
+    }
+  }
+
+  /** Re-apply the selected state to every rendered map card, in place. */
+  syncMapSelection() {
+    for (const grid of [this.el['map-grid'], this.el['lobby-map-grid']]) {
+      if (!grid) continue;
+      for (const card of grid.querySelectorAll('.map-card')) {
+        const selected = card.dataset.map === this.selectedMapId;
+        card.classList.toggle('is-selected', selected);
+        card.setAttribute('aria-checked', String(selected));
+      }
+    }
+  }
+
+  bindMapControls() {
+    this.renderMapPicker(this.el['map-grid'], { selected: this.selectedMapId });
+    this.el['hud-room-copy'].addEventListener('click', () => this.copyRoomCode());
+  }
+
+  /** Keep the HUD/lobby arena labels in sync with the authoritative arena. */
+  setArena(map) {
+    const resolved = map ?? getMap(this.selectedMapId);
+    this.arena = resolved;
+    if (this.el['hud-arena-name']) this.el['hud-arena-name'].textContent = resolved.name;
+    if (this.el['lobby-map-name']) this.el['lobby-map-name'].textContent = resolved.name;
+  }
+
+  /** Refresh the lobby's arena block for the room the server just sent. */
+  renderLobbyArena(room, { isHost = false } = {}) {
+    const map = getMap(room?.mapId ?? this.selectedMapId);
+    this.setArena(map);
+    const note = this.el['lobby-map-note'];
+    if (note) {
+      note.textContent = isHost
+        ? 'Your choice applies to everyone who joins this room.'
+        : 'Only the host can change the arena.';
+    }
+    this.renderMapPicker(this.el['lobby-map-grid'], {
+      compact: true,
+      selected: map.id,
+      locked: !isHost || room?.state !== 'LOBBY',
+    });
+  }
+
   /* ────────────────────────────── room actions ──────────────────────────── */
 
   bindPlayControls() {
     this.el['play-now-button'].addEventListener('click', () => {
       this.playUiSound();
       this.beginAction('play-now-button');
-      this.handlers.onPlayNow?.(this.playerName, this.selectedBundleId, this.profileId);
+      this.handlers.onPlayNow?.(this.playerName, this.selectedBundleId, this.profileId, this.selectedMapId);
     });
 
     this.el['join-room-form'].addEventListener('submit', (event) => {
@@ -348,7 +445,7 @@ export class GameUI {
   requestCreateRoom() {
     this.playUiSound();
     this.beginAction('create-room-button');
-    this.handlers.onCreate?.(this.playerName, this.selectedBundleId, this.profileId);
+    this.handlers.onCreate?.(this.playerName, this.selectedBundleId, this.profileId, this.selectedMapId);
   }
 
   bindRoomControls() {
@@ -501,9 +598,11 @@ export class GameUI {
       const host = document.createElement('strong');
       host.textContent = `${room.hostName}’s lobby`;
       const detail = document.createElement('small');
-      detail.textContent = room.joinable
+      const arenaName = room.mapName ?? (room.mapId ? getMap(room.mapId).name : null);
+      const rules = room.joinable
         ? `${room.mode === 'MULTIPLAYER' ? 'DEATHMATCH' : room.mode} · FIRST TO ${room.targetKills}`
         : `${room.state === 'LOBBY' ? 'FULL' : 'IN PROGRESS'} · FIRST TO ${room.targetKills}`;
+      detail.textContent = arenaName ? `${arenaName} · ${rules}` : rules;
       meta.append(host, detail);
 
       const capacity = document.createElement('span');
@@ -839,6 +938,10 @@ export class GameUI {
       list.append(row);
     }
 
+    // The arena is whatever the server says it is: a joining player never
+    // overrides the host's choice locally.
+    this.renderLobbyArena(room, { isHost });
+
     this.el['ready-button'].textContent = self?.ready ? 'CANCEL READY' : 'MARK READY';
     this.el['ready-button'].disabled = self?.connected === false;
     this.el['start-button'].hidden = !isHost;
@@ -860,6 +963,7 @@ export class GameUI {
     this.el['hud-room-code'].textContent = room?.code ?? '------';
     this.el['scoreboard-room'].textContent = room?.code ?? '------';
     this.el['target-kills'].textContent = String(room?.targetKills ?? 30);
+    this.setArena(getMap(room?.mapId ?? this.selectedMapId));
     this.lastHealth = null;
   }
 

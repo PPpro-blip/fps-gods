@@ -1,5 +1,6 @@
 import { EVENTS, ROOM_MODES } from '../shared/events.js';
-import { BOT, COVER, MAP, PLAYER, SPAWN_POINTS } from '../shared/gameConfig.js';
+import { BOT, PLAYER } from '../shared/gameConfig.js';
+import { getMap, resolveMapId } from '../shared/maps.js';
 import { DEFAULT_BUNDLE_ID } from '../shared/bundles.js';
 import { castShot, raycastCover } from './hitDetection.js';
 import { BUNDLE_IDS, getBundleLoadout, getWeapon, WEAPONS } from './weaponConfig.js';
@@ -36,7 +37,7 @@ function applySpread(direction, spread) {
   );
 }
 
-function collidesWithCover(x, z, feetY, cover = COVER) {
+function collidesWithCover(x, z, feetY, cover) {
   const playerTop = feetY + PLAYER.height;
   for (const block of cover) {
     if (feetY >= block.height || playerTop <= 0) continue;
@@ -49,17 +50,20 @@ function collidesWithCover(x, z, feetY, cover = COVER) {
   return false;
 }
 
-function randomBotWaypoint() {
-  const maxX = MAP.halfWidth - MAP.wallThickness / 2 - PLAYER.radius - 1;
-  const maxZ = MAP.halfDepth - MAP.wallThickness / 2 - PLAYER.radius - 1;
+// Waypoints are drawn from the room's own arena, so bots never path toward a
+// corner that only exists on a different map.
+function randomBotWaypoint(map, cover) {
+  const { halfWidth, halfDepth, wallThickness } = map.bounds;
+  const maxX = halfWidth - wallThickness / 2 - PLAYER.radius - 1;
+  const maxZ = halfDepth - wallThickness / 2 - PLAYER.radius - 1;
   for (let attempt = 0; attempt < 80; attempt += 1) {
     const waypoint = {
       x: (Math.random() * 2 - 1) * maxX,
       z: (Math.random() * 2 - 1) * maxZ,
     };
-    if (!collidesWithCover(waypoint.x, waypoint.z, 0)) return waypoint;
+    if (!collidesWithCover(waypoint.x, waypoint.z, 0, cover)) return waypoint;
   }
-  return { ...SPAWN_POINTS[Math.floor(Math.random() * SPAWN_POINTS.length)] };
+  return { ...map.spawns[Math.floor(Math.random() * map.spawns.length)] };
 }
 
 function botWaypointDuration() {
@@ -99,7 +103,7 @@ function syncActiveWeapon(player, now = Date.now()) {
   player.overheatCompletesAt = state.overheatedUntil;
 }
 
-function makeGamePlayer(record, spawn, now) {
+function makeGamePlayer(record, spawn, now, map, cover) {
   const bundleId = record.bundleId ?? DEFAULT_BUNDLE_ID;
   const loadout = getBundleLoadout(bundleId);
   const weaponStates = Object.fromEntries(loadout.map((weapon) => [weapon.id, createWeaponState(weapon, now)]));
@@ -117,7 +121,7 @@ function makeGamePlayer(record, spawn, now) {
     isBot: record.isBot === true,
     connected: record.isBot === true || record.connected !== false,
     botBrain: record.isBot === true ? {
-      waypoint: randomBotWaypoint(),
+      waypoint: randomBotWaypoint(map, cover),
       nextWaypointAt: now + botWaypointDuration(),
       stuckThinkCount: 0,
       lastX: spawn.x,
@@ -160,6 +164,11 @@ export class GameState {
   } = {}, now = Date.now()) {
     this.room = room;
     this.mode = room.mode ?? ROOM_MODES.MULTIPLAYER;
+    // The server owns the arena choice. `room.mapId` was already normalised
+    // through `resolveMapId` when the room was created; resolving again keeps a
+    // hand-built room (tests, recovery) from ever reaching an unknown map.
+    this.mapId = resolveMapId(room.mapId);
+    this.map = getMap(this.mapId);
     this.emitRoom = emitRoom;
     this.emitPlayer = emitPlayer;
     this.onHumanKill = onHumanKill;
@@ -168,7 +177,7 @@ export class GameState {
     this.finished = false;
     this.winner = null;
     this.lastBotThinkAt = now;
-    this.cover = COVER.map((block, id) => ({ ...block, id }));
+    this.cover = this.map.cover.map((block, id) => ({ ...block, id }));
     this.smokeClouds = [];
     this.smokeSequence = 0;
 
@@ -188,10 +197,10 @@ export class GameState {
       }
     }
 
-    const spawns = shuffled(SPAWN_POINTS);
+    const spawns = shuffled(this.map.spawns);
     records.forEach((record, index) => {
       const spawn = spawns[index % spawns.length];
-      this.players.set(record.id, makeGamePlayer(record, spawn, now));
+      this.players.set(record.id, makeGamePlayer(record, spawn, now, this.map, this.cover));
     });
   }
 
@@ -295,7 +304,7 @@ export class GameState {
         || distanceToWaypoint <= BOT.waypointReachDistance
         || now >= brain.nextWaypointAt
         || brain.stuckThinkCount >= BOT.stuckThinkCount) {
-        brain.waypoint = randomBotWaypoint();
+        brain.waypoint = randomBotWaypoint(this.map, this.cover);
         brain.nextWaypointAt = now + botWaypointDuration();
         brain.stuckThinkCount = 0;
       }
@@ -370,8 +379,8 @@ export class GameState {
 
     const deltaX = moveX * PLAYER.moveSpeed * delta + player.knockbackVX * delta;
     const deltaZ = moveZ * PLAYER.moveSpeed * delta + player.knockbackVZ * delta;
-    const maxCenterX = MAP.halfWidth - MAP.wallThickness / 2 - PLAYER.radius;
-    const maxCenterZ = MAP.halfDepth - MAP.wallThickness / 2 - PLAYER.radius;
+    const maxCenterX = this.map.bounds.halfWidth - this.map.bounds.wallThickness / 2 - PLAYER.radius;
+    const maxCenterZ = this.map.bounds.halfDepth - this.map.bounds.wallThickness / 2 - PLAYER.radius;
     const minX = -maxCenterX;
     const maxX = maxCenterX;
     const minZ = -maxCenterZ;
@@ -405,8 +414,8 @@ export class GameState {
   updateDeadKnockback(player, delta) {
     const startX = player.x;
     const startZ = player.z;
-    const maxCenterX = MAP.halfWidth - MAP.wallThickness / 2 - PLAYER.radius;
-    const maxCenterZ = MAP.halfDepth - MAP.wallThickness / 2 - PLAYER.radius;
+    const maxCenterX = this.map.bounds.halfWidth - this.map.bounds.wallThickness / 2 - PLAYER.radius;
+    const maxCenterZ = this.map.bounds.halfDepth - this.map.bounds.wallThickness / 2 - PLAYER.radius;
     const candidateX = clamp(player.x + player.knockbackVX * delta, -maxCenterX, maxCenterX);
     const candidateZ = clamp(player.z + player.knockbackVZ * delta, -maxCenterZ, maxCenterZ);
     if (!collidesWithCover(candidateX, player.z, player.y, this.cover)) player.x = candidateX;
@@ -621,8 +630,9 @@ export class GameState {
       includeFloor: false,
     });
     const distance = impact?.distance ?? weapon.range;
-    const x = clamp(origin.x + direction.x * distance, -MAP.halfWidth + 1, MAP.halfWidth - 1);
-    const z = clamp(origin.z + direction.z * distance, -MAP.halfDepth + 1, MAP.halfDepth - 1);
+    const { halfWidth, halfDepth } = this.map.bounds;
+    const x = clamp(origin.x + direction.x * distance, -halfWidth + 1, halfWidth - 1);
+    const z = clamp(origin.z + direction.z * distance, -halfDepth + 1, halfDepth - 1);
     const cloud = {
       id: `${shooter.id}-${now}-${this.smokeSequence++}`,
       x,
@@ -835,10 +845,11 @@ export class GameState {
 
   chooseRespawn(playerId) {
     const otherPlayers = [...this.players.values()].filter((player) => player.id !== playerId && player.alive);
-    let bestSpawn = SPAWN_POINTS[0];
+    const spawnPoints = this.map.spawns;
+    let bestSpawn = spawnPoints[0];
     let bestDistance = -Infinity;
 
-    for (const spawn of SPAWN_POINTS) {
+    for (const spawn of spawnPoints) {
       const nearestOpponent = otherPlayers.reduce((nearest, player) => {
         return Math.min(nearest, Math.hypot(spawn.x - player.x, spawn.z - player.z));
       }, Infinity);

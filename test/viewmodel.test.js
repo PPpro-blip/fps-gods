@@ -190,3 +190,134 @@ test('dispose detaches the viewmodel and leaves nothing in the scene', () => {
   assert.equal(effects.smokeMeshes.size, 0);
   assert.ok(scene.children.length <= baseline, 'the scene is back to its baseline');
 });
+
+/** Camera-space boxes for every mesh under `root`, keyed by node name. */
+function partBoxes(camera, root) {
+  camera.updateMatrixWorld(true);
+  const inverse = camera.matrixWorld.clone().invert();
+  const parts = [];
+  root.traverse((child) => {
+    if (!child.isMesh) return;
+    if (!child.geometry.boundingBox) child.geometry.computeBoundingBox();
+    const toCamera = new THREE.Matrix4().multiplyMatrices(inverse, child.matrixWorld);
+    parts.push({ node: child, box: new THREE.Box3().copy(child.geometry.boundingBox).applyMatrix4(toCamera) });
+  });
+  return parts;
+}
+
+test('no part of the hands crosses the near plane (the black-mass regression)', () => {
+  const { camera, effects } = setup();
+  try {
+    const near = camera.near;
+    for (const weaponId of ['SMG', 'SHOTGUN', 'SNIPER', 'PISTOL', 'LMG', 'ROCKET', 'KNIFE', 'MINIGUN']) {
+      effects.setWeapon(weaponId, 'RUSHER', false);
+      effects.update(performance.now(), 0.016);
+      const parts = partBoxes(camera, effects.handRig);
+      assert.ok(parts.length >= 14, `${weaponId}: the hands are still a full hand rig`);
+      for (const { box } of parts) {
+        // Camera space: -z is forward, so every part must sit at least a hand's
+        // width in front of the eye. Anything nearer than this used to be
+        // clipped into a screen-filling dark mass.
+        assert.ok(
+          box.max.z < -0.3,
+          `${weaponId}: a hand part is ${(-box.max.z).toFixed(2)} m from the eye and would be clipped`,
+        );
+        assert.ok(box.min.z > -1.4, `${weaponId}: a hand part floats absurdly far forward`);
+      }
+      assert.equal(boxesCrossNearPlane(parts, near), 0, `${weaponId}: nothing intersects the near plane`);
+    }
+  } finally {
+    effects.dispose();
+  }
+});
+
+function boxesCrossNearPlane(parts, near) {
+  return parts.filter(({ box }) => box.max.z > -near && box.min.z < -near).length;
+}
+
+test('the hands stay in the lower screen and clear of the central aim area', () => {
+  const { camera, effects } = setup();
+  try {
+    for (const weaponId of ['SMG', 'LMG', 'SNIPER', 'PISTOL', 'ROCKET']) {
+      effects.setWeapon(weaponId, 'RUSHER', false);
+      effects.update(performance.now(), 0.016);
+      for (const { box } of partBoxes(camera, effects.handRig)) {
+        assert.ok(box.max.y < -0.02, `${weaponId}: a hand part reaches the crosshair (${box.max.y.toFixed(2)})`);
+      }
+    }
+  } finally {
+    effects.dispose();
+  }
+});
+
+test('hands are visually distinct from the weapon and from each other', () => {
+  const { effects } = setup();
+  try {
+    const materials = new Set();
+    effects.handRig.traverse((node) => {
+      if (node.isMesh) materials.add(node.material);
+    });
+    assert.ok(materials.size >= 3, 'glove, sleeve and accent are separate materials');
+    const colors = new Set([...materials].map((material) => material.color.getHexString()));
+    assert.ok(colors.size >= 3, 'the hands are not one flat colour');
+
+    // The first-person hands must not be the third-person operator's mesh.
+    const handsFromOperator = [...materials].filter((material) => material.userData?.remote === true);
+    assert.deepEqual(handsFromOperator, [], 'hands are dedicated viewmodel geometry');
+  } finally {
+    effects.dispose();
+  }
+});
+
+test('the viewmodel has its own light rig so hands never read as a black mass', () => {
+  const { camera, effects } = setup();
+  try {
+    assert.ok(effects.viewModelLight, 'a dedicated viewmodel light group exists');
+    assert.equal(camera.children.includes(effects.viewModelLight), true, 'it is parented to the camera');
+    assert.ok(effects.viewModelLight.children.some((node) => node.isPointLight));
+    assert.ok(effects.lights.length <= 2, 'the viewmodel does not stack lights');
+  } finally {
+    effects.dispose();
+  }
+});
+
+test('resetPresentation clears reload, recoil, swap, and the hidden state', () => {
+  const { effects } = setup();
+  try {
+    effects.setWeapon('LMG', 'HEAVY', true);
+    effects.startReload(900);
+    effects.fire(performance.now(), 'LMG', 'HEAVY');
+    assert.ok(effects.reloadStartedAt !== null || effects.recoil > 0);
+
+    effects.setVisible(false);
+    assert.equal(effects.viewModel.visible, false);
+    assert.equal(effects.viewModelLight.visible, false);
+
+    effects.resetPresentation();
+    effects.setVisible(true);
+    assert.equal(effects.reloadStartedAt, null, 'a respawn cannot come back mid-reload');
+    assert.equal(effects.recoil, 0);
+    assert.equal(effects.switchTransition, null);
+    assert.equal(effects.flashMesh.visible, false);
+    assert.equal(effects.viewModel.visible, true);
+    assert.equal(effects.viewModelLight.visible, true);
+    // The rig returns to its per-weapon resting pose, not the constructor default.
+    assert.equal(effects.viewModel.position.z, effects.basePosition.z);
+  } finally {
+    effects.dispose();
+  }
+});
+
+test('bulky weapons are placed lower and further out than a sidearm', () => {
+  const { effects } = setup();
+  try {
+    effects.setWeapon('PISTOL', 'GHOST', false);
+    const pistol = { ...effects.basePosition };
+    effects.setWeapon('ROCKET', 'HEAVY', false);
+    const rocket = { ...effects.basePosition };
+    assert.ok(rocket.y <= pistol.y, 'a rocket launcher sits lower than a pistol');
+    assert.ok(rocket.z <= pistol.z, 'a rocket launcher is held further out than a pistol');
+  } finally {
+    effects.dispose();
+  }
+});

@@ -26,6 +26,9 @@ export const EVENTS = Object.freeze({
   GAME_END: 'GAME_END',
   RETURN_TO_LOBBY: 'RETURN_TO_LOBBY',
   PLAY_AGAIN: 'PLAY_AGAIN',
+  // Host-only arena change while the room is still in its lobby. Additive: a
+  // client that never sends it keeps playing whatever the room created with.
+  SET_ROOM_MAP: 'SET_ROOM_MAP',
 
   // Lobby and weapon actions are explicit, shared socket contracts.
   PLAYER_READY: 'PLAYER_READY',

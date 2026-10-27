@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { PLAYER } from '../shared/gameConfig.js';
+import { DEFAULT_MAP_ID, getMap } from '../shared/maps.js';
 import { BUNDLE_BY_ID } from '../shared/bundles.js';
 import { GameNetwork } from './network.js';
 import { PlayerController, RemotePlayers, StateInterpolator } from './player.js';
@@ -184,6 +185,26 @@ function clearMatchPresentation() {
   if (menuStage) menuStage.show();
 }
 
+/**
+ * Build the arena the server picked.
+ *
+ * The map always comes from the room payload (which the server validated) or
+ * from GAME_START — never from a local choice — so two clients in the same room
+ * can never render different geometry from the collision they are fighting in.
+ */
+function syncArena(mapId, { announce = false } = {}) {
+  const changed = world.setMap(mapId);
+  if (!changed) return false;
+  if (renderer) {
+    renderer.toneMappingExposure = world.map?.lighting?.exposure ?? renderer.toneMappingExposure;
+  }
+  // Re-derive fog and pixel ratio for the new arena.
+  applySettings(settings.snapshot);
+  ui.setArena(world.map);
+  if (announce) ui.showToast(`Arena: ${world.map.name}`);
+  return true;
+}
+
 function enterMatch(room = currentRoom) {
   if (!room) return;
   currentRoom = room;
@@ -197,9 +218,11 @@ function enterMatch(room = currentRoom) {
     interpolator.clear();
     remotePlayers.clear();
     weaponEffects.updateSmokeClouds([]);
-    world.resetCover();
     nextClientShotAt = 0;
   }
+  // Build the authoritative arena before the first frame of the match.
+  syncArena(room.mapId ?? DEFAULT_MAP_ID);
+  world.resetCover();
   if (menuStage) menuStage.hide();
   ui.showMatch(room);
   ui.setLobbyVisible(false);
@@ -232,7 +255,12 @@ function applySettings(next) {
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, preset.pixelRatio));
     renderer.setSize(window.innerWidth, window.innerHeight, false);
   }
-  if (scene.fog) scene.fog.density = preset.fog;
+  // Fog starts from the map's own atmosphere and the quality preset scales it,
+  // so changing quality never erases a map's identity (or floods it).
+  if (scene.fog && world.map) {
+    const base = world.map.palette.fog.density;
+    scene.fog.density = base * (preset.fog / QUALITY_PRESETS.high.fog);
+  }
   if (menuStage?.scene?.fog) menuStage.scene.fog.density = preset.fog * 3.4;
   ui.applySettings(next);
 }
@@ -298,7 +326,12 @@ const network = new GameNetwork({
   onRoomList: (payload) => ui.setRoomList(payload),
   onRoomState: (room) => {
     const previousState = currentRoom?.state;
+    const previousMap = currentRoom?.mapId;
     currentRoom = room;
+    // The host can change the arena while the room is in its lobby; rebuild as
+    // soon as the server says so, not when the match starts.
+    syncArena(room.mapId ?? DEFAULT_MAP_ID);
+    if (previousMap && previousMap !== room.mapId) ui.setArena(world.map);
     ui.room = room;
     ui.selfId = network.id;
 
@@ -318,7 +351,10 @@ const network = new GameNetwork({
     }
   },
   onRoomError: (error) => ui.showError(error?.message),
-  onGameStart: () => enterMatch(currentRoom),
+  onGameStart: (payload = {}) => {
+    if (currentRoom && payload.mapId) currentRoom.mapId = payload.mapId;
+    enterMatch(currentRoom);
+  },
   onGameState: (state) => {
     if (!matchActive || state.code !== currentRoom?.code) return;
     const receivedAt = performance.now();
@@ -389,6 +425,10 @@ const network = new GameNetwork({
     // Rebind input immediately: the pointer is still locked, so the operator
     // should be able to aim and move on the first frame after redeploying.
     syncInputState();
+    // Never come back mid-reload or mid-swap: reset the viewmodel presentation
+    // and re-show the rig in case death hid it.
+    weaponEffects.resetPresentation();
+    weaponEffects.setVisible(true);
     audio.play('spawn');
     ui.showToast('Redeployed. Two seconds of spawn protection.');
   },
@@ -487,22 +527,28 @@ ui.setHandlers({
     if (menuStage) menuStage.setBundle(bundleId);
     ui.setServerTarget(describeTarget(network.connectionTarget));
   },
-  onPlayNow: (name, bundleId, id) => {
+  onPlayNow: (name, bundleId, id, mapId) => {
     if (!network.connected) {
       ui.clearAction();
       ui.showError('Still connecting to the game server. Try again in a moment.');
       return;
     }
     unlockAudio();
-    network.playNow(name, bundleId, id);
+    network.playNow(name, bundleId, id, mapId);
   },
-  onCreate: (name, bundleId, id) => {
+  onCreate: (name, bundleId, id, mapId) => {
     if (!network.connected) {
       ui.clearAction();
       ui.showError('Still connecting to the game server. Try again in a moment.');
       return;
     }
-    network.createRoom(name, bundleId, id);
+    network.createRoom(name, bundleId, id, mapId ?? ui.selectedMapId);
+  },
+  onSelectMap: (mapId) => {
+    // Never trust the local pick as authority: only the host's request to the
+    // server changes the room, and every client renders what the server sends.
+    ui.selectedMapId = mapId;
+    if (network.connected && currentRoom?.state === 'LOBBY') network.setRoomMap(mapId);
   },
   onJoin: (name, code, bundleId, id) => {
     if (!network.connected) {
@@ -705,7 +751,7 @@ function animate(now = performance.now()) {
     remotePlayers.update(latestPlayers, interpolator, camera, renderAt, network.id);
   }
 
-  weaponEffects.gun.visible = matchActive && !matchEnded;
+  weaponEffects.setVisible(matchActive && !matchEnded);
   if (menuStage?.built) {
     if (matchActive) menuStage.hide();
     menuStage.update(delta);
