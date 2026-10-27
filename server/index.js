@@ -95,6 +95,11 @@ export function createGameServer(options = {}) {
     io.to(room.code).emit(EVENTS.GAME_START, {
       code: room.code,
       mode: room.mode,
+      // Broadcast the arena with the start signal so a client that joined late,
+      // reconnected, or resumed from a stored session builds the same arena the
+      // server is simulating.
+      mapId: room.game.mapId,
+      mapName: room.game.map.name,
       targetKills: PLAYER.targetKills,
       playerCount: room.game.players.size,
     });
@@ -127,6 +132,10 @@ export function createGameServer(options = {}) {
 
     socket.on(EVENTS.JOIN_ROOM, (payload = {}) => {
       roomManager.joinRoom(socket, payload.code, payload.name, payload);
+    });
+
+    socket.on(EVENTS.SET_ROOM_MAP, (payload = {}) => {
+      roomManager.setRoomMap(socket, payload.mapId);
     });
 
     socket.on(EVENTS.PLAYER_READY, (payload = {}) => {

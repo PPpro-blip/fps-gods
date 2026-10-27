@@ -362,16 +362,21 @@ export class GameNetwork {
     this.socket.emit(EVENTS.LIST_ROOMS);
   }
 
-  createRoom(name, bundleId, profileId) {
-    this.socket.emit(EVENTS.CREATE_ROOM, { name, bundleId, profileId });
+  createRoom(name, bundleId, profileId, mapId = null) {
+    this.socket.emit(EVENTS.CREATE_ROOM, { name, bundleId, profileId, mapId });
   }
 
   joinRoom(code, name, bundleId, profileId) {
     this.socket.emit(EVENTS.JOIN_ROOM, { code, name, bundleId, profileId });
   }
 
-  playNow(name, bundleId, profileId) {
-    this.socket.emit(EVENTS.PLAY_NOW, { name, bundleId, profileId });
+  playNow(name, bundleId, profileId, mapId = null) {
+    this.socket.emit(EVENTS.PLAY_NOW, { name, bundleId, profileId, mapId });
+  }
+
+  /** Host-only, lobby-only arena change. The server re-validates and rebroadcasts. */
+  setRoomMap(mapId) {
+    this.socket.emit(EVENTS.SET_ROOM_MAP, { mapId });
   }
 
   setReady(ready) {
