@@ -65,6 +65,14 @@ report.webglWarningShown = byId('webgl-warning')?.hidden === false;
 report.onboardingVisible = byId('onboarding')?.hidden === false;
 report.menuVisible = byId('menu-shell')?.hidden === false;
 report.connectionLabel = byId('connection-label')?.textContent ?? null;
+// Asset failures must be visible in the UI, not just the console.
+report.assetWarning = {
+  hidden: byId('asset-warning')?.hidden ?? null,
+  title: byId('asset-warning-title')?.textContent ?? null,
+  note: byId('asset-warning-note')?.textContent ?? null,
+  items: [...(byId('asset-warning-list')?.children ?? [])].map((item) => item.textContent),
+};
+report.assetDiagnostics = globalThis.window?.__FPS_GODS_ASSETS__ ?? null;
 report.serverLine = byId('play-server-line')?.textContent ?? null;
 
 // Finish onboarding the way a player would.

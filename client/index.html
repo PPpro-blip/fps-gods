@@ -461,6 +461,16 @@
 
       <div class="toast" id="toast" role="status" aria-live="polite"></div>
       <div class="webgl-warning" id="webgl-warning" hidden>WebGL is unavailable in this browser. You can still join rooms, but the arena cannot render.</div>
+
+      <section class="asset-warning" id="asset-warning" role="alert" aria-live="assertive" hidden>
+        <div class="asset-warning-head">
+          <strong id="asset-warning-title">ASSET LOAD FAILURE</strong>
+          <button class="asset-warning-dismiss" id="asset-warning-dismiss" type="button" aria-label="Dismiss asset warning">DISMISS</button>
+        </div>
+        <p class="asset-warning-note" id="asset-warning-note">The live build is missing a required asset, so this match is running on fallbacks.</p>
+        <ul class="asset-warning-list" id="asset-warning-list"></ul>
+        <p class="asset-warning-hint">Details are in the browser console and in <code>window.__FPS_GODS_ASSETS__</code>.</p>
+      </section>
     </div>
 
     <script type="module" src="/main.js"></script>

@@ -52,6 +52,17 @@ test('the client boots, degrades cleanly without WebGL, and reports an offline a
   // Missing assets and a dead server are survivable, not fatal.
   assert.equal(report.loadingHidden, true, 'the loading overlay must always be dismissed');
   assert.equal(report.webglWarningShown, true, 'a missing WebGL context must be announced');
+
+  // A required asset that cannot load is announced in the UI with the reason,
+  // not just logged: this is the production failure mode the hotfix targets.
+  assert.equal(report.assetWarning.hidden, false, 'a failed required asset must raise the warning banner');
+  assert.equal(report.assetWarning.title, 'ASSET LOAD FAILURE');
+  assert.match(report.assetWarning.note, /fallbacks/);
+  assert.equal(report.assetWarning.items.length, 2, 'both required assets must be named');
+  assert.match(report.assetWarning.items[0], /Operator model/);
+  assert.match(report.assetWarning.items[1], /Environment kit/);
+  assert.equal(report.assetDiagnostics.urlSource, 'unavailable');
+  assert.deepEqual(report.assetDiagnostics.failed.sort(), ['character', 'map']);
   assert.equal(report.connectionLabel, 'SERVER OFFLINE');
   assert.match(report.serverLine, /arena\.test \(same origin\)/, 'the deployment badge names the socket target');
 

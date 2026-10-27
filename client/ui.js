@@ -83,7 +83,8 @@ export class GameUI {
       'scoreboard-panel', 'scoreboard-room', 'scoreboard-body', 'end-panel', 'end-kicker',
       'winner-name', 'winner-summary', 'end-scoreboard', 'return-lobby-button',
       'end-waiting', 'loading-overlay', 'loading-label', 'loading-fill', 'toast',
-      'webgl-warning', 'damage-vignette', 'build-stamp',
+      'webgl-warning', 'asset-warning', 'asset-warning-title', 'asset-warning-note',
+      'asset-warning-list', 'asset-warning-dismiss', 'damage-vignette', 'build-stamp',
     ]) {
       this.el[id] = document.getElementById(id);
     }
@@ -115,6 +116,7 @@ export class GameUI {
     this.bindProfile();
     this.bindRoomControls();
     this.bindHud();
+    this.el['asset-warning-dismiss'].addEventListener('click', () => this.hideAssetWarning());
     this.applySettings(this.settings);
     this.updateProfileChipsToBundle();
     this.el['build-stamp'].textContent = `v1.0 · ${new Date(this.startedAt).getFullYear()}`;
@@ -1198,6 +1200,33 @@ export class GameUI {
 
   showWebGLWarning() {
     this.el['webgl-warning'].hidden = false;
+  }
+
+  /**
+   * Persistent, specific notice that a required GLB did not load. A transient
+   * toast was not enough: a missing operator model silently degrades every
+   * operator in the match, and the only evidence used to be in the console.
+   */
+  showAssetWarning(lines = [], { title = 'ASSET LOAD FAILURE', note = '' } = {}) {
+    const items = Array.isArray(lines) ? lines.filter(Boolean) : [String(lines)].filter(Boolean);
+    if (!items.length) {
+      this.hideAssetWarning();
+      return;
+    }
+    this.el['asset-warning-title'].textContent = title;
+    this.el['asset-warning-note'].textContent = note
+      || 'A required 3D asset is missing from this deployment, so the match is running on fallbacks.';
+    this.el['asset-warning-list'].replaceChildren();
+    for (const line of items) {
+      const item = document.createElement('li');
+      item.textContent = line;
+      this.el['asset-warning-list'].append(item);
+    }
+    this.el['asset-warning'].hidden = false;
+  }
+
+  hideAssetWarning() {
+    this.el['asset-warning'].hidden = true;
   }
 
   setLoadingProgress(progress) {

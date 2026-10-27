@@ -38,6 +38,12 @@ export default defineConfig(({ mode }) => {
     build: {
       outDir: resolve(projectRoot, 'dist/client'),
       emptyOutDir: true,
+      // Content-hashed output goes to /bundled/ so it can be cached forever,
+      // while everything under /assets/ is a plain `public/` copy with a stable
+      // name that must stay revalidating. Mixing the two under /assets/ meant a
+      // cached response for an unhashed asset could outlive several deploys —
+      // which is how a stale 404 for character.glb kept a browser broken.
+      assetsDir: 'bundled',
       // Three.js is intentionally bundled with the game client; its compressed
       // transfer size is small, so keep the build output warning meaningful.
       chunkSizeWarningLimit: 700,
