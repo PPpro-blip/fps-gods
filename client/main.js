@@ -102,8 +102,20 @@ Promise.allSettled([assetBoot, weaponModels.ready]).then(() => {
   menuStage.show();
   if (menuStage) menuStage.setBundle(ui.selectedBundleId);
   if (!built) console.warn('[FPS GODS] Menu stage running without the operator asset.');
-  if (!assetManager.ready) ui.showToast('Operator model unavailable — using fallback operators.');
   if (!weaponModels.settled) ui.showToast('Weapon models are still loading…');
+
+  // Required assets are named individually, with the URL the build actually
+  // requested, instead of a single vague "operator unavailable" toast. The
+  // diagnostic snapshot stays on `window` for bug reports.
+  window.__FPS_GODS_ASSETS__ = assetManager.diagnostics();
+  if (assetManager.hasFailures) {
+    const note = !assetManager.ready && !assetManager.mapReady
+      ? 'The build could not load its required 3D assets, so this session is running on fallbacks.'
+      : !assetManager.ready
+        ? 'The operator model failed to load, so matches are using fallback operators.'
+        : 'The environment kit failed to load, so the arena backdrop is simplified.';
+    ui.showAssetWarning(assetManager.describeFailures(), { note });
+  }
   ui.finishLoading();
 });
 

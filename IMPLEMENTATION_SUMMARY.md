@@ -1,3 +1,55 @@
+# FPS GODS — Phase 1 hotfix "Operation Asset Recovery"
+
+## Symptom
+
+Production (`https://fps-gods.vercel.app`) served every hash-named weapon GLB but
+returned 404 for `character.glb` and `arena_map.glb`, leaving a black arena
+backdrop and the notice "Operator model unavailable — using fallback operators."
+
+## Root cause
+
+The two required assets were the only runtime assets addressed by a hand-written,
+unhashed URL (`/assets/characters/character.glb`, `/assets/map/arena_map.glb`)
+served out of `public/`, while every weapon went through a Vite `?url` import and
+therefore had a content-hashed, build-guaranteed URL. That asymmetry meant:
+
+1. The build could not prove the URLs existed — a missing or renamed file became
+   a runtime 404 with nothing failing at build time.
+2. `vercel.json` marked all of `/assets/(.*)` as `immutable, max-age=1y`, so any
+   response cached for those unhashed paths — including a 404 from a deployment
+   that lacked the files — could outlive the deploy that fixed it.
+3. `loadMap()` silently retried a byte-identical second copy (`map-assets.glb`),
+   so a missing arena map produced no error, just a plain backdrop.
+
+## Fix
+
+- `client/assetUrls.js` imports both required GLBs with `?url`, so Vite emits
+  `bundled/character-<hash>.glb` and `bundled/arena_map-<hash>.glb` and the
+  loader uses those URLs. Identical mechanism to the weapons, which never failed.
+- `AssetManager` resolves URLs from that module and **never** falls back to the
+  unhashed public paths in production; if the bundler gives it nothing it records
+  `unresolved-urls` failures instead of guessing a URL.
+- The `map-assets.glb` substitution is gone. A failure is recorded with URL,
+  status and content type, classified (`http-404`, `html-instead-of-glb`,
+  `not-glb`, `unreadable-glb`, `network-error`, `unresolved-urls`), logged,
+  surfaced in a persistent banner, and exposed as `window.__FPS_GODS_ASSETS__`.
+- Build output moved to `/bundled/` (`vite.config.js`), and `vercel.json` now
+  caches only `/bundled/*` immutably while `/assets/*` revalidates.
+- `test/production-assets.test.js` builds the client for real and asserts the
+  emitted character/map URLs are hashed, present, valid GLBs of the source size,
+  and that no guessed `/assets/` URL can reach the loader.
+
+## Verified on the live deployment (probes, no browser)
+
+- `/assets/map/arena_map.glb` → real GLB bytes.
+- `/assets/characters/character.glb` → not a 404 (a control path returns Vercel's
+  `404: NOT_FOUND` page, this one does not).
+- `/assets/map/map-assets.glb`, `/assets/weapons/smg.glb` → real GLB bytes.
+
+So the deployed files are present *now*; the browser report was served from disk
+cache. That is precisely why the unhashed URLs are gone: the fix has to work for
+a browser holding a cached failure.
+
 # FPS GODS — Phase 1 "Operation: Reforge" status
 
 > This section supersedes the older sprint notes below wherever they disagree.

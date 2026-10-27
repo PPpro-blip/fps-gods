@@ -1550,3 +1550,78 @@ kbd {
     transition-duration: 0.001ms !important;
   }
 }
+
+/* Required-asset failure banner. Deliberately louder than a toast: a missing
+   GLB degrades the match silently, so it has to stay on screen until dismissed. */
+.asset-warning {
+  position: absolute;
+  left: 50%;
+  top: 120px;
+  transform: translateX(-50%);
+  z-index: 60;
+  width: min(620px, calc(100vw - 48px));
+  padding: 14px 16px;
+  border: 1px solid rgba(255, 77, 99, 0.55);
+  border-radius: var(--radius-sm);
+  background: rgba(28, 6, 10, 0.96);
+  color: #ffd5da;
+  font-size: 12px;
+  line-height: 1.5;
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.55);
+}
+
+.asset-warning-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+
+.asset-warning-head strong {
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  color: #ff8b99;
+}
+
+.asset-warning-dismiss {
+  padding: 4px 10px;
+  border: 1px solid rgba(255, 139, 153, 0.45);
+  border-radius: 4px;
+  background: transparent;
+  color: #ffc4cb;
+  font: inherit;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  cursor: pointer;
+}
+
+.asset-warning-dismiss:hover {
+  background: rgba(255, 139, 153, 0.14);
+}
+
+.asset-warning-note {
+  margin: 0 0 8px;
+  color: #ffb8c0;
+}
+
+.asset-warning-list {
+  margin: 0 0 8px;
+  padding-left: 18px;
+  color: #ffdfe3;
+}
+
+.asset-warning-list li {
+  margin-bottom: 4px;
+  overflow-wrap: anywhere;
+}
+
+.asset-warning-hint {
+  margin: 0;
+  color: rgba(255, 196, 203, 0.72);
+  font-size: 11px;
+}
+
+.asset-warning-hint code {
+  font-family: var(--font-mono, ui-monospace, monospace);
+}

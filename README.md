@@ -144,12 +144,24 @@ WebGL rendering and pointer-lock behaviour cannot be exercised headlessly; those
 
 ## Assets
 
-Static GLB assets (maps, characters, animations, and weapon models) are provided in `public/assets/` and exposed cleanly to the root build and development server at `/assets/...`.
+Every model the game renders ships in the repository and is loaded through a Vite import, never a hand-written URL:
 
-- **Map** (`/assets/map/arena_map.glb`)
-- **Character** (`/assets/characters/character.glb`)
-- **Animations** — already embedded in `character.glb`; the separate `public/assets/animations/*.glb` files are byte-identical duplicates or cumulative subsets and are not downloaded at runtime
-- **Weapons** (`/assets/weapons/knife.glb`, `lmg.glb`, `pistol.glb`, `rifle.glb`, `rocket.glb`, `shotgun.glb`, `smg.glb`, `sniper.glb`)
+| Runtime asset | Source file | How it is requested |
+| --- | --- | --- |
+| Character + 12 animation clips | `client/assets/characters/character.glb` | `import url from '…?url'` in `client/assetUrls.js` |
+| Environment kit (menu backdrop) | `client/assets/map/arena_map.glb` | `import url from '…?url'` in `client/assetUrls.js` |
+| Seven weapon models | `client/assets/weapons/*.glb` | `?url` imports in `client/weaponAssets.js` |
+
+`?url` makes Vite emit each file into `dist/client/bundled/` with a content hash (`character-BXYFsllw.glb`) and rewrite the import to that exact path. Two consequences matter operationally:
+
+- If an asset is missing from the repository, the **build** fails. It cannot ship an app that requests a file the deployment does not contain.
+- Hashed filenames are safe to cache forever, and a redeploy always produces a new URL. Unhashed paths served from `public/` were the source of a production outage: `character.glb` and `arena_map.glb` were requested from `/assets/...`, the deployment did not have them, and caching kept the failure alive after the files were added. Nothing in the running app requests `/assets/...` any more.
+
+`public/assets/` still contains byte-identical copies for direct links, tooling and the Node test suite; `vercel.json` serves those with `max-age=0, must-revalidate` and only `/bundled/*` with immutable caching. The `public/assets/animations/*.glb` files are duplicates or cumulative subsets of the clips already inside `character.glb` and are not downloaded at runtime.
+
+### When an asset fails
+
+`AssetManager` never swaps in a lookalike file. Each required asset is either loaded or recorded as a failure with the exact URL, the HTTP status, and what the host actually returned, and classified as one of: `http-404`, `html-instead-of-glb` (a host answering unknown paths with `index.html`), `not-glb`, `unreadable-glb`, `network-error`, or `unresolved-urls`. The reason is printed to the console, surfaced in a persistent on-screen banner, and exposed as `window.__FPS_GODS_ASSETS__` for bug reports. The game keeps running on fallback operators — it just no longer pretends the real model loaded.
 ## Deployment
 
 The client is a static Vite build; Socket.IO needs a persistent Node.js process. A Render blueprint is included in `render.yaml`.
