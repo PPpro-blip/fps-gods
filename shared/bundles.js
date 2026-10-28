@@ -37,7 +37,7 @@ export const BUNDLE_INFO = Object.freeze([
     weapons: Object.freeze([
       Object.freeze({ id: 'LMG', name: 'LMG', icon: '≋', role: 'HIGH FIRE RATE · 60 ROUNDS' }),
       Object.freeze({ id: 'ROCKET', name: 'ROCKET', icon: '➤', role: 'SPLASH DAMAGE · DESTROYS COVER' }),
-      Object.freeze({ id: 'COMBAT_SHIELD', name: 'COMBAT SHIELD', icon: '⬡', role: 'BLOCKS FRONTAL DAMAGE' }),
+      Object.freeze({ id: 'COMBAT_SHIELD', name: 'COMBAT SHIELD', icon: '⬡', role: 'HOLD RMB · FRONT GUARD' }),
     ]),
   }),
   Object.freeze({

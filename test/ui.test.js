@@ -280,6 +280,13 @@ test('loadout, profile, settings and the HUD all reflect server state', async ()
     assert.equal($('health-state').textContent, 'CRITICAL');
     assert.equal($('ammo-status').textContent, 'RELOADING');
 
+    ui.updateHud({ ...player, currentWeaponId: 'COMBAT_SHIELD', blocking: false }, Date.now(), 2);
+    assert.equal($('ammo-status').textContent, 'HOLD RMB TO GUARD');
+    assert.equal($('shield-state').textContent, 'NO SHIELD');
+    ui.updateHud({ ...player, currentWeaponId: 'COMBAT_SHIELD', blocking: true }, Date.now(), 2);
+    assert.equal($('ammo-status').textContent, 'GUARD UP');
+    assert.equal($('shield-state').textContent, 'FRONTAL GUARD ACTIVE');
+
     const now = Date.now();
     ui.updateHud({ ...player, alive: false, health: 0, respawnAt: now + 1_500 }, now, 1);
     assert.equal($('death-panel').hidden, false);

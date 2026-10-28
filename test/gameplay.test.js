@@ -446,7 +446,7 @@ test('railgun hitscan ignores arena cover while ordinary weapons remain blocked'
   assert.ok(game.cover.some((block) => block.id === 0), 'the railgun pierces but does not destroy cover');
 });
 
-test('rocket splash damages nearby players and destroys the first cover block it hits', () => {
+test('rocket travels before server splash damages nearby players and destroys cover', () => {
   const now = 1_000_000;
   const { game, shooter, target, emitted } = makeGame(now, 'HEAVY', 'RUSHER');
   shooter.x = -17;
@@ -454,18 +454,22 @@ test('rocket splash damages nearby players and destroys the first cover block it
   shooter.yaw = 0;
   shooter.pitch = 0;
   target.x = -13;
-  target.z = -11;
+  target.z = -9.5;
   target.spawnProtectionUntil = now - 1;
   assert.ok(game.cover.some((block) => block.id === 0));
   assert.equal(game.switchWeapon(shooter.id, 'ROCKET', now), true);
 
   game.shoot(shooter.id, now + 1);
+  assert.equal(game.projectiles.length, 1);
+  assert.equal(target.health, PLAYER.maxHealth, 'no hitscan explosion at launch');
+  for (let tick = 1; tick <= 10; tick += 1) game.update(0.05, now + tick * 50);
   assert.equal(game.cover.some((block) => block.id === 0), false);
   assert.ok(target.health < PLAYER.maxHealth, 'the explosion applies server-calculated splash damage');
   assert.ok(emitted.some((event) => event.event === EVENTS.COVER_DESTROYED && event.data.blockId === 0));
+  assert.ok(emitted.some((event) => event.event === EVENTS.PROJECTILE_IMPACT));
 });
 
-test('combat shield blocks frontal damage and leaves its rear arc vulnerable', () => {
+test('raised combat shield reduces frontal damage and leaves its rear arc vulnerable', () => {
   const now = 1_000_000;
   const { game, shooter, target, emitted } = makeGame(now, 'GHOST', 'HEAVY');
   shooter.x = 0;
@@ -476,14 +480,15 @@ test('combat shield blocks frontal damage and leaves its rear arc vulnerable', (
   target.yaw = 0;
   target.spawnProtectionUntil = now - 1;
   assert.equal(game.switchWeapon(target.id, 'COMBAT_SHIELD', now), true);
+  game.setInput(target.id, { seq: 1, yaw: 0, blocking: true }, now + 1);
 
-  game.shoot(shooter.id, now + 1);
-  assert.equal(target.health, PLAYER.maxHealth);
+  game.shoot(shooter.id, now + 2);
+  assert.equal(target.health, 87.5);
   assert.ok(emitted.some((event) => event.event === EVENTS.HIT_CONFIRMED && event.data.blockedByShield));
 
-  target.yaw = Math.PI;
-  game.shoot(shooter.id, now + 151);
-  assert.equal(target.health, 50);
+  game.setInput(target.id, { seq: 2, yaw: Math.PI, blocking: true }, now + 151);
+  game.shoot(shooter.id, now + 152);
+  assert.equal(target.health, 37.5);
 });
 
 test('smoke grenade creates a vision-blocking cloud in the server hit pipeline', () => {

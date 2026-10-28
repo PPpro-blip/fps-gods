@@ -50,12 +50,14 @@ const weaponRecords = [
     auto: false,
     damage: 90, fireRate: 1_250, magSize: 1, reserveAmmo: 5, reloadTime: 2_300,
     range: 78, spread: 0.018, splashDamage: 88, splashRadius: 5.2, destroysCover: true,
+    projectileSpeed: 38, projectileLifetimeMs: 2_500,
   },
   {
     id: 'COMBAT_SHIELD', bundleId: 'HEAVY', name: 'COMBAT SHIELD', icon: '⬡', behavior: 'shield',
     auto: false,
     damage: 0, fireRate: 0, magSize: 0, reserveAmmo: 0, reloadTime: 0,
-    range: 0, spread: 0, frontalArcDegrees: 112,
+    range: 0, spread: 0, frontalArcDegrees: 112, damageMultiplier: 0.25,
+    blockDurationMs: 2_500, blockCooldownMs: 900,
   },
   {
     id: 'RAILGUN', bundleId: 'GODS_TIER', name: 'RAILGUN', icon: '╱', behavior: 'hitscan',
@@ -103,5 +105,5 @@ export function getBundleLoadout(bundleId) {
 }
 
 export function getWeapon(weaponId) {
-  return WEAPONS[weaponId] ?? null;
+  return typeof weaponId === 'string' && Object.hasOwn(WEAPONS, weaponId) ? WEAPONS[weaponId] : null;
 }

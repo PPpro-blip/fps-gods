@@ -5,6 +5,7 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { createMemoryProfileStore } from '../server/profiles.js';
 import { createGameServer } from '../server/index.js';
+import { GameState } from '../server/gameState.js';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -17,9 +18,9 @@ async function startServer() {
   return { ...server, port, url: `http://127.0.0.1:${port}` };
 }
 
-function runBootFixture(url) {
+function runBootFixture(url, { input = false } = {}) {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(process.execPath, [resolve(repoRoot, 'test/fixtures/boot-client.mjs'), url], {
+    const child = spawn(process.execPath, [resolve(repoRoot, 'test/fixtures/boot-client.mjs'), url, ...(input ? ['--check-input'] : [])], {
       cwd: repoRoot,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -72,7 +73,7 @@ test('a real client joins a real solo match and the HUD follows server state', a
     assert.equal(match.targetKills, '30');
     const health = Number(match.health);
     assert.ok(health >= 0 && health <= 100, `health out of range: ${match.health}`);
-    assert.equal(match.healthBarWidth, `${health}%`, 'the bar must match the number');
+    assert.ok(Math.abs(parseFloat(match.healthBarWidth) - health) < 1, 'the precise bar must match the rounded health number');
     // The bots are live, so the operator may already be down: the panels have to
     // agree with whatever the server says.
     if (health === 0) {
@@ -99,5 +100,32 @@ test('a real client joins a real solo match and the HUD follows server state', a
   } finally {
     await new Promise((resolvePromise) => server.httpServer.close(resolvePromise));
     server.close();
+  }
+});
+
+
+test('the real client sends key edges and one shot, then handles its authoritative echo', async () => {
+  const originalBots = GameState.prototype.updateBots;
+  const originalSetInput = GameState.prototype.setInput;
+  const inputs = [];
+  GameState.prototype.updateBots = () => {}; // keep the local player alive for deterministic input checks
+  GameState.prototype.setInput = function (id, payload, now) {
+    if (payload && typeof payload === 'object') inputs.push(payload);
+    return originalSetInput.call(this, id, payload, now);
+  };
+  const server = await startServer();
+  try {
+    const report = await runBootFixture(server.url, { input: true });
+    assert.deepEqual(report.windowErrors, [], `client event handler error: ${report.windowErrors.join('; ')}`);
+    assert.deepEqual(report.unhandled, []);
+    assert.ok(inputs.filter((entry) => entry.forward === 1).length >= 2, 'keydown and held heartbeat reach the server without render frames');
+    assert.equal(inputs.at(-1)?.forward, 0, 'keyup reached the server');
+    assert.equal(report.match.action.ammoAfter, report.match.action.ammoBefore - 1, 'one accepted shot consumes one round');
+    assert.equal(report.match.action.ammoWhileBlurred, report.match.action.ammoAfterBlur, 'blur stops a held automatic trigger');
+    assert.equal(report.match.action.ammoAfterFocus, report.match.action.ammoAfterBlur, 'focus does not restart a stale trigger');
+  } finally {
+    GameState.prototype.updateBots = originalBots;
+    GameState.prototype.setInput = originalSetInput;
+    await server.close();
   }
 });

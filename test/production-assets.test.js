@@ -147,6 +147,18 @@ test('a production build emits hashed, existing, valid GLB URLs for the characte
 
     // index.html has to point at the hashed bundle, which is what makes the
     // deploy self-consistent.
+    const weaponChunk = files.find((file) => /^weaponAssets-.*\.js$/.test(file));
+    assert.ok(weaponChunk, 'weapon URLs must be bundled');
+    const weaponSource = readFileSync(resolve(bundledDir, weaponChunk), 'utf8');
+    for (const [base, extension] of [
+      ['LowPolyShieldPack', 'glb'], ['Military knife', 'glb'], ['rocket_launcher_low', 'gltf'],
+    ]) {
+      const built = files.find((file) => file.startsWith(`${base}-`) && file.endsWith(`.${extension}`));
+      assert.ok(built, `hashed ${base} model was not emitted`);
+      assert.ok(weaponSource.includes(built.replaceAll(' ', '%20')), `loader does not reference ${built}`);
+      assert.equal(md5(resolve(bundledDir, built)), md5(resolve(repoRoot, 'public/assets/weapons', `${base}.${extension}`)), `${base} build output changed`);
+    }
+
     const html = readFileSync(resolve(buildDir, 'index.html'), 'utf8');
     assert.match(html, /\/bundled\/index-[A-Za-z0-9_-]+\.js/, 'index.html must load the hashed client bundle');
 

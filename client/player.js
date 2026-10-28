@@ -5,6 +5,9 @@ import { createOperator } from './operator.js';
 const INTERPOLATION_DELAY_MS = 90;
 const MAX_EXTRAPOLATION_MS = 130;
 const WEAPON_SWITCH_MS = 160;
+// Creating a dressed skinned rig is a measurable synchronous task. Spread
+// join bursts across frames instead of constructing all five bots at once.
+const MAX_NEW_REMOTE_PER_FRAME = 2;
 const FLASH_COLORS = Object.freeze({
   RUSHER: '#59d8ff',
   GHOST: '#c18aff',
@@ -27,9 +30,8 @@ function numericHash(value) {
   return hash;
 }
 
-// Buffers the 20 Hz authoritative snapshots and interpolates them between
-// render frames. Presentation smoothing only: the client never simulates or
-// predicts player positions, it just draws the server's history smoothly.
+// Buffers authoritative snapshots for remote-player interpolation. The local
+// player uses separate prediction/reconciliation rather than this delayed view.
 export class StateInterpolator {
   constructor() {
     this.states = new Map();
@@ -90,8 +92,8 @@ export class StateInterpolator {
   }
 }
 
-// Mouse look and keyboard sampling only. Position is always taken from server
-// snapshots in main.js, so this controller deliberately has no movement code.
+// Mouse look and keyboard sampling only. The controller never chooses position;
+// local presentation prediction and server authority are handled separately.
 export class PlayerController {
   constructor(camera, canvas) {
     this.camera = camera;
@@ -349,6 +351,9 @@ export class RemotePlayers {
     } else {
       record.socket.add(next);
     }
+    record.socket.add(record.muzzleFlash);
+    next.userData.baseScale = next.scale.clone();
+    next.userData.basePosition = next.position.clone();
     record.weaponModel = next;
     record.weaponId = weaponId;
 
@@ -372,14 +377,14 @@ export class RemotePlayers {
       from.scale.setScalar(1 - progress * 0.2);
     }
     if (record.weaponModel) {
-      record.weaponModel.position.y = (1 - progress) * 0.18;
-      record.weaponModel.scale.setScalar(0.8 + progress * 0.2);
+      record.weaponModel.position.y = record.weaponModel.userData.basePosition.y + (1 - progress) * 0.18;
+      record.weaponModel.scale.copy(record.weaponModel.userData.baseScale).multiplyScalar(0.8 + progress * 0.2);
     }
     if (progress >= 1) {
       if (from) from.removeFromParent();
       if (record.weaponModel) {
-        record.weaponModel.position.set(0, 0, 0);
-        record.weaponModel.scale.setScalar(1);
+        record.weaponModel.position.copy(record.weaponModel.userData.basePosition);
+        record.weaponModel.scale.copy(record.weaponModel.userData.baseScale);
       }
       record.weaponTransition = null;
     }
@@ -405,8 +410,13 @@ export class RemotePlayers {
     const delta = Math.min((now - this.lastFrameTime) / 1000, 0.1);
     this.lastFrameTime = now;
 
+    let createdThisFrame = 0;
     for (const data of players) {
       if (data.id === localPlayerId) continue;
+      if (!this.players.has(data.id)) {
+        if (createdThisFrame >= MAX_NEW_REMOTE_PER_FRAME) continue;
+        createdThisFrame += 1;
+      }
       const record = this.ensurePlayer(data);
       const pose = interpolator.sample(data.id, renderAt) ?? data;
       const connected = pose.connected !== false;
@@ -479,7 +489,8 @@ export class RemotePlayers {
       record.operator.dispose();
     } else {
       const fallback = record.group.userData.fallback;
-      for (const geometry of fallback?.geometries ?? []) geometry.dispose();
+      // Fallback geometry is module-shared by every operator; only its
+      // per-instance materials can be disposed while others are still visible.
       for (const material of fallback?.materials ?? []) material.dispose();
     }
     record.muzzleFlash.geometry.dispose();

@@ -4,6 +4,7 @@ import { dirname, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { BUNDLE_INFO } from '../shared/bundles.js';
+import { WEAPON_MODEL_FILE, WEAPON_MODEL_LENGTH } from '../shared/weaponModels.js';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const clientDir = resolve(repoRoot, 'client');
@@ -61,11 +62,12 @@ test('public asset directory contains all required GLB models', () => {
     'assets/map/arena_map.glb',
     'assets/characters/character.glb',
     'assets/animations/animations.glb',
-    'assets/weapons/knife.glb',
+    'assets/weapons/Military knife.glb',
+    'assets/weapons/LowPolyShieldPack.glb',
     'assets/weapons/lmg.glb',
     'assets/weapons/pistol.glb',
     'assets/weapons/rifle.glb',
-    'assets/weapons/rocket.glb',
+    'assets/weapons/rocket_launcher_low.gltf',
     'assets/weapons/shotgun.glb',
     'assets/weapons/smg.glb',
     'assets/weapons/sniper.glb',
@@ -85,25 +87,17 @@ test('every weapon model referenced by weapons.js exists', () => {
   }
 });
 
-test('every bundle weapon resolves to a GLB that ships with the client', () => {
-  // The lobby stage was replaced by MenuStage, which also uses this table, so the
-  // table itself is now the single thing worth pinning.
-  const modelSource = readFileSync(resolve(repoRoot, 'shared', 'weaponModels.js'), 'utf8');
+test('every bundle weapon resolves to a shipped GLB or GLTF with a measured length', () => {
   const realWeaponIds = new Set(
     Object.values(BUNDLE_INFO).flatMap((bundle) => bundle.weapons.map((weapon) => weapon.id)),
   );
-
   for (const weaponId of realWeaponIds) {
-    const modelFile = modelSource.match(new RegExp(`${weaponId}:\\s*'([^']+\\.glb)'`))?.[1];
-    assert.ok(modelFile, `shared/weaponModels.js has no model mapping for ${weaponId}`);
-    assert.ok(
-      existsSync(resolve(clientDir, 'assets/weapons', modelFile)),
-      `client/assets/weapons/${modelFile} is missing for ${weaponId}`,
-    );
-    assert.ok(
-      modelSource.includes(`'${modelFile}':`),
-      `${modelFile} has no measured length in shared/weaponModels.js`,
-    );
+    const modelFile = WEAPON_MODEL_FILE[weaponId];
+    assert.match(modelFile, /\.gltf?$|\.glb$/i, `${weaponId} model format`);
+    const clientPath = resolve(clientDir, 'assets/weapons', modelFile);
+    const publicPath = resolve(publicDir, 'assets/weapons', modelFile);
+    assert.ok(existsSync(clientPath) || existsSync(publicPath), `${modelFile} is missing`);
+    assert.ok(WEAPON_MODEL_LENGTH[modelFile] > 0, `${modelFile} needs a measured presentation size`);
   }
 });
 

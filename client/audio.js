@@ -115,6 +115,10 @@ export class AudioEngine {
     if (!this.canPlay(kind)) return false;
     switch (kind) {
       case 'shot': {
+        if (options.weaponClass === 'melee') {
+          this.noise({ duration: 0.09, frequency: 1350, gain: 0.12, q: 0.7 });
+          return true;
+        }
         const heavy = options.weaponClass === 'heavy';
         this.noise({ duration: heavy ? 0.2 : 0.1, frequency: heavy ? 520 : 1500, gain: heavy ? 0.42 : 0.3, q: 0.7 });
         this.tone({ frequency: heavy ? 90 : 150, slideTo: heavy ? 45 : 80, duration: 0.12, gain: 0.16, type: 'square' });

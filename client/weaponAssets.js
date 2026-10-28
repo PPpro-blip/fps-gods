@@ -6,17 +6,22 @@ import shotgunUrl from './assets/weapons/shotgun.glb?url';
 import sniperUrl from './assets/weapons/sniper.glb?url';
 import pistolUrl from './assets/weapons/pistol.glb?url';
 import lmgUrl from './assets/weapons/lmg.glb?url';
-import rocketUrl from './assets/weapons/rocket.glb?url';
-import knifeUrl from './assets/weapons/knife.glb?url';
+import rocketUrl from '../public/assets/weapons/rocket_launcher_low.gltf?url';
+import knifeUrl from '../public/assets/weapons/Military knife.glb?url';
+import shieldUrl from '../public/assets/weapons/LowPolyShieldPack.glb?url';
+import fistUrl from './assets/weapons/knife.glb?url';
 
-// Seven distinct GLBs back twelve weapons: `rifle.glb` is byte-identical to
-// `smg.glb` and no bundle uses it, so it is intentionally not shipped twice.
+// The three new assets stay in public/ and are imported by URL directly, so
+// Vite emits hashed URLs without introducing another source copy. The GLTF is
+// self-contained; its buffers and images are data URIs.
 export const MODEL_URLS = Object.freeze({
   'smg.glb': smgUrl,
   'shotgun.glb': shotgunUrl,
   'sniper.glb': sniperUrl,
   'pistol.glb': pistolUrl,
   'lmg.glb': lmgUrl,
-  'rocket.glb': rocketUrl,
-  'knife.glb': knifeUrl,
+  'rocket_launcher_low.gltf': rocketUrl,
+  'Military knife.glb': knifeUrl,
+  'LowPolyShieldPack.glb': shieldUrl,
+  'knife.glb': fistUrl,
 });

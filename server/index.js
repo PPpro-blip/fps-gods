@@ -171,9 +171,9 @@ export function createGameServer(options = {}) {
       if (room?.state === ROOM_STATES.PLAYING) room.game?.setInput(socket.id, payload, Date.now());
     });
 
-    socket.on(EVENTS.SHOOT, () => {
+    socket.on(EVENTS.SHOOT, (payload) => {
       const room = roomManager.getRoomForSocket(socket);
-      if (room?.state === ROOM_STATES.PLAYING) room.game?.shoot(socket.id, Date.now());
+      if (room?.state === ROOM_STATES.PLAYING) room.game?.shoot(socket.id, Date.now(), payload?.shotId);
     });
 
     socket.on(EVENTS.PLAYER_RELOAD, () => {
@@ -209,6 +209,7 @@ export function createGameServer(options = {}) {
   let lastTick = Date.now();
   let lastRoomCleanup = 0;
   const failingRooms = new Map();
+  const pendingSnapshots = new Map();
   const simulationTimer = setInterval(() => {
     const now = Date.now();
     const delta = Math.min((now - lastTick) / 1_000, 0.1);
@@ -231,7 +232,27 @@ export function createGameServer(options = {}) {
           roomManager.endGame(room, result.winner);
           continue;
         }
-        io.to(room.code).volatile.emit(EVENTS.GAME_STATE_UPDATE, room.game.getPublicState(now));
+        // Bot shots and ammo events can make the socket temporarily non-writable
+        // during this very tick. Emitting volatile state immediately afterwards
+        // drops it even on an idle localhost connection. Give the transport one
+        // event-loop turn to flush, while retaining volatile/latest-only semantics
+        // for genuinely congested clients (never queue old snapshots).
+        const game = room.game;
+        const snapshot = game.getPublicState(now);
+        const pending = pendingSnapshots.get(room.code);
+        if (pending) {
+          pending.snapshot = snapshot;
+          pending.game = game;
+        } else {
+          const entry = { snapshot, game };
+          pendingSnapshots.set(room.code, entry);
+          setImmediate(() => {
+            pendingSnapshots.delete(room.code);
+            if (room.state === ROOM_STATES.PLAYING && room.game === entry.game) {
+              io.to(room.code).volatile.emit(EVENTS.GAME_STATE_UPDATE, entry.snapshot);
+            }
+          });
+        }
         failingRooms.delete(room.code);
       } catch (error) {
         const strikes = (failingRooms.get(room.code) ?? 0) + 1;
