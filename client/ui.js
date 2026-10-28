@@ -991,7 +991,7 @@ export class GameUI {
     const state = health <= 0 ? 'DOWN' : percent <= 32 ? 'CRITICAL' : 'READY';
     this.el['health-state'].textContent = state;
     this.el.vitalState.classList.toggle('is-low', percent <= 32);
-    this.el['shield-state'].textContent = player.spawnProtected ? 'SPAWN SHIELD ACTIVE' : 'NO SHIELD';
+    this.el['shield-state'].textContent = player.spawnProtected ? 'SPAWN SHIELD ACTIVE' : player.blocking ? 'FRONTAL GUARD ACTIVE' : 'NO SHIELD';
     this.el['spawn-note'].textContent = player.alive ? `ALIVE · ${aliveCount}` : 'REDEPLOYING';
     this.el['alive-count'].textContent = String(aliveCount);
 
@@ -1020,7 +1020,7 @@ export class GameUI {
       : player.overheated
         ? 'OVERHEATED'
         : weaponId === 'COMBAT_SHIELD'
-          ? 'GUARD UP'
+          ? (player.blocking ? 'GUARD UP' : 'HOLD RMB TO GUARD')
           : weaponId === 'KNIFE' || weaponId === 'GOD_FIST'
             ? 'MELEE'
             : (player.ammo ?? 0) <= 0 && !noMagazine

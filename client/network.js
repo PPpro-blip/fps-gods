@@ -163,6 +163,7 @@ export class GameNetwork {
     this.socket.on(EVENTS.WEAPON_UPDATE, (data) => this.handlers.onWeaponUpdate?.(data));
     this.socket.on(EVENTS.WEAPON_OVERHEATED, (data) => this.handlers.onWeaponOverheated?.(data));
     this.socket.on(EVENTS.WEAPON_FIRED, (data) => this.handlers.onWeaponFired?.(data));
+    this.socket.on(EVENTS.PROJECTILE_IMPACT, (data) => this.handlers.onProjectileImpact?.(data));
     this.socket.on(EVENTS.PROFILE_UPDATE, (data) => this.handlers.onProfileUpdate?.(data));
     this.socket.on(EVENTS.SMOKE_UPDATE, (data) => this.handlers.onSmokeUpdate?.(data));
     this.socket.on(EVENTS.COVER_DESTROYED, (data) => this.handlers.onCoverDestroyed?.(data));
@@ -387,12 +388,15 @@ export class GameNetwork {
     this.socket.emit(EVENTS.START_GAME);
   }
 
-  sendInput(input) {
-    this.socket.emit(EVENTS.PLAYER_INPUT, input);
+  sendInput(input, reliable = false) {
+    if (!this.socket.connected) return;
+    // Movement is replaceable state, not an ordered action backlog. Neutral
+    // release and a fire-associated aim sample can explicitly be reliable.
+    (reliable ? this.socket : this.socket.volatile).emit(EVENTS.PLAYER_INPUT, input);
   }
 
-  shoot() {
-    this.socket.emit(EVENTS.SHOOT);
+  shoot(shotId) {
+    if (this.socket.connected) this.socket.emit(EVENTS.SHOOT, { shotId });
   }
 
   reload() {

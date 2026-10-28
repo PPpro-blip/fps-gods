@@ -97,8 +97,11 @@ test('all weapon GLBs have non-zero geometry volume and compute bounds correctly
   const loader = new GLTFLoader();
 
   for (const weapon of weapons) {
-    const weaponPath = resolve(repoRoot, `public/assets/weapons/${weapon}.glb`);
-    assert.ok(existsSync(weaponPath), `${weapon}.glb must exist in public/assets/weapons/`);
+    // GitHub main removed the public knife/rocket copies; the original client
+    // GLBs still exist, and the uploaded replacements have their own GLTF tests.
+    const assetRoot = ['rocket', 'knife'].includes(weapon) ? 'client' : 'public';
+    const weaponPath = resolve(repoRoot, `${assetRoot}/assets/weapons/${weapon}.glb`);
+    assert.ok(existsSync(weaponPath), `${weapon}.glb must exist in ${assetRoot}/assets/weapons/`);
 
     const buf = readFileSync(weaponPath);
     const gltf = await new Promise((res, rej) => {

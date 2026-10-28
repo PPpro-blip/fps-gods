@@ -156,3 +156,31 @@ test('server snapshots drive real operators, weapons, animations and disposal', 
     dom.window.close();
   }
 });
+
+test('bursts of remote joins are spread across frames and weapon switch retains fitted scale', () => {
+  const { dom, scene, camera, nameTagRoot } = createScene();
+  const weaponModels = createWeaponStub();
+  const createModel = weaponModels.createModel;
+  weaponModels.createModel = (id) => { const model = createModel(id); model.scale.setScalar(0.2); return model; };
+  const remotes = new RemotePlayers(scene, nameTagRoot, weaponModels, null);
+  const interpolator = { sample: () => null };
+  const burst = Array.from({ length: 5 }, (_, index) => ({ ...PLAYERS[1], id: `new-${index}` }));
+  const now = performance.now();
+  try {
+    remotes.update(burst, interpolator, camera, now, 'me');
+    assert.equal(remotes.players.size, 2);
+    remotes.update(burst, interpolator, camera, now + 16, 'me');
+    assert.equal(remotes.players.size, 4);
+    remotes.update(burst, interpolator, camera, now + 32, 'me');
+    assert.equal(remotes.players.size, 5);
+    remotes.update([{ ...burst[0], currentWeaponId: 'ROCKET' }, ...burst.slice(1)], interpolator, camera, now + 48, 'me');
+    remotes.update([{ ...burst[0], currentWeaponId: 'ROCKET' }, ...burst.slice(1)], interpolator, camera, now + 500, 'me');
+    const record = remotes.players.get('new-0');
+    remotes.updateWeaponTransition(record, performance.now() + 500);
+    assert.ok(Math.abs(record.weaponModel.scale.x - 0.2) < 1e-9);
+    assert.equal(record.muzzleFlash.parent, record.socket);
+  } finally {
+    remotes.clear();
+    dom.window.close();
+  }
+});

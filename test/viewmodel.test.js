@@ -321,3 +321,31 @@ test('bulky weapons are placed lower and further out than a sidearm', () => {
     effects.dispose();
   }
 });
+
+test('first-person geometry clears world depth once without changing shared weapon materials', () => {
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera();
+  const material = new THREE.MeshStandardMaterial();
+  const model = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.1, 0.5), material);
+  const library = {
+    onReady() {}, getLength: () => 0.5,
+    createModel: (id) => { const clone = model.clone(); clone.userData.weaponId = id; return clone; },
+  };
+  const effects = new WeaponEffects(scene, camera, library);
+  try {
+    let clears = 0;
+    effects.depthReset.onBeforeRender({ clearDepth: () => { clears += 1; } });
+    assert.equal(clears, 1);
+    assert.equal(effects.depthReset.renderOrder, 999);
+    assert.equal(effects.depthReset.material.transparent, true, 'world transparencies are drawn before the depth clear');
+    assert.equal(effects.currentModel.renderOrder, 1000);
+    assert.equal(material.depthTest, true, 'remote/menu instances retain normal material depth');
+    assert.equal(material.transparent, false, 'shared remote/menu materials are unchanged');
+    assert.equal(effects.currentModel.material.transparent, true, 'viewmodel is drawn after transparent world effects');
+    assert.ok(effects.leftArm.renderOrder > effects.depthReset.renderOrder);
+  } finally {
+    effects.dispose();
+    model.geometry.dispose();
+    material.dispose();
+  }
+});

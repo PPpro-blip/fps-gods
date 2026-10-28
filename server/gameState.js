@@ -1,5 +1,6 @@
 import { EVENTS, ROOM_MODES } from '../shared/events.js';
 import { BOT, PLAYER } from '../shared/gameConfig.js';
+import { collidesWithCover, simulateMovement } from '../shared/movement.js';
 import { getMap, resolveMapId } from '../shared/maps.js';
 import { DEFAULT_BUNDLE_ID } from '../shared/bundles.js';
 import { castShot, raycastCover } from './hitDetection.js';
@@ -8,6 +9,7 @@ import { BUNDLE_IDS, getBundleLoadout, getWeapon, WEAPONS } from './weaponConfig
 const clamp = (value, minimum, maximum) => Math.min(maximum, Math.max(minimum, value));
 const wrapAngle = (angle) => ((angle + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI;
 const finiteNumber = (value, fallback) => (Number.isFinite(value) ? value : fallback);
+const MAX_PROJECTILES = 64;
 
 function shuffled(values) {
   const result = [...values];
@@ -35,19 +37,6 @@ function applySpread(direction, spread) {
     yaw + (Math.random() * 2 - 1) * spread,
     pitch + (Math.random() * 2 - 1) * spread,
   );
-}
-
-function collidesWithCover(x, z, feetY, cover) {
-  const playerTop = feetY + PLAYER.height;
-  for (const block of cover) {
-    if (feetY >= block.height || playerTop <= 0) continue;
-    const nearestX = clamp(x, block.x - block.width / 2, block.x + block.width / 2);
-    const nearestZ = clamp(z, block.z - block.depth / 2, block.z + block.depth / 2);
-    const dx = x - nearestX;
-    const dz = z - nearestZ;
-    if (dx * dx + dz * dz < PLAYER.radius * PLAYER.radius) return true;
-  }
-  return false;
 }
 
 // Waypoints are drawn from the room's own arena, so bots never path toward a
@@ -91,6 +80,7 @@ function syncActiveWeapon(player, now = Date.now()) {
   player.currentWeaponName = weapon.name;
   player.currentWeaponIcon = weapon.icon;
   player.auto = weapon.auto === true;
+  player.fireRate = weapon.fireRate;
   player.ammo = state.ammo;
   player.reserveAmmo = state.reserveAmmo;
   player.maxAmmo = weapon.magSize;
@@ -146,7 +136,12 @@ function makeGamePlayer(record, spawn, now, map, cover) {
     input: { forward: 0, strafe: 0, jump: false },
     lastInputAt: now,
     lastInputSequence: -1,
+    lastProcessedInputSequence: -1,
     wasJumping: false,
+    shieldBlocking: false,
+    shieldBlockUntil: 0,
+    shieldCooldownUntil: 0,
+    shieldNeedsRelease: false,
     spawnProtectionUntil: now + PLAYER.spawnProtectionMs,
     respawnAt: null,
   };
@@ -177,9 +172,12 @@ export class GameState {
     this.finished = false;
     this.winner = null;
     this.lastBotThinkAt = now;
+    this.tickSequence = 0;
     this.cover = this.map.cover.map((block, id) => ({ ...block, id }));
     this.smokeClouds = [];
     this.smokeSequence = 0;
+    this.projectiles = [];
+    this.projectileSequence = 0;
 
     const records = [...room.players.values()];
     if (this.mode === ROOM_MODES.SOLO_VS_BOTS) {
@@ -218,11 +216,40 @@ export class GameState {
       jump: payload.jump === true,
     };
     player.lastInputAt = now;
+    this.updateShieldInput(player, payload.blocking === true, now);
+  }
+
+  updateShieldInput(player, requested, now) {
+    const shield = getWeapon(player.currentWeaponId);
+    const eligible = player.connected && player.alive && shield?.behavior === 'shield';
+    if (!requested || !eligible) {
+      if (player.shieldBlocking) {
+        player.shieldBlocking = false;
+        player.shieldCooldownUntil = now + (shield?.blockCooldownMs ?? 900);
+      }
+      if (!requested) player.shieldNeedsRelease = false;
+      return;
+    }
+    if (player.shieldBlocking && now >= player.shieldBlockUntil) {
+      player.shieldBlocking = false;
+      player.shieldNeedsRelease = true;
+      player.shieldCooldownUntil = now + shield.blockCooldownMs;
+    }
+    if (!player.shieldBlocking && !player.shieldNeedsRelease) {
+      if (now < player.shieldCooldownUntil) {
+        // Holding a failed early press must not silently re-raise later.
+        player.shieldNeedsRelease = true;
+      } else {
+        player.shieldBlocking = true;
+        player.shieldBlockUntil = now + shield.blockDurationMs;
+      }
+    }
   }
 
   update(deltaSeconds, now = Date.now()) {
     if (this.finished) return { winner: this.winner };
     const delta = clamp(finiteNumber(deltaSeconds, 0), 0, 0.1);
+    this.tickSequence += 1;
     if (this.mode === ROOM_MODES.SOLO_VS_BOTS && now - this.lastBotThinkAt >= BOT.thinkIntervalMs) {
       this.lastBotThinkAt = now;
       this.updateBots(now);
@@ -253,10 +280,16 @@ export class GameState {
         player.input.forward = 0;
         player.input.strafe = 0;
         player.input.jump = false;
+        this.updateShieldInput(player, false, now);
+      }
+      if (player.shieldBlocking && now >= player.shieldBlockUntil) {
+        this.updateShieldInput(player, true, now);
       }
       this.updatePlayer(player, delta);
+      if (delta > 0) player.lastProcessedInputSequence = player.lastInputSequence;
       this.updateWeaponTimers(player, now);
     }
+    this.updateProjectiles(delta, now);
 
     return null;
   }
@@ -361,54 +394,7 @@ export class GameState {
   }
 
   updatePlayer(player, delta) {
-    if (delta <= 0) return;
-    const startX = player.x;
-    const startZ = player.z;
-
-    const forwardX = -Math.sin(player.yaw);
-    const forwardZ = -Math.cos(player.yaw);
-    const rightX = Math.cos(player.yaw);
-    const rightZ = -Math.sin(player.yaw);
-    let moveX = forwardX * player.input.forward + rightX * player.input.strafe;
-    let moveZ = forwardZ * player.input.forward + rightZ * player.input.strafe;
-    const magnitude = Math.hypot(moveX, moveZ);
-    if (magnitude > 1) {
-      moveX /= magnitude;
-      moveZ /= magnitude;
-    }
-
-    const deltaX = moveX * PLAYER.moveSpeed * delta + player.knockbackVX * delta;
-    const deltaZ = moveZ * PLAYER.moveSpeed * delta + player.knockbackVZ * delta;
-    const maxCenterX = this.map.bounds.halfWidth - this.map.bounds.wallThickness / 2 - PLAYER.radius;
-    const maxCenterZ = this.map.bounds.halfDepth - this.map.bounds.wallThickness / 2 - PLAYER.radius;
-    const minX = -maxCenterX;
-    const maxX = maxCenterX;
-    const minZ = -maxCenterZ;
-    const maxZ = maxCenterZ;
-
-    const candidateX = clamp(player.x + deltaX, minX, maxX);
-    if (!collidesWithCover(candidateX, player.z, player.y, this.cover)) player.x = candidateX;
-    const candidateZ = clamp(player.z + deltaZ, minZ, maxZ);
-    if (!collidesWithCover(player.x, candidateZ, player.y, this.cover)) player.z = candidateZ;
-    player.knockbackVX *= Math.exp(-7.5 * delta);
-    player.knockbackVZ *= Math.exp(-7.5 * delta);
-
-    if (player.input.jump && !player.wasJumping && player.grounded) {
-      player.vy = PLAYER.jumpVelocity;
-      player.grounded = false;
-    }
-    player.wasJumping = player.input.jump;
-
-    player.vy -= PLAYER.gravity * delta;
-    player.y += player.vy * delta;
-    if (player.y <= 0) {
-      player.y = 0;
-      player.vy = 0;
-      player.grounded = true;
-    }
-
-    player.vx = (player.x - startX) / delta;
-    player.vz = (player.z - startZ) / delta;
+    simulateMovement(player, delta, this.map, this.cover);
   }
 
   updateDeadKnockback(player, delta) {
@@ -434,9 +420,11 @@ export class GameState {
   switchWeapon(playerId, weaponId, now = Date.now()) {
     if (this.finished || typeof weaponId !== 'string') return false;
     const player = this.players.get(playerId);
-    if (!player || !player.connected || !player.alive || !player.weaponStates[weaponId]) return false;
+    if (!player || !player.connected || !player.alive || !Object.hasOwn(player.weaponStates, weaponId) || !getWeapon(weaponId)) return false;
     if (player.currentWeaponId === weaponId) return true;
 
+    this.updateShieldInput(player, false, now);
+    player.shieldNeedsRelease = false;
     player.currentWeaponId = weaponId;
     syncActiveWeapon(player, now);
     const data = {
@@ -446,19 +434,21 @@ export class GameState {
       weaponName: player.currentWeaponName,
       weaponIcon: player.currentWeaponIcon,
       auto: player.auto,
+      fireRate: player.fireRate,
     };
     this.emitRoom(EVENTS.WEAPON_UPDATE, data);
     this.sendAmmo(player, now);
     return true;
   }
 
-  shoot(playerId, now = Date.now()) {
+  shoot(playerId, now = Date.now(), shotId = null) {
     if (this.finished) return;
     const shooter = this.players.get(playerId);
     if (!shooter || !shooter.connected || !shooter.alive) return;
     const weapon = getWeapon(shooter.currentWeaponId);
     const weaponState = shooter.weaponStates[shooter.currentWeaponId];
     if (!weapon || !weaponState || weapon.behavior === 'shield') return;
+    if (weapon.behavior === 'rocket' && this.projectiles.length >= MAX_PROJECTILES) return;
 
     if (weapon.unlimitedAmmo) {
       if (weaponState.overheatedUntil !== null && now < weaponState.overheatedUntil) return;
@@ -515,6 +505,7 @@ export class GameState {
       bundleId: shooter.bundleId,
       origin,
       direction,
+      ...(Number.isSafeInteger(shotId) && shotId >= 0 ? { shotId } : {}),
     });
 
     if (weapon.behavior === 'smoke') {
@@ -571,54 +562,102 @@ export class GameState {
   }
 
   fireRocket(shooter, weapon, origin, direction, now) {
-    const coverImpact = raycastCover({
-      origin,
-      direction,
-      cover: this.cover,
-      maxDistance: weapon.range,
-      includeFloor: true,
+    // A projectile is created only after shoot() has validated the equipped
+    // weapon, ammo and cooldown. No client-provided position is accepted.
+    this.projectiles.push({
+      id: `${shooter.id}-${this.projectileSequence++}`,
+      ownerId: shooter.id,
+      weaponId: weapon.id,
+      x: origin.x, y: origin.y, z: origin.z,
+      direction, source: { ...origin },
+      travelled: 0,
+      expiresAt: now + weapon.projectileLifetimeMs,
     });
-    const players = shooter.isBot
-      ? new Map([...this.players].filter(([, player]) => !player.isBot))
-      : this.players;
-    const directHit = castShot({
-      origin,
-      direction,
-      players,
-      shooterId: shooter.id,
-      maxDistance: weapon.range,
-      cover: this.cover,
-      smokeClouds: [],
-    });
+  }
 
-    let impactPoint = {
-      x: origin.x + direction.x * weapon.range,
-      y: Math.max(0, origin.y + direction.y * weapon.range),
-      z: origin.z + direction.z * weapon.range,
-    };
-    if (coverImpact && (!directHit || coverImpact.distance <= directHit.distance)) {
-      impactPoint = coverImpact.point;
-      if (coverImpact.block) this.destroyCover(coverImpact.block);
-    } else if (directHit) {
-      impactPoint = directHit.point;
+  updateProjectiles(delta, now) {
+    const remaining = [];
+    for (const projectile of this.projectiles) {
+      const weapon = getWeapon(projectile.weaponId);
+      const shooter = this.players.get(projectile.ownerId);
+      if (!weapon || !shooter || this.finished) continue;
+      const origin = { x: projectile.x, y: projectile.y, z: projectile.z };
+      const travel = Math.min(weapon.projectileSpeed * delta, weapon.range - projectile.travelled);
+      if (travel > 0) {
+        const coverHit = raycastCover({ origin, direction: projectile.direction, cover: this.cover, maxDistance: travel });
+        const targets = shooter.isBot
+          ? new Map([...this.players].filter(([, player]) => !player.isBot))
+          : this.players;
+        const directHit = castShot({
+          origin, direction: projectile.direction, players: targets, shooterId: shooter.id,
+          cover: this.cover, smokeClouds: [], maxDistance: travel,
+        });
+        const wallHit = this.projectileWallHit(origin, projectile.direction, travel);
+        let hit = coverHit;
+        if (wallHit && (!hit || wallHit.distance < hit.distance)) hit = wallHit;
+        if (directHit && (!hit || directHit.distance < hit.distance)) hit = directHit;
+        if (hit) {
+          this.explodeRocket(projectile, shooter, weapon, hit, now);
+          continue;
+        }
+        projectile.x += projectile.direction.x * travel;
+        projectile.y += projectile.direction.y * travel;
+        projectile.z += projectile.direction.z * travel;
+        projectile.travelled += travel;
+      }
+      if (now >= projectile.expiresAt || projectile.travelled >= weapon.range - 1e-6) {
+        this.emitPlayer(shooter.id, EVENTS.HIT_CONFIRMED, { hit: false, weaponId: weapon.id });
+        continue; // Misses expire harmlessly, without a client-chosen explosion.
+      }
+      remaining.push(projectile);
     }
+    this.projectiles = remaining;
+  }
 
+  projectileWallHit(origin, direction, maxDistance) {
+    const bounds = this.map.bounds;
+    const maxX = bounds.halfWidth - bounds.wallThickness / 2;
+    const maxZ = bounds.halfDepth - bounds.wallThickness / 2;
+    let distance = Infinity;
+    for (const [position, velocity, limit] of [[origin.x, direction.x, maxX], [origin.z, direction.z, maxZ]]) {
+      if (Math.abs(velocity) < 1e-8) continue;
+      const candidate = ((velocity > 0 ? limit : -limit) - position) / velocity;
+      if (candidate >= 0 && candidate <= maxDistance) distance = Math.min(distance, candidate);
+    }
+    if (!Number.isFinite(distance)) return null;
+    return { distance, point: {
+      x: origin.x + direction.x * distance,
+      y: origin.y + direction.y * distance,
+      z: origin.z + direction.z * distance,
+    } };
+  }
+
+  explodeRocket(projectile, shooter, weapon, impact, now) {
+    const point = impact.point;
+    this.emitRoom(EVENTS.PROJECTILE_IMPACT, { id: projectile.id, point, radius: weapon.splashRadius });
     const hits = [];
     for (const target of this.players.values()) {
-      if (target.id === shooter.id || !target.connected || !target.alive) continue;
-      const distance = Math.hypot(target.x - impactPoint.x, target.y + PLAYER.height / 2 - impactPoint.y, target.z - impactPoint.z);
+      if (target.id === shooter.id || !target.connected || !target.alive || (shooter.isBot && target.isBot)) continue;
+      const toTarget = { x: target.x - point.x, y: target.y + PLAYER.height / 2 - point.y, z: target.z - point.z };
+      const distance = Math.hypot(toTarget.x, toTarget.y, toTarget.z);
       if (distance > weapon.splashRadius) continue;
+      const direct = impact.target?.id === target.id;
+      if (!direct && distance > 0.02) {
+        const direction = { x: toTarget.x / distance, y: toTarget.y / distance, z: toTarget.z / distance };
+        const start = { x: point.x + direction.x * 0.02, y: point.y + direction.y * 0.02, z: point.z + direction.z * 0.02 };
+        const obstruction = raycastCover({ origin: start, direction, cover: this.cover, maxDistance: distance - 0.02, includeFloor: false });
+        if (obstruction) continue;
+      }
       const splash = weapon.splashDamage * Math.max(0, 1 - distance / weapon.splashRadius);
-      const damage = directHit?.target.id === target.id ? Math.max(weapon.damage, splash) : splash;
-      if (damage <= 0) continue;
-      hits.push({ target, damage, headshot: false, point: impactPoint });
+      const damage = direct ? Math.max(weapon.damage, splash) : splash;
+      // A blast reaches the shield from the impact, not from where its owner
+      // happened to stand when the rocket launched.
+      if (damage > 0) hits.push({ target, damage, headshot: false, point, source: point });
     }
-
-    if (hits.length === 0) {
-      this.emitPlayer(shooter.id, EVENTS.HIT_CONFIRMED, { hit: false, weaponId: weapon.id });
-      return;
-    }
-    this.applyDamageBatch(shooter, hits, now, weapon);
+    if (hits.length) this.applyDamageBatch(shooter, hits, now, weapon);
+    else this.emitPlayer(shooter.id, EVENTS.HIT_CONFIRMED, { hit: false, weaponId: weapon.id });
+    // Apply blast line-of-sight before removing the struck cover.
+    if (impact.block && weapon.destroysCover) this.destroyCover(impact.block);
   }
 
   throwSmoke(shooter, weapon, origin, direction, now) {
@@ -662,12 +701,12 @@ export class GameState {
       const target = hit.target;
       if (!target.alive) continue;
       const protectedAtSpawn = now < target.spawnProtectionUntil;
-      const blockedByShield = this.isFrontalShieldBlock(target, shooter, hit.point);
-      const blocked = protectedAtSpawn || blockedByShield;
-      const damage = blocked ? 0 : hit.damage;
-      if (!blocked) target.health = Math.max(0, target.health - damage);
+      const blockedByShield = this.isFrontalShieldBlock(target, hit.source ?? shooter, hit.point, now);
+      const multiplier = blockedByShield ? getWeapon(target.currentWeaponId).damageMultiplier : 1;
+      const damage = protectedAtSpawn ? 0 : hit.damage * multiplier;
+      if (damage > 0) target.health = Math.max(0, target.health - damage);
 
-      const killed = !blocked && target.health === 0;
+      const killed = damage > 0 && target.health === 0;
       this.emitPlayer(shooter.id, EVENTS.HIT_CONFIRMED, {
         hit: true,
         targetId: target.id,
@@ -680,21 +719,23 @@ export class GameState {
         point: hit.point,
       });
 
-      if (!blocked) {
+      if (damage > 0) {
         this.emitPlayer(target.id, EVENTS.HEALTH_UPDATE, {
           health: target.health,
           maxHealth: PLAYER.maxHealth,
           attackerId: shooter.id,
         });
       }
-      if (!blocked && weapon.knockback) this.applyKnockback(shooter, target, weapon);
+      if (damage > 0 && !blockedByShield && weapon.knockback) this.applyKnockback(shooter, target, weapon);
       if (killed) this.killPlayer(shooter, target, hit.headshot, now);
     }
   }
 
-  isFrontalShieldBlock(target, attacker, point) {
+  isFrontalShieldBlock(target, attacker, point, now = Date.now()) {
     const shield = getWeapon(target.currentWeaponId);
-    if (shield?.behavior !== 'shield' || !attacker) return false;
+    if (shield?.behavior !== 'shield' || !attacker || !target.alive || !target.connected
+      || !target.shieldBlocking || now >= target.shieldBlockUntil
+      || (!target.isBot && now - target.lastInputAt > PLAYER.inputTimeoutMs)) return false;
     const deltaX = (attacker.x ?? point.x) - target.x;
     const deltaZ = (attacker.z ?? point.z) - target.z;
     const distance = Math.hypot(deltaX, deltaZ);
@@ -735,6 +776,7 @@ export class GameState {
       weaponName: player.currentWeaponName,
       weaponIcon: player.currentWeaponIcon,
       auto: player.auto,
+      fireRate: player.fireRate,
       ammo: player.ammo,
       reserveAmmo: player.reserveAmmo,
       totalAmmo: player.totalAmmo,
@@ -756,6 +798,7 @@ export class GameState {
     victim.vx = 0;
     victim.vz = 0;
     if (Math.abs(victim.knockbackVX) + Math.abs(victim.knockbackVZ) < 0.01) victim.vy = 0;
+    this.updateShieldInput(victim, false, now);
     victim.input.forward = 0;
     victim.input.strafe = 0;
     victim.input.jump = false;
@@ -830,6 +873,10 @@ export class GameState {
     player.input.strafe = 0;
     player.input.jump = false;
     player.wasJumping = false;
+    player.shieldBlocking = false;
+    player.shieldBlockUntil = 0;
+    player.shieldCooldownUntil = 0;
+    player.shieldNeedsRelease = false;
     syncActiveWeapon(player, now);
 
     this.emitRoom(EVENTS.PLAYER_RESPAWNED, {
@@ -868,6 +915,7 @@ export class GameState {
     player.connected = Boolean(connected);
     player.lastInputAt = now;
     if (!player.connected) {
+      this.updateShieldInput(player, false, now);
       player.input.forward = 0;
       player.input.strafe = 0;
       player.input.jump = false;
@@ -886,7 +934,10 @@ export class GameState {
     player.id = nextId;
     player.connected = true;
     player.lastInputAt = now;
+    player.shieldBlocking = false;
+    player.shieldNeedsRelease = false;
     player.lastInputSequence = -1;
+    player.lastProcessedInputSequence = -1;
     player.input = { forward: 0, strafe: 0, jump: false };
     player.vx = 0;
     player.vy = 0;
@@ -895,6 +946,9 @@ export class GameState {
     this.players.set(nextId, player);
     for (const cloud of this.smokeClouds) {
       if (cloud.ownerId === previousId) cloud.ownerId = nextId;
+    }
+    for (const projectile of this.projectiles) {
+      if (projectile.ownerId === previousId) projectile.ownerId = nextId;
     }
     for (const entry of this.feed) {
       if (entry.killerId === previousId) entry.killerId = nextId;
@@ -907,6 +961,7 @@ export class GameState {
 
   removePlayer(playerId) {
     this.players.delete(playerId);
+    this.projectiles = this.projectiles.filter((projectile) => projectile.ownerId !== playerId);
     const previousCount = this.smokeClouds.length;
     this.smokeClouds = this.smokeClouds.filter((cloud) => cloud.ownerId !== playerId);
     if (this.smokeClouds.length !== previousCount) this.emitSmokeState();
@@ -937,6 +992,7 @@ export class GameState {
       code: this.room.code,
       state: this.room.state,
       serverTime: now,
+      tick: this.tickSequence,
       targetKills: PLAYER.targetKills,
       mode: this.mode,
       players: [...this.players.values()].map((player) => {
@@ -951,6 +1007,11 @@ export class GameState {
           vx: player.vx,
           vy: player.vy,
           vz: player.vz,
+          grounded: player.grounded,
+          wasJumping: player.wasJumping,
+          knockbackVX: player.knockbackVX,
+          knockbackVZ: player.knockbackVZ,
+          inputAck: player.lastProcessedInputSequence,
           yaw: player.yaw,
           pitch: player.pitch,
           health: player.health,
@@ -966,6 +1027,8 @@ export class GameState {
           currentWeaponName: player.currentWeaponName,
           currentWeaponIcon: player.currentWeaponIcon,
           auto: player.auto,
+          fireRate: player.fireRate,
+          blocking: player.shieldBlocking && now < player.shieldBlockUntil,
           spawnProtected: now < player.spawnProtectionUntil,
           spawnProtectionUntil: player.spawnProtectionUntil,
           respawnAt: player.respawnAt,
@@ -981,6 +1044,10 @@ export class GameState {
         };
       }),
       smokeClouds: this.smokeClouds.map((cloud) => ({ ...cloud })),
+      projectiles: this.projectiles.map((projectile) => ({
+        id: projectile.id, x: projectile.x, y: projectile.y, z: projectile.z,
+        direction: projectile.direction, speed: getWeapon(projectile.weaponId).projectileSpeed,
+      })),
       cover: this.cover.map((block) => block.id),
     };
   }

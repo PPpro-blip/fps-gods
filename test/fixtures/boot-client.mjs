@@ -16,15 +16,17 @@ import { JSDOM } from 'jsdom';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const serverUrl = process.argv[2] ?? null;
-const report = { errors: [], unhandled: [] };
+const report = { errors: [], unhandled: [], windowErrors: [] };
+const checkInput = process.argv.includes('--check-input');
 
 process.on('uncaughtException', (error) => report.unhandled.push(String(error?.message ?? error)));
 process.on('unhandledRejection', (error) => report.unhandled.push(String(error?.message ?? error)));
 
 // With an explicit origin the fixture joins a live game server; without one it
-// boots against a host that cannot be reached, which is the offline path.
+// boots against a refused local port, which gives a deterministic offline path
+// without depending on external DNS or outbound access.
 const dom = new JSDOM(readFileSync(resolve(repoRoot, 'client/index.html'), 'utf8'), {
-  url: serverUrl ? new URL('/', serverUrl).href : 'https://arena.test/?room=ABC234',
+  url: serverUrl ? new URL('/', serverUrl).href : 'http://127.0.0.1:1/?room=ABC234',
   pretendToBeVisual: true,
 });
 
@@ -34,6 +36,7 @@ Object.defineProperty(globalThis, 'navigator', { value: dom.window.navigator, co
 Object.defineProperty(globalThis, 'localStorage', { value: dom.window.localStorage, configurable: true });
 globalThis.HTMLElement = dom.window.HTMLElement;
 globalThis.Event = dom.window.Event;
+dom.window.addEventListener('error', (event) => report.windowErrors.push(String(event.error?.message ?? event.message)));
 globalThis.requestAnimationFrame = (callback) => setTimeout(() => callback(performance.now()), 16);
 globalThis.cancelAnimationFrame = (handle) => clearTimeout(handle);
 
@@ -144,6 +147,40 @@ if (serverUrl) {
   document.dispatchEvent(new dom.window.KeyboardEvent('keydown', { code: 'Tab', bubbles: true }));
   await wait(40);
   report.match.scoreboardClosed = byId('scoreboard-panel')?.hidden === true;
+
+  if (checkInput) {
+    // jsdom has no pointer lock implementation; drive the real entry-point
+    // handlers with an explicit lock and a live server instead of mocking fire.
+    const canvas = byId('game-canvas');
+    Object.defineProperty(document, 'pointerLockElement', { configurable: true, value: canvas });
+    document.dispatchEvent(new dom.window.Event('pointerlockchange'));
+    // Stop scheduling frames; the input pump must continue without rendering.
+    globalThis.requestAnimationFrame = () => 0;
+    await wait(50);
+    document.dispatchEvent(new dom.window.KeyboardEvent('keydown', { code: 'KeyW', bubbles: true }));
+    await wait(120);
+    document.dispatchEvent(new dom.window.KeyboardEvent('keyup', { code: 'KeyW', bubbles: true }));
+    await wait(80);
+    const ammoBefore = Number(byId('ammo-value').textContent);
+    document.dispatchEvent(new dom.window.MouseEvent('mousedown', { button: 0, bubbles: true }));
+    document.dispatchEvent(new dom.window.MouseEvent('mouseup', { button: 0, bubbles: true }));
+    await wait(500);
+    const ammoAfter = Number(byId('ammo-value').textContent);
+    // Losing focus while moving and holding an automatic trigger must send a
+    // neutral state and stop repetition, even when no render frames run.
+    document.dispatchEvent(new dom.window.KeyboardEvent('keydown', { code: 'KeyW', bubbles: true }));
+    document.dispatchEvent(new dom.window.MouseEvent('mousedown', { button: 0, bubbles: true }));
+    await wait(220);
+    window.dispatchEvent(new dom.window.Event('blur'));
+    await wait(250);
+    const ammoAfterBlur = Number(byId('ammo-value').textContent);
+    await wait(250);
+    const ammoWhileBlurred = Number(byId('ammo-value').textContent);
+    window.dispatchEvent(new dom.window.Event('focus'));
+    await wait(250);
+    const ammoAfterFocus = Number(byId('ammo-value').textContent);
+    report.match.action = { ammoBefore, ammoAfter, ammoAfterBlur, ammoWhileBlurred, ammoAfterFocus };
+  }
 
   // The server's own tick has to keep the HUD alive after the first snapshot.
   await wait(600);

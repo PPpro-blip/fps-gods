@@ -64,7 +64,7 @@ test('the client boots, degrades cleanly without WebGL, and reports an offline a
   assert.equal(report.assetDiagnostics.urlSource, 'unavailable');
   assert.deepEqual(report.assetDiagnostics.failed.sort(), ['character', 'map']);
   assert.equal(report.connectionLabel, 'SERVER OFFLINE');
-  assert.match(report.serverLine, /arena\.test \(same origin\)/, 'the deployment badge names the socket target');
+  assert.match(report.serverLine, /127\.0\.0\.1:1 \(same origin\)/, 'the deployment badge names the socket target');
 
   // Onboarding drives the real handlers, including the server-side name check.
   assert.equal(report.loadoutStepVisible, true);

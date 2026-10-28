@@ -420,7 +420,7 @@ test('two live clients join, ready, play, synchronize weapon switches, and resum
       return player && Math.hypot(player.x - initialX, player.z - initialZ) > 0.12;
     });
     guest.emit(EVENTS.PLAYER_INPUT, {
-      seq: 1,
+      seq: 100,
       forward: 1,
       strafe: 0,
       jump: false,
@@ -453,6 +453,12 @@ test('two live clients join, ready, play, synchronize weapon switches, and resum
     assert.equal(rotatedSession.roomCode, lobby.code);
     assert.notEqual(rotatedSession.resumeToken, guestSession.resumeToken);
     assert.ok(Math.hypot(resumedGamePlayer.x - positionBeforeResume.x, resumedGamePlayer.z - positionBeforeResume.z) < 0.1);
+
+    phase = 'accept fresh input after resume';
+    const resumedAck = waitForEvent(resumedGuest, EVENTS.GAME_STATE_UPDATE,
+      (state) => state.players.find((entry) => entry.id === resumedGuest.id)?.inputAck === 0);
+    resumedGuest.emit(EVENTS.PLAYER_INPUT, { seq: 0, forward: 0, strafe: 0, jump: false, yaw: yawTowardCenter, pitch: 0 });
+    await resumedAck;
 
     phase = 'leave room';
     const hostRoomAfterLeave = waitForEvent(host, EVENTS.ROOM_STATE, (state) => state.players.length === 1);
@@ -520,6 +526,36 @@ test('server profile requests persist the player key and enforce bundle unlocks 
     });
     assert.equal(roomState.players[0].bundleId, 'GODS_TIER');
     assert.equal(roomState.players[0].currentWeaponId, 'RAILGUN');
+  } finally {
+    socket.close();
+    await server.close();
+  }
+});
+
+test('state updates keep flowing while reliable fire events are emitted on every tick', async () => {
+  const server = await startServer();
+  const socket = ioClient(server.url, { transports: ['websocket'], reconnection: false, timeout: 5_000 });
+  try {
+    await new Promise((resolve, reject) => { socket.once('connect', resolve); socket.once('connect_error', reject); });
+    const started = waitForEvent(socket, EVENTS.GAME_START);
+    socket.emit(EVENTS.PLAY_NOW, { name: 'BurstProbe', bundleId: 'RUSHER' });
+    const { code } = await started;
+    const room = server.roomManager.rooms.get(code);
+    const update = room.game.update.bind(room.game);
+    let reliableEvents = 0;
+    socket.on('burst-probe', () => { reliableEvents += 1; });
+    room.game.update = (...args) => {
+      room.game.emitRoom('burst-probe', { text: 'reliable message just before the snapshot' });
+      update(...args);
+    };
+    const states = collectEvents(socket, EVENTS.GAME_STATE_UPDATE, 8, 5_000);
+    socket.emit(EVENTS.PLAYER_INPUT, { seq: 101, forward: 0, strafe: 0, yaw: 0, pitch: 0 });
+    const snapshots = await states;
+    assert.ok(reliableEvents >= 6);
+    assert.ok(snapshots.some((state) => state.players.find((player) => player.id === socket.id)?.inputAck === 101));
+    for (let index = 1; index < snapshots.length; index += 1) {
+      assert.ok(snapshots[index].tick > snapshots[index - 1].tick);
+    }
   } finally {
     socket.close();
     await server.close();
