@@ -1226,6 +1226,8 @@ select {
 }
 .name-tag-name { font-size: 10px; font-weight: 700; letter-spacing: 0.1em; color: var(--player-color, #57d6ff); }
 .name-tag-weapon { font-size: 8.5px; letter-spacing: 0.1em; color: var(--muted); }
+.name-tag.is-bot .name-tag-name { opacity: 0.94; }
+.name-tag.is-hit .name-tag-name { color: #ffe28a; text-shadow: 0 0 8px rgba(255, 198, 79, 0.85); }
 .name-tag.is-protected .name-tag-weapon { color: var(--accent); }
 .name-tag.is-offline { opacity: 0.6; }
 
@@ -1241,8 +1243,8 @@ select {
 }
 .crosshair-tick {
   position: absolute;
-  background: rgba(232, 241, 247, 0.9);
-  box-shadow: 0 0 3px rgba(0, 0, 0, 0.8);
+  background: rgba(242, 250, 255, 0.95);
+  box-shadow: 0 0 0 1px rgba(4, 9, 14, 0.72), 0 0 4px rgba(0, 0, 0, 0.85);
   transition: opacity 120ms ease, transform 80ms ease;
 }
 .crosshair-tick.is-top, .crosshair-tick.is-bottom { width: 1.5px; height: 7px; left: 50%; margin-left: -0.75px; }
@@ -1293,10 +1295,13 @@ select {
 .hit-marker-bottom { transform: translate(-50%, -50%) rotate(45deg) translateY(11px); }
 .hit-marker-left { transform: translate(-50%, -50%) rotate(45deg) translateX(-11px); }
 
-.crosshair.is-hit .hit-marker { opacity: 1; animation: hit-pop 180ms ease-out; }
+.crosshair.is-hit .hit-marker,
+.crosshair.is-blocked .hit-marker,
+.crosshair.is-kill .hit-marker { opacity: 1; animation: hit-pop 180ms ease-out; }
 .crosshair.is-hit .hit-marker { background: #eafcff; }
-.crosshair.is-headshot .hit-marker { background: var(--accent); }
-.crosshair.is-kill .hit-marker { background: var(--danger); width: 3px; height: 9px; }
+.crosshair.is-blocked .hit-marker { background: #59d8ff; box-shadow: 0 0 6px rgba(89, 216, 255, 0.9); }
+.crosshair.is-headshot .hit-marker { background: #ffd45e; box-shadow: 0 0 8px rgba(255, 212, 94, 0.95); height: 8.5px; }
+.crosshair.is-kill .hit-marker { background: var(--danger); width: 3px; height: 9.5px; box-shadow: 0 0 8px rgba(255, 77, 99, 0.95); }
 
 @keyframes hit-pop {
   from { opacity: 1; }
@@ -2047,26 +2052,116 @@ kbd {
 .loadout-slot {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  padding: 4px 9px;
+  gap: 6px;
+  padding: 5px 10px;
   border-radius: var(--radius-sm);
   background: rgba(8, 12, 18, 0.72);
   border: 1px solid rgba(255, 255, 255, 0.1);
   color: var(--muted);
   font-size: 10px;
   letter-spacing: 0.1em;
+  opacity: 0.74;
+  transition: transform 140ms var(--ease), border-color 140ms var(--ease), background 140ms var(--ease), color 140ms var(--ease), opacity 140ms var(--ease);
 }
 
 .loadout-slot kbd {
   font-family: var(--mono);
   font-size: 9.5px;
+  padding: 1px 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.06);
   color: var(--text-soft);
 }
 
+.loadout-slot-glyph {
+  font-style: normal;
+  font-size: 10.5px;
+  opacity: 0.85;
+}
+
 .loadout-slot.is-active {
+  opacity: 1;
+  transform: translateY(-2px);
   border-color: var(--accent);
-  background: rgba(15, 36, 48, 0.84);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35), inset 0 -2px 0 var(--accent);
+  background: rgba(15, 38, 52, 0.92);
   color: var(--text);
+}
+
+.loadout-slot.is-active kbd {
+  background: rgba(47, 224, 255, 0.18);
+  color: var(--accent);
+}
+
+.ammo.is-low #ammo-value {
+  color: #ffc157;
+}
+
+#ammo-value {
+  display: inline-block;
+  transition: transform 85ms ease-out, color 140ms ease;
+}
+
+#ammo-value.is-pop {
+  transform: scale(1.09);
+}
+
+.hud-elim-banner {
+  position: absolute;
+  left: 50%;
+  top: calc(50% + 56px);
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(255, 77, 99, 0.48);
+  border-left: 3px solid var(--danger);
+  background: rgba(9, 13, 19, 0.88);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.45);
+  pointer-events: none;
+  z-index: 6;
+}
+
+.hud-elim-banner.is-active {
+  animation: elim-banner-pop 220ms var(--ease);
+}
+
+.hud-elim-banner .elim-kicker {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.18em;
+  color: var(--danger);
+}
+
+.hud-elim-banner .elim-victim {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--text);
+}
+
+.hud-elim-banner .elim-headshot {
+  font-style: normal;
+  font-family: var(--mono);
+  font-size: 8.5px;
+  letter-spacing: 0.14em;
+  padding: 1px 5px;
+  border-radius: 2px;
+  background: rgba(255, 212, 94, 0.18);
+  color: #ffd45e;
+}
+
+@keyframes elim-banner-pop {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(6px) scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0) scale(1);
+  }
 }
 
 /* Iron-sight & Launcher reticle tightening */

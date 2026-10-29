@@ -118,6 +118,8 @@ export class PlayerController {
     this.jumpTapLatched = false;
     this.yaw = 0;
     this.pitch = 0;
+    this.lookDeltaYaw = 0;
+    this.lookDeltaPitch = 0;
     this.sensitivity = 0.0022;
     this.lookScale = 1;
     this.invertY = false;
@@ -149,10 +151,14 @@ export class PlayerController {
     const movementY = Number(event.movementY) || 0;
     const scale = Number.isFinite(this.lookScale) ? THREE.MathUtils.clamp(this.lookScale, 0.15, 1) : 1;
     const step = this.sensitivity * scale;
-    this.yaw -= movementX * step;
+    const dYaw = -movementX * step;
     const pitchDelta = movementY * step * (this.invertY ? -1 : 1);
+    const prevPitch = this.pitch;
+    this.yaw += dYaw;
     this.pitch = Math.max(-1.45, Math.min(1.45, this.pitch - pitchDelta));
     this.yaw = ((this.yaw + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI;
+    this.lookDeltaYaw += dYaw;
+    this.lookDeltaPitch += (this.pitch - prevPitch);
   }
 
   handleWheel(event) {
@@ -270,16 +276,28 @@ export class PlayerController {
     return delta;
   }
 
+  consumeLookDelta() {
+    const yaw = this.lookDeltaYaw;
+    const pitch = this.lookDeltaPitch;
+    this.lookDeltaYaw = 0;
+    this.lookDeltaPitch = 0;
+    return { yaw, pitch };
+  }
+
   clearKeys() {
     this.keys.clear();
     this.jumpTapLatched = false;
     this.wheelDelta = 0;
+    this.lookDeltaYaw = 0;
+    this.lookDeltaPitch = 0;
   }
 
   /** Clear one-shot jump/wheel latches while preserving physically held WASD keys across respawns/overlays. */
   resetTransientState() {
     this.jumpTapLatched = false;
     this.wheelDelta = 0;
+    this.lookDeltaYaw = 0;
+    this.lookDeltaPitch = 0;
   }
 
   /** Full input reset for blur, tab hide, disconnect, and match teardown. */
@@ -409,6 +427,8 @@ export class RemotePlayers {
       pendingWeaponId: data.currentWeaponId,
       weaponModel: null,
       weaponTransition: null,
+      hitFlashUntil: 0,
+      hitHeadshot: false,
       dead: false,
       lastPoseAlive: true,
     };
@@ -482,6 +502,17 @@ export class RemotePlayers {
     record.muzzleFlashUntil = now + 60;
   }
 
+  /**
+   * Authoritative hit reaction triggered solely on server `HIT_CONFIRMED` so
+   * landing shots on bots or opponents gives unmistakable visual confirmation.
+   */
+  triggerHitReaction(targetId, headshot = false, now = performance.now()) {
+    const record = this.players.get(targetId);
+    if (!record) return;
+    record.hitFlashUntil = now + (headshot ? 150 : 110);
+    record.hitHeadshot = Boolean(headshot);
+  }
+
   update(players, interpolator, camera, renderAt, localPlayerId) {
     const currentIds = new Set(players.map((player) => player.id));
     for (const [id, record] of this.players) {
@@ -506,29 +537,39 @@ export class RemotePlayers {
       const connected = pose.connected !== false;
       const alive = pose.alive !== false;
 
-      record.nameLabel.textContent = data.name;
+      const isBot = Boolean(data.isBot || String(data.id).startsWith('bot-'));
+      record.nameLabel.textContent = isBot ? `BOT · ${data.name}` : data.name;
       record.label.style.setProperty('--player-color', data.color || '#57d8ff');
       const weaponName = data.currentWeaponName ?? data.currentWeaponId ?? '';
       record.weaponLabel.textContent = !connected
         ? 'OFFLINE · RECONNECTING'
         : pose.spawnProtected
           ? 'PROTECTED'
-          : weaponName;
+          : pose.reloading
+            ? `${weaponName} · RELOADING`
+            : weaponName;
+      record.label.classList.toggle('is-bot', isBot);
       record.label.classList.toggle('is-offline', !connected);
       record.label.classList.toggle('is-protected', Boolean(pose.spawnProtected));
+      record.label.classList.toggle('is-hit', now < record.hitFlashUntil);
 
       this.equipWeapon(record, data.currentWeaponId);
       this.updateWeaponTransition(record, now);
       record.muzzleFlash.visible = now < record.muzzleFlashUntil;
 
       const speed = Math.hypot(pose.vx ?? 0, pose.vz ?? 0);
+      const airborne = pose.grounded === false && (pose.y > 0.08 || Math.abs(pose.vy ?? 0) > 0.9);
       if (record.rig) {
         if (alive) {
           if (record.dead) {
             record.rig.revive();
             record.dead = false;
           }
-          record.rig.setLocomotion(connected ? speed : 0);
+          if (airborne && typeof record.rig.setJumping === 'function') {
+            record.rig.setJumping();
+          } else {
+            record.rig.setLocomotion(connected ? speed : 0);
+          }
         } else if (!record.dead) {
           record.rig.setDead();
           record.dead = true;
@@ -537,8 +578,11 @@ export class RemotePlayers {
       }
       record.lastPoseAlive = alive;
 
+      const hitFlinch = now < record.hitFlashUntil
+        ? ((record.hitFlashUntil - now) / (record.hitHeadshot ? 150 : 110)) * (record.hitHeadshot ? -0.095 : -0.055)
+        : 0;
       record.group.position.set(pose.x, pose.y, pose.z);
-      record.group.rotation.y = Number(pose.yaw) || 0;
+      record.group.rotation.set(hitFlinch, Number(pose.yaw) || 0, 0);
       record.group.visible = connected;
       record.shield.visible = Boolean(connected && alive && pose.spawnProtected);
 
