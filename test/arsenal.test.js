@@ -184,8 +184,28 @@ test('ADS is time-based, uses per-weapon offsets, and clears on release or weapo
   aim.setHeld(true);
   assert.equal(aim.held, false, 'shield has no ADS');
   assert.equal(ADS_PROFILES.ROCKET.scope, null);
-  assert.equal(ADS_PROFILES.SNIPER.scope, null);
+  assert.equal(ADS_PROFILES.SMG.scope, null);
+  assert.equal(ADS_PROFILES.SNIPER.scope, 'optic');
+  assert.equal(ADS_PROFILES.ROCKET.reticle, 'launcher');
   assert.notDeepEqual(ADS_PROFILES.ROCKET.offset, ADS_PROFILES.PISTOL.offset);
+
+  // Sniper optical scope engages magnified zoom, scales look sensitivity, and hides opaque viewmodel cylinder at high zoom.
+  const hiddenStates = [];
+  const scopedAim = new AimController(camera, {
+    setAim: (amount, profile) => values.push({ amount, profile }),
+    setOpticalScopeHidden: (hidden) => hiddenStates.push(hidden),
+  }, 77);
+  scopedAim.setWeapon('SNIPER');
+  scopedAim.setHeld(true);
+  scopedAim.update(0.3);
+  assert.equal(scopedAim.scopeActive, true);
+  assert.equal(hiddenStates.at(-1), true);
+  assert.ok(scopedAim.lookScale < 0.55, 'high-zoom optic reduces mouse sensitivity proportionally');
+  scopedAim.reset(true);
+  assert.equal(scopedAim.scopeActive, false);
+  assert.equal(hiddenStates.at(-1), false);
+  assert.equal(scopedAim.lookScale, 1);
+
   aim.reset(true);
   assert.equal(aim.amount, 0);
 });

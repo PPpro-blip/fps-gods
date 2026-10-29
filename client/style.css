@@ -1837,3 +1837,356 @@ kbd {
   .map-grid { grid-template-columns: minmax(0, 1fr); }
   .map-card p { display: none; }
 }
+
+/* ============================================================================
+   OPERATION ASCENSION — Credits Wallet, Email OTP Auth, Optical Scopes & HUD
+   ========================================================================== */
+
+.credits-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 36px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid var(--line-strong);
+  background: rgba(12, 18, 26, 0.85);
+  color: var(--text-soft);
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  cursor: pointer;
+  transition: border-color 140ms var(--ease), background 140ms var(--ease), color 140ms var(--ease);
+}
+
+.credits-pill:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.credits-pill.is-authenticated {
+  border-color: rgba(255, 212, 94, 0.45);
+  color: var(--gold);
+}
+
+.credits-glyph {
+  color: var(--gold);
+  font-size: 12px;
+}
+
+.wallet-summary-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.wallet-kicker {
+  display: block;
+  font-size: 9px;
+  letter-spacing: 0.18em;
+  color: var(--muted);
+}
+
+.wallet-amount {
+  margin: 4px 0 0;
+  font-family: var(--mono);
+  font-size: 22px;
+  letter-spacing: 0.04em;
+  color: var(--gold);
+}
+
+.wallet-sub {
+  text-align: right;
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  color: var(--muted);
+}
+
+.wallet-sub strong {
+  display: block;
+  margin-top: 2px;
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--text);
+}
+
+.compact-rates {
+  margin: 10px 0 14px;
+}
+
+.ledger-list {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.ledger-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  background: rgba(8, 12, 17, 0.65);
+  border: 1px solid var(--line);
+  font-size: 12px;
+}
+
+.ledger-row strong {
+  font-family: var(--mono);
+  color: var(--ok);
+  letter-spacing: 0.06em;
+}
+
+.ledger-empty {
+  font-size: 12px;
+  color: var(--muted);
+  padding: 4px 0;
+}
+
+.auth-card {
+  margin: 14px 0;
+}
+
+.auth-card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.auth-card-head h3 {
+  margin: 0;
+}
+
+.auth-card-head small {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.auth-copy {
+  margin: 0 0 10px;
+  font-size: 12.5px;
+  color: var(--text-soft);
+}
+
+.auth-link-btn {
+  margin-top: 8px;
+  font-size: 10.5px;
+}
+
+.auth-signed-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.auth-signed-row strong {
+  display: block;
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--accent);
+}
+
+.auth-signed-row small {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/* --- Compact Krunker-inspired HUD & ADS Optics --- */
+
+.hud-credits-pill {
+  font-family: var(--mono);
+  color: var(--gold);
+  letter-spacing: 0.08em;
+}
+
+#ping-value {
+  font-family: var(--mono);
+  color: var(--accent);
+  margin-left: 8px;
+}
+
+.hud-reward-pop {
+  position: absolute;
+  top: calc(var(--topbar-height) + 52px);
+  right: var(--safe-inline);
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  background: rgba(10, 18, 24, 0.88);
+  border: 1px solid rgba(255, 212, 94, 0.55);
+  color: var(--gold);
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  pointer-events: none;
+  z-index: 6;
+}
+
+.hud-center-dock {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.hud-loadout-strip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.loadout-slot {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 9px;
+  border-radius: var(--radius-sm);
+  background: rgba(8, 12, 18, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+}
+
+.loadout-slot kbd {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  color: var(--text-soft);
+}
+
+.loadout-slot.is-active {
+  border-color: var(--accent);
+  background: rgba(15, 36, 48, 0.84);
+  color: var(--text);
+}
+
+/* Iron-sight & Launcher reticle tightening */
+.crosshair[data-ads="iron"] {
+  transform: translate(-50%, -50%) scale(0.62);
+}
+
+.crosshair[data-ads="launcher"] {
+  transform: translate(-50%, -50%) scale(1.18);
+}
+
+/* Optical Sniper & Railgun Scope Lens */
+.ads-scope-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  display: grid;
+  place-items: center;
+  z-index: 4;
+}
+
+.ads-scope-overlay[data-scope="optic"] {
+  background: radial-gradient(
+    circle at 50% 50%,
+    transparent 0%,
+    transparent 31vmin,
+    rgba(3, 6, 10, 0.94) 32.2vmin,
+    rgba(2, 4, 7, 0.985) 100%
+  );
+}
+
+.ads-scope-overlay[data-scope="rail"] {
+  background: radial-gradient(
+    circle at 50% 50%,
+    transparent 0%,
+    transparent 38vmin,
+    rgba(6, 18, 28, 0.38) 100%
+  );
+}
+
+.ads-scope-lens {
+  position: relative;
+  width: min(64vmin, 540px);
+  height: min(64vmin, 540px);
+  border-radius: 50%;
+  border: 1.5px solid rgba(87, 216, 255, 0.55);
+  box-shadow: inset 0 0 28px rgba(47, 224, 255, 0.12);
+}
+
+.ads-scope-overlay[data-scope="rail"] .ads-scope-lens {
+  border-radius: 14px;
+  width: min(44vmin, 380px);
+  height: min(32vmin, 270px);
+  border-color: rgba(87, 216, 255, 0.45);
+}
+
+.scope-line {
+  position: absolute;
+  background: rgba(215, 246, 255, 0.72);
+}
+
+.scope-line-h {
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 1px;
+  transform: translateY(-50%);
+}
+
+.scope-line-v {
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  transform: translateX(-50%);
+}
+
+.scope-center-dot {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--danger);
+  transform: translate(-50%, -50%);
+  box-shadow: 0 0 8px rgba(255, 77, 99, 0.85);
+}
+
+.scope-mil {
+  position: absolute;
+  background: rgba(87, 216, 255, 0.85);
+}
+
+.scope-mil-l1, .scope-mil-r1 {
+  top: calc(50% - 4px);
+  width: 1px;
+  height: 8px;
+}
+.scope-mil-l1 { left: 42%; }
+.scope-mil-r1 { left: 58%; }
+
+.scope-mil-b1, .scope-mil-b2 {
+  left: calc(50% - 4px);
+  height: 1px;
+  width: 8px;
+}
+.scope-mil-b1 { top: 58%; }
+.scope-mil-b2 { top: 66%; }
+
+.scope-readout {
+  position: absolute;
+  bottom: 14%;
+  left: 50%;
+  transform: translateX(-50%);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.2em;
+  color: rgba(87, 216, 255, 0.88);
+  background: rgba(5, 10, 15, 0.65);
+  padding: 2px 8px;
+  border-radius: 3px;
+}

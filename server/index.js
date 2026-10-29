@@ -6,13 +6,21 @@ import { Server } from 'socket.io';
 import { EVENTS, ROOM_STATES } from '../shared/events.js';
 import { PLAYER } from '../shared/gameConfig.js';
 import { DEFAULT_GAME_SERVER_HOST, DEFAULT_GAME_SERVER_PORT } from '../shared/deployment.js';
+import { GameDatabase } from './database.js';
+import { EconomyService } from './economy.js';
+import { createEmailProvider } from './emailProvider.js';
+import {
+  AuthService,
+  buildClearSessionCookie,
+  buildSessionCookie,
+  extractRequestSessionToken,
+  extractSocketSessionToken,
+} from './auth.js';
 import { GameState } from './gameState.js';
 import { PlayerProfileStore } from './profiles.js';
 import { ROOM_RECONNECT_GRACE_MS, RoomManager } from './rooms.js';
 import { ALLOWED_ORIGIN, socketCorsOptions } from './origins.js';
 
-// Handle uncaught exceptions and unhandled promise rejections so the server
-// does not crash on startup or unexpected runtime faults in production.
 process.on('uncaughtException', (error) => {
   console.error('[FPS GODS] Uncaught exception:', error);
 });
@@ -21,30 +29,53 @@ process.on('unhandledRejection', (reason, promise) => {
   console.error('[FPS GODS] Unhandled rejection at:', promise, 'reason:', reason);
 });
 
-// Fixed 20 Hz simulation and state broadcast. The server derives its own delta
-// time and caps long pauses so clients can never supply movement speed or dt.
+// Fixed 20 Hz simulation and state broadcast.
 const TICK_RATE_MS = 50;
+
+function resolveClientIp(req) {
+  const forwarded = req.headers['x-forwarded-for'];
+  if (typeof forwarded === 'string' && forwarded.trim()) {
+    return forwarded.split(',')[0].trim();
+  }
+  return req.socket?.remoteAddress || 'unknown';
+}
+
+function isSecureRequest(req) {
+  if (req.secure) return true;
+  const proto = req.headers['x-forwarded-proto'];
+  if (typeof proto === 'string' && proto.split(',')[0].trim().toLowerCase() === 'https') {
+    return true;
+  }
+  return process.env.NODE_ENV === 'production';
+}
 
 /**
  * Build the Express app, HTTP server, and Socket.IO instance without binding a
  * port. Exported so deployment/integration tests can boot the real server on an
- * ephemeral port and shut the simulation timer down again.
+ * ephemeral port and shut the simulation timer + database down cleanly.
  */
 export function createGameServer(options = {}) {
-  const profileStore = options.profileStore ?? new PlayerProfileStore(options.profileStorePath);
+  const ownsDatabase = !options.database;
+  const database = options.database ?? new GameDatabase({ dbPath: options.dbPath });
+  const emailProvider = createEmailProvider(options.emailProvider);
+  const authService = new AuthService(database, emailProvider, options.authOptions);
+  const economyService = new EconomyService(database);
+  const profileStore = options.profileStore ?? new PlayerProfileStore(options.profileStorePath, authService);
+
   const app = express();
   app.disable('x-powered-by');
 
-  // Explicit global CORS and preflight handling before heavy middleware
   app.use((req, res, next) => {
     res.set('Access-Control-Allow-Origin', ALLOWED_ORIGIN);
     res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, HEAD');
-    res.set('Access-Control-Allow-Headers', '*');
+    res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept');
     if (req.method === 'OPTIONS') {
       return res.status(204).end();
     }
     next();
   });
+
+  app.use('/api', express.json({ limit: '16kb' }));
 
   const httpServer = createServer(app);
   const io = new Server(httpServer, {
@@ -59,22 +90,82 @@ export function createGameServer(options = {}) {
   });
   const roomManager = new RoomManager(io, profileStore);
 
-  // Health check for host supervisors (Railway/Render) and for browser probes.
-  // Registered before any game logic so it cannot observe an uninitialized binding.
+  // Track connected sockets by verified accountId so wallet awards push live to
+  // every active tab/session owned by that authenticated player.
+  const accountSockets = new Map();
+  function bindSocketAccount(socket, nextAccountId) {
+    const prevAccountId = socket.data.accountId ?? null;
+    if (prevAccountId && prevAccountId !== nextAccountId) {
+      const prevSet = accountSockets.get(prevAccountId);
+      if (prevSet) {
+        prevSet.delete(socket.id);
+        if (prevSet.size === 0) accountSockets.delete(prevAccountId);
+      }
+    }
+    socket.data.accountId = nextAccountId || null;
+    if (nextAccountId) {
+      let set = accountSockets.get(nextAccountId);
+      if (!set) {
+        set = new Set();
+        accountSockets.set(nextAccountId, set);
+      }
+      set.add(socket.id);
+    }
+  }
+
+  function unbindSocketAccount(socket) {
+    const prevAccountId = socket.data.accountId ?? null;
+    if (!prevAccountId) return;
+    const set = accountSockets.get(prevAccountId);
+    if (set) {
+      set.delete(socket.id);
+      if (set.size === 0) accountSockets.delete(prevAccountId);
+    }
+    socket.data.accountId = null;
+  }
+
+  function emitWalletToAccount(accountId, rewardEvent = null) {
+    if (!accountId) return;
+    const socketIds = accountSockets.get(accountId);
+    if (!socketIds || socketIds.size === 0) return;
+    const wallet = economyService.getWallet(accountId, { historyLimit: 12 });
+    if (!wallet) return;
+    for (const sid of socketIds) {
+      if (rewardEvent) {
+        io.to(sid).emit(EVENTS.REWARD_EARNED, rewardEvent);
+      }
+      io.to(sid).emit(EVENTS.WALLET_UPDATE, wallet);
+    }
+  }
+
+  const tickDeltasMs = [];
+  function recordTickDelta(ms) {
+    tickDeltasMs.push(ms);
+    if (tickDeltasMs.length > 100) tickDeltasMs.shift();
+  }
+
   app.get('/health', (_request, response) => {
     response.set('Access-Control-Allow-Origin', ALLOWED_ORIGIN);
     response.set('Cache-Control', 'no-store');
+    const avgTickMs = tickDeltasMs.length
+      ? +(tickDeltasMs.reduce((a, b) => a + b, 0) / tickDeltasMs.length).toFixed(2)
+      : TICK_RATE_MS;
+    const maxTickMs = tickDeltasMs.length ? +Math.max(...tickDeltasMs).toFixed(2) : TICK_RATE_MS;
     response.status(200).json({
       status: 'ok',
       service: 'fps-gods-game-server',
       uptime: process.uptime(),
       rooms: roomManager.rooms.size,
       connections: io.engine.clientsCount,
+      tickRateHz: 1000 / TICK_RATE_MS,
+      avgTickMs,
+      maxTickMs,
+      authConfigured: emailProvider.configured,
+      persistence: database.getPersistenceSummary(),
       now: Date.now(),
     });
   });
 
-  // Root endpoint for simple platform probes
   app.get('/', (_request, response) => {
     response.set('Access-Control-Allow-Origin', ALLOWED_ORIGIN);
     response.set('Cache-Control', 'no-store');
@@ -85,19 +176,234 @@ export function createGameServer(options = {}) {
     });
   });
 
+  // --- Phase 5 & Phase 6 HTTP API (Email OTP Auth + Durable Accounts + Wallet) ---
+
+  app.get('/api/auth/status', (_req, res) => {
+    res.set('Cache-Control', 'no-store');
+    res.status(200).json({
+      ok: true,
+      ...authService.getStatus(),
+    });
+  });
+
+  app.post('/api/auth/otp/request', async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    try {
+      const result = await authService.requestOtp({
+        email: req.body?.email,
+        ip: resolveClientIp(req),
+      });
+      res.status(200).json(result);
+    } catch (error) {
+      const status = Number.isInteger(error?.status) ? error.status : 500;
+      if (error?.retryAfterSeconds) {
+        res.set('Retry-After', String(error.retryAfterSeconds));
+      }
+      res.status(status).json({
+        ok: false,
+        code: error?.code || 'AUTH_REQUEST_ERROR',
+        message: status >= 500 && status !== 503 && status !== 502
+          ? 'Unable to process verification request.'
+          : error.message,
+        ...(error?.retryAfterSeconds ? { retryAfterSeconds: error.retryAfterSeconds } : {}),
+      });
+    }
+  });
+
+  app.post('/api/auth/otp/verify', (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    try {
+      const verified = authService.verifyOtp({
+        email: req.body?.email,
+        code: req.body?.code,
+        callsign: req.body?.callsign,
+        selectedBundle: req.body?.selectedBundle,
+        ip: resolveClientIp(req),
+        userAgent: req.headers['user-agent'] || '',
+      });
+      res.set('Set-Cookie', buildSessionCookie(verified.sessionToken, {
+        maxAgeSeconds: verified.maxAgeSeconds,
+        secure: isSecureRequest(req),
+      }));
+      const wallet = economyService.getWallet(verified.account.accountId, { historyLimit: 12 });
+      res.status(200).json({
+        ok: true,
+        isNewAccount: verified.isNewAccount,
+        sessionToken: verified.sessionToken,
+        expiresAt: verified.sessionExpiresAt,
+        account: verified.account,
+        wallet,
+      });
+    } catch (error) {
+      const status = Number.isInteger(error?.status) ? error.status : 500;
+      if (error?.retryAfterSeconds) {
+        res.set('Retry-After', String(error.retryAfterSeconds));
+      }
+      res.status(status).json({
+        ok: false,
+        code: error?.code || 'AUTH_VERIFY_ERROR',
+        message: status >= 500 ? 'Unable to verify code right now.' : error.message,
+        ...(error?.retryAfterSeconds ? { retryAfterSeconds: error.retryAfterSeconds } : {}),
+      });
+    }
+  });
+
+  app.get('/api/auth/me', (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    const token = extractRequestSessionToken(req);
+    const session = token ? authService.verifySessionToken(token) : null;
+    if (!session) {
+      res.status(200).json({
+        ok: true,
+        authenticated: false,
+        account: null,
+        wallet: null,
+        status: authService.getStatus(),
+      });
+      return;
+    }
+    const wallet = economyService.getWallet(session.accountId, { historyLimit: 12 });
+    res.status(200).json({
+      ok: true,
+      authenticated: true,
+      account: session.account,
+      wallet,
+      status: authService.getStatus(),
+    });
+  });
+
+  app.post('/api/auth/profile', (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    const token = extractRequestSessionToken(req);
+    const session = token ? authService.verifySessionToken(token) : null;
+    if (!session) {
+      res.status(401).json({
+        ok: false,
+        code: 'UNAUTHORIZED',
+        message: 'Sign in with Email OTP to update persistent account settings.',
+      });
+      return;
+    }
+    const updated = authService.updateAccountProfile(session.accountId, {
+      callsign: req.body?.callsign,
+      selectedBundle: req.body?.selectedBundle,
+    });
+    res.status(200).json({
+      ok: true,
+      account: updated,
+    });
+  });
+
+  app.post('/api/auth/logout', (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    const token = extractRequestSessionToken(req);
+    if (token) authService.logout(token);
+    res.set('Set-Cookie', buildClearSessionCookie({ secure: isSecureRequest(req) }));
+    res.status(200).json({ ok: true });
+  });
+
+  app.get('/api/wallet', (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    const token = extractRequestSessionToken(req);
+    const session = token ? authService.verifySessionToken(token) : null;
+    if (!session) {
+      res.status(401).json({
+        ok: false,
+        code: 'UNAUTHORIZED',
+        message: 'Sign in to view your persistent Credits wallet.',
+      });
+      return;
+    }
+    const wallet = economyService.getWallet(session.accountId, { historyLimit: 20 });
+    res.status(200).json({
+      ok: true,
+      wallet,
+    });
+  });
+
   function launchRoom(room) {
     const now = Date.now();
     room.game = new GameState(room, {
       emitRoom: (event, data) => io.to(room.code).emit(event, data),
       emitPlayer: (playerId, event, data) => io.to(playerId).emit(event, data),
-      onHumanKill: (player) => profileStore.recordLifetimeKill(player.profileId),
+      onHumanKill: (player) => profileStore.recordLifetimeKill(player.profileId, player.accountId),
+      onElimination: ({
+        matchId,
+        killSeq,
+        killer,
+        victim,
+        assisters,
+        headshot,
+        isSoloBots,
+        now: eventNow,
+      }) => {
+        if (killer && !killer.isBot && killer.accountId) {
+          const victimIdentity = victim?.isBot
+            ? `bot:${victim.name}`
+            : (victim?.accountId || victim?.profileId || victim?.id);
+          const killReward = economyService.awardElimination({
+            killerAccountId: killer.accountId,
+            victimIdentity,
+            isSoloBots,
+            headshot,
+            matchId,
+            killSeq,
+            now: eventNow,
+          });
+          if (killReward?.awarded) {
+            emitWalletToAccount(killer.accountId, {
+              amount: killReward.amount,
+              balance: killReward.balance,
+              reason: killReward.reason,
+              headshot: Boolean(headshot),
+            });
+          }
+        }
+        for (const assister of assisters ?? []) {
+          if (!assister?.accountId) continue;
+          const assistReward = economyService.awardAssist({
+            assisterAccountId: assister.accountId,
+            killerAccountId: killer?.accountId ?? null,
+            matchId,
+            killSeq,
+            now: eventNow,
+          });
+          if (assistReward?.awarded) {
+            emitWalletToAccount(assister.accountId, {
+              amount: assistReward.amount,
+              balance: assistReward.balance,
+              reason: assistReward.reason,
+            });
+          }
+        }
+      },
+      onMatchFinished: ({
+        matchId,
+        winner,
+        players,
+        isSoloBots,
+        now: eventNow,
+      }) => {
+        const winnerAccountId = winner && !winner.isBot ? (winner.accountId ?? null) : null;
+        const summaryRewards = economyService.awardMatchSummary({
+          matchId,
+          winnerAccountId,
+          participants: players,
+          isSoloBots,
+          now: eventNow,
+        });
+        for (const reward of summaryRewards) {
+          emitWalletToAccount(reward.accountId, {
+            amount: reward.amount,
+            balance: reward.balance,
+            reason: reward.reason,
+          });
+        }
+      },
     }, now);
     io.to(room.code).emit(EVENTS.GAME_START, {
       code: room.code,
       mode: room.mode,
-      // Broadcast the arena with the start signal so a client that joined late,
-      // reconnected, or resumed from a stored session builds the same arena the
-      // server is simulating.
       mapId: room.game.mapId,
       mapName: room.game.map.name,
       targetKills: PLAYER.targetKills,
@@ -106,11 +412,46 @@ export function createGameServer(options = {}) {
     roomManager.broadcastRoomState(room);
   }
 
-  // Socket handlers validate room membership before any input can reach a game.
   io.on('connection', (socket) => {
+    const initialToken = extractSocketSessionToken(socket);
+    const initialSession = initialToken ? authService.verifySessionToken(initialToken) : null;
+    if (initialSession) {
+      bindSocketAccount(socket, initialSession.accountId);
+      socket.data.profileId = initialSession.accountId;
+      const profile = profileStore.getOrCreate(initialSession.accountId, '', initialSession.accountId);
+      if (profile) socket.emit(EVENTS.PROFILE_UPDATE, profile);
+      const wallet = economyService.getWallet(initialSession.accountId, { historyLimit: 12 });
+      if (wallet) socket.emit(EVENTS.WALLET_UPDATE, wallet);
+    } else {
+      socket.data.accountId = null;
+    }
+
     if (socket.recovered && socket.data.roomCode && !roomManager.recoverSocket(socket)) {
       socket.emit(EVENTS.ROOM_RESUME_FAILED, { message: 'That room session has expired. Join the room again with its code.' });
     }
+
+    socket.on(EVENTS.NET_PING, (payload = {}) => {
+      socket.volatile.emit(EVENTS.NET_PONG, { pingId: payload?.pingId });
+    });
+
+    socket.on(EVENTS.AUTH_SYNC, (payload = {}) => {
+      const candidateToken = typeof payload?.sessionToken === 'string' ? payload.sessionToken.trim() : null;
+      const verified = candidateToken ? authService.verifySessionToken(candidateToken) : null;
+      if (verified) {
+        bindSocketAccount(socket, verified.accountId);
+        socket.data.profileId = verified.accountId;
+        const profile = profileStore.getOrCreate(verified.accountId, '', verified.accountId);
+        if (profile) socket.emit(EVENTS.PROFILE_UPDATE, profile);
+        const wallet = economyService.getWallet(verified.accountId, { historyLimit: 12 });
+        if (wallet) socket.emit(EVENTS.WALLET_UPDATE, wallet);
+      } else {
+        unbindSocketAccount(socket);
+        if (typeof socket.data.profileId === 'string' && socket.data.profileId.startsWith('acct_')) {
+          socket.data.profileId = undefined;
+        }
+        socket.emit(EVENTS.WALLET_UPDATE, { accountId: null, authenticated: false, balance: 0, recentTransactions: [] });
+      }
+    });
 
     socket.on(EVENTS.ROOM_RESUME, (payload = {}) => {
       roomManager.resumeRoom(socket, payload);
@@ -121,7 +462,12 @@ export function createGameServer(options = {}) {
     });
 
     socket.on(EVENTS.PROFILE_REQUEST, (payload = {}) => {
-      const profile = profileStore.getOrCreate(payload.profileId, payload.callsign ?? payload.name);
+      const verifiedAccountId = socket.data.accountId ?? null;
+      const profile = profileStore.getOrCreate(
+        verifiedAccountId ?? payload.profileId,
+        payload.callsign ?? payload.name,
+        verifiedAccountId,
+      );
       socket.data.profileId = profile.profileId;
       socket.emit(EVENTS.PROFILE_UPDATE, profile);
     });
@@ -158,8 +504,6 @@ export function createGameServer(options = {}) {
     });
 
     socket.on(EVENTS.LIST_ROOMS, () => {
-      // Cheap request, but it is still client-driven: throttle so a scripted
-      // client cannot turn the lobby browser into a busy loop.
       const now = Date.now();
       if (now - (socket.data.lastRoomListAt ?? 0) < 500) return;
       socket.data.lastRoomListAt = now;
@@ -183,15 +527,13 @@ export function createGameServer(options = {}) {
 
     socket.on(EVENTS.WEAPON_SWITCH, (payload = {}) => {
       const room = roomManager.getRoomForSocket(socket);
-      if (room?.state === ROOM_STATES.PLAYING) room.game?.switchWeapon(socket.id, payload.weaponId, Date.now());
+      if (room?.state === ROOM_STATES.PLAYING) room.game?.switchWeapon(socket.id, payload?.weaponId, Date.now());
     });
 
     socket.on(EVENTS.RETURN_TO_LOBBY, () => {
       roomManager.returnToLobby(socket);
     });
 
-    // Solo bot rooms cannot use the shared lobby (they never have a second
-    // human), so their end screen requests a fresh authoritative match instead.
     socket.on(EVENTS.PLAY_AGAIN, () => {
       const result = roomManager.restartSoloMatch(socket);
       if (result.error) {
@@ -202,6 +544,7 @@ export function createGameServer(options = {}) {
     });
 
     socket.on('disconnect', () => {
+      unbindSocketAccount(socket);
       roomManager.handleDisconnect(socket);
     });
   });
@@ -212,7 +555,9 @@ export function createGameServer(options = {}) {
   const pendingSnapshots = new Map();
   const simulationTimer = setInterval(() => {
     const now = Date.now();
-    const delta = Math.min((now - lastTick) / 1_000, 0.1);
+    const rawDeltaMs = Math.max(0, now - lastTick);
+    recordTickDelta(rawDeltaMs);
+    const delta = Math.min(rawDeltaMs / 1_000, 0.1);
     lastTick = now;
     if (now - lastRoomCleanup >= 1_000) {
       roomManager.expireDisconnectedPlayers(now);
@@ -221,22 +566,12 @@ export function createGameServer(options = {}) {
 
     for (const room of roomManager.rooms.values()) {
       if (room.state !== ROOM_STATES.PLAYING || !room.game) continue;
-      // One room must never take the process down. Without this guard a throw
-      // inside a single match's simulation is an uncaught exception in a timer
-      // callback, which kills the node process and every other live match with
-      // it - the blast radius reaches players who did nothing wrong. The room is
-      // ended instead, so its own clients get a result rather than a hang.
       try {
         const result = room.game.update(delta, now);
         if (result?.winner) {
           roomManager.endGame(room, result.winner);
           continue;
         }
-        // Bot shots and ammo events can make the socket temporarily non-writable
-        // during this very tick. Emitting volatile state immediately afterwards
-        // drops it even on an idle localhost connection. Give the transport one
-        // event-loop turn to flush, while retaining volatile/latest-only semantics
-        // for genuinely congested clients (never queue old snapshots).
         const game = room.game;
         const snapshot = game.getPublicState(now);
         const pending = pendingSnapshots.get(room.code);
@@ -258,8 +593,6 @@ export function createGameServer(options = {}) {
         const strikes = (failingRooms.get(room.code) ?? 0) + 1;
         failingRooms.set(room.code, strikes);
         console.error(`[FPS GODS] room ${room.code} tick ${strikes} failed:`, error);
-        // Give a transient fault one more tick, then stop the match so a room
-        // cannot log forever while its players watch a frozen arena.
         if (strikes >= 2) {
           failingRooms.delete(room.code);
           room.state = ROOM_STATES.ENDED;
@@ -276,37 +609,38 @@ export function createGameServer(options = {}) {
     }
   }, TICK_RATE_MS);
 
-  /** Stop the simulation loop and close every socket. Resolves when shut down. */
+  /** Stop the simulation loop, close sockets, and close owned SQLite connection. */
   function close() {
     clearInterval(simulationTimer);
     return new Promise((resolve) => {
-      io.close(() => resolve());
-      setTimeout(resolve, 2_000).unref();
+      const finalize = () => {
+        if (ownsDatabase) database.close();
+        resolve();
+      };
+      io.close(() => finalize());
+      setTimeout(finalize, 2_000).unref();
     });
   }
 
-  return { app, httpServer, io, roomManager, close };
+  return {
+    app,
+    httpServer,
+    io,
+    roomManager,
+    database,
+    authService,
+    economyService,
+    profileStore,
+    close,
+  };
 }
 
 /** Bind the game server to HOST/PORT and install signal-based shutdown. */
 export function startGameServer() {
   const server = createGameServer();
-  // Number() matters: hosts inject PORT as a string, and a string passed to
-  // listen() is interpreted as a named pipe. The fallback below is a local-dev
-  // default ONLY - Railway/Render always set PORT (Railway's is commonly 8080),
-  // so this value never decides the production port and must not be edited as a
-  // fix for a host routing problem. See shared/deployment.js.
-  //
-  // 38ec5ac set this to a literal 3000 on main; that intent is preserved here by
-  // DEFAULT_GAME_SERVER_PORT, which is also what Vite's dev proxy now derives its
-  // target from, so the two can no longer be edited apart.
   const port = Number(process.env.PORT) || DEFAULT_GAME_SERVER_PORT;
   const host = process.env.HOST || DEFAULT_GAME_SERVER_HOST;
 
-  // A failed bind must be reported, not thrown. Without a listener Node raises
-  // the 'error' event on the emitter, which becomes an unhandled exception and
-  // kills the process during boot - indistinguishable from a crash loop, and the
-  // host answers 502 / "Application Failed to Respond" with no useful log line.
   server.httpServer.once('error', (error) => {
     const hint = error.code === 'EADDRINUSE'
       ? `port ${port} is already in use`
@@ -314,9 +648,6 @@ export function startGameServer() {
         ? `no permission to bind ${port}; privileged ports need a capability, not a fallback port`
         : 'bind failed';
     console.error(`[FPS GODS] cannot listen on ${host}:${port} (${hint})`, error);
-    // Exit non-zero and let the host restart the instance. Swallowing this in an
-    // uncaughtException handler would leave a process that answers health checks
-    // while holding no sockets, which is worse than a visible crash.
     process.exitCode = 1;
     process.exit(1);
   });
@@ -325,7 +656,6 @@ export function startGameServer() {
     console.log(`FPS GODS server listening on http://${host}:${server.httpServer.address().port}`);
   });
 
-  // Let container/process managers stop the timer and socket connections cleanly.
   let shuttingDown = false;
   function shutdown() {
     if (shuttingDown) return;
@@ -339,7 +669,5 @@ export function startGameServer() {
   return server;
 }
 
-// Only bind a port when this file is the process entrypoint, so importing it in
-// tests does not start a second server or leak signal handlers.
 const entrypoint = process.argv[1] ? pathToFileURL(process.argv[1]).href : '';
 if (import.meta.url === entrypoint) startGameServer();

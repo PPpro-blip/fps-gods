@@ -191,7 +191,8 @@ export class RoomManager {
     const player = [...room.players.values()].find((candidate) => candidate.resumeTokenHash === tokenHash);
     const disconnectedTooLong = player && !player.connected
       && (player.disconnectedAt === null || now - player.disconnectedAt > ROOM_RECONNECT_GRACE_MS);
-    if (!player || disconnectedTooLong
+    const accountMismatch = Boolean(player?.accountId && socket.data.accountId !== player.accountId);
+    if (!player || disconnectedTooLong || accountMismatch
       || (socket.data.profileId && socket.data.profileId !== player.profileId)) {
       socket.emit(EVENTS.ROOM_RESUME_FAILED, { message: 'That room session has expired. Join the room again with its code.' });
       return null;
@@ -253,9 +254,11 @@ export class RoomManager {
 
   resolveProfileSelection(socket, requestedName, selection = {}) {
     const callsign = cleanName(requestedName);
+    const verifiedAccountId = socket.data?.accountId ?? null;
     const profile = this.profileStore.getOrCreate(
-      selection?.profileId ?? socket.data.profileId,
+      verifiedAccountId ?? selection?.profileId ?? socket.data.profileId,
       callsign,
+      verifiedAccountId,
     );
     const bundleId = typeof selection?.bundleId === 'string' ? selection.bundleId : DEFAULT_BUNDLE_ID;
 
@@ -263,20 +266,27 @@ export class RoomManager {
       this.emitError(socket, 'Choose a valid weapon bundle before joining a room.');
       return null;
     }
-    if (!this.profileStore.isBundleUnlocked(profile.profileId, bundleId)) {
+    if (!this.profileStore.isBundleUnlocked(profile.profileId, bundleId, verifiedAccountId)) {
       this.emitError(socket, `GODS TIER unlocks at ${BUNDLE_UNLOCK_KILLS} lifetime kills. Your profile has ${profile.lifetimeKills}.`);
       return null;
     }
 
     socket.data.profileId = profile.profileId;
     socket.emit(EVENTS.PROFILE_UPDATE, profile);
-    return { profileId: profile.profileId, lifetimeKills: profile.lifetimeKills, bundleId, callsign };
+    return {
+      profileId: profile.profileId,
+      accountId: verifiedAccountId,
+      lifetimeKills: profile.lifetimeKills,
+      bundleId,
+      callsign: verifiedAccountId && profile.callsign ? profile.callsign : callsign,
+    };
   }
 
   addPlayer(room, socket, requestedName, profileSelection) {
     const player = {
       id: socket.id,
       profileId: profileSelection.profileId,
+      accountId: profileSelection.accountId ?? null,
       lifetimeKills: profileSelection.lifetimeKills,
       bundleId: profileSelection.bundleId,
       currentWeaponId: getBundleLoadout(profileSelection.bundleId)[0].id,

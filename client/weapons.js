@@ -1,12 +1,7 @@
 import * as THREE from 'three';
-import { WEAPON_MODEL_FILE, WEAPON_MODEL_LENGTH } from '../shared/weaponModels.js';
-
-// The seven GLB URLs are imported lazily (see `client/weaponAssets.js`) so this
-// module stays importable outside Vite — the tests exercise the viewmodel,
-// tracers and smoke without a bundler.
+import { WEAPON_MODEL_FILE, WEAPON_MODEL_FILES, WEAPON_MODEL_LENGTH } from '../shared/weaponModels.js';
 
 const WEAPON_MODEL = WEAPON_MODEL_FILE;
-// Real lengths in metres, measured from each GLB's bounding box.
 const MODEL_LENGTH = WEAPON_MODEL_LENGTH;
 
 const BUNDLE_TRACER_COLOR = Object.freeze({
@@ -18,24 +13,108 @@ const BUNDLE_TRACER_COLOR = Object.freeze({
 
 const NO_TRACER = new Set(['PISTOL', 'KNIFE', 'GOD_FIST', 'SMOKE_GRENADE', 'COMBAT_SHIELD', 'ROCKET']);
 const NO_FLASH = new Set(['KNIFE', 'GOD_FIST', 'SMOKE_GRENADE', 'COMBAT_SHIELD']);
-const SWITCH_DURATION_MS = 200;
-const RECOIL_DECAY_PER_SECOND = 9;
-// Where each weapon class sits in first-person view. `reach` multiplies the
-// model length into the distance from the camera, so long guns stay in front of
-// the near plane without swallowing the frame.
+const SWITCH_DURATION_MS = 190;
+const RECOIL_DECAY_PER_SECOND = 10;
+
+// Base hip-fire framing per weapon class.
 const WEAPON_PROFILES = Object.freeze({
-  light: Object.freeze({ x: 0.2, y: -0.2, reach: 0.4, handX: 0.0, handY: 0.0, handScale: 1 }),
-  heavy: Object.freeze({ x: 0.24, y: -0.26, reach: 0.4, handX: 0.01, handY: -0.01, handScale: 1.05 }),
-  melee: Object.freeze({ x: 0.19, y: -0.23, reach: 0.4, handX: 0.0, handY: -0.02, handScale: 0.95 }),
-  utility: Object.freeze({ x: 0.21, y: -0.24, reach: 0.32, handX: 0.0, handY: -0.01, handScale: 1 }),
-  shield: Object.freeze({ x: 0.35, y: -0.34, reach: 0.4, handX: 0.0, handY: -0.01, handScale: 1 }),
+  light: Object.freeze({ x: 0.2, y: -0.2, reach: 0.4, handScale: 1 }),
+  heavy: Object.freeze({ x: 0.24, y: -0.26, reach: 0.4, handScale: 1.04 }),
+  melee: Object.freeze({ x: 0.22, y: -0.25, reach: 0.38, handScale: 0.96 }),
+  utility: Object.freeze({ x: 0.21, y: -0.23, reach: 0.34, handScale: 0.98 }),
+  shield: Object.freeze({ x: 0.34, y: -0.32, reach: 0.4, handScale: 1.02 }),
 });
 
 const WEAPON_CLASS = Object.freeze({
-  SMG: 'light', PISTOL: 'light', SHOTGUN: 'heavy', SNIPER: 'heavy', LMG: 'heavy',
-  ROCKET: 'heavy', RAILGUN: 'heavy', MINIGUN: 'heavy', KNIFE: 'melee', GOD_FIST: 'melee',
-  SMOKE_GRENADE: 'utility', COMBAT_SHIELD: 'shield',
+  SMG: 'light',
+  PISTOL: 'light',
+  SHOTGUN: 'heavy',
+  SNIPER: 'heavy',
+  LMG: 'heavy',
+  ROCKET: 'heavy',
+  RAILGUN: 'heavy',
+  MINIGUN: 'heavy',
+  KNIFE: 'melee',
+  GOD_FIST: 'melee',
+  SMOKE_GRENADE: 'utility',
+  COMBAT_SHIELD: 'shield',
 });
+
+/**
+ * Weapon-specific grip & mount pose authored against the measured Z-slices of
+ * every oriented GLB/GLTF (`-Z` forward, `+Z` toward camera):
+ *  - Military knife.glb: blade [-0.23..0.00], guard [0.00..+0.058], handle [+0.058..+0.230]
+ *  - rocket_launcher_low.gltf: front vertical grip z=-0.055 y=-0.115, rear trigger grip z=+0.115 y=-0.115
+ *  - LowPolyShieldPack.glb (RectangularShield1): front boss z=-0.036, rear inner grip z=+0.032
+ *  - Firearms: rear pistol grip z=+0.10..+0.15, forend z=-0.16..-0.24
+ */
+function computeWeaponPose(weaponId, length) {
+  switch (weaponId) {
+    case 'KNIFE':
+      return {
+        mountRotation: [0.36, 0.14, -0.22],
+        rightPos: [0.004, -0.012, Math.min(0.14, length * 0.24)],
+        rightRot: [-0.28, 0.04, 0.08],
+        leftPos: [-0.115, -0.095, 0.015],
+        leftRot: [0.22, -0.24, -0.18],
+        leftVisible: true,
+      };
+    case 'GOD_FIST':
+      return {
+        mountRotation: [0.28, 0.12, -0.14],
+        rightPos: [0.01, -0.015, Math.min(0.13, length * 0.22)],
+        rightRot: [-0.2, 0.05, 0.06],
+        leftPos: [-0.12, -0.06, -0.02],
+        leftRot: [0.25, -0.18, -0.16],
+        leftVisible: true,
+      };
+    case 'PISTOL':
+    case 'SMOKE_GRENADE':
+      return {
+        mountRotation: [0, 0, 0],
+        // Two-handed Weaver/isosceles grip directly on the rear pistol handle.
+        rightPos: [0.006, -0.072, Math.min(0.105, length * 0.18)],
+        rightRot: [0.1, 0, 0.04],
+        leftPos: [-0.012, -0.082, Math.min(0.088, length * 0.15)],
+        leftRot: [0.14, -0.08, -0.08],
+        leftVisible: true,
+      };
+    case 'ROCKET':
+      return {
+        mountRotation: [0, 0, 0],
+        // Matches both actual under-slung grips on rocket_launcher_low.gltf.
+        rightPos: [0.006, -0.115, 0.115],
+        rightRot: [0.12, 0, 0.05],
+        leftPos: [-0.008, -0.115, -0.055],
+        leftRot: [0.16, -0.06, -0.08],
+        leftVisible: true,
+      };
+    case 'COMBAT_SHIELD':
+      return {
+        mountRotation: [0.04, 0.16, -0.04],
+        // Both hands brace the rear inner handle/straps (+Z side > +0.036) so
+        // zero glove geometry ever pokes through the -Z front face.
+        rightPos: [0.024, -0.025, 0.072],
+        rightRot: [0.08, 0, 0.06],
+        leftPos: [-0.078, -0.045, 0.072],
+        leftRot: [0.1, -0.06, -0.08],
+        leftVisible: true,
+      };
+    default: {
+      // Rifles / SMG / Shotgun / Sniper / LMG / Railgun / Minigun:
+      // Right hand wraps around rear pistol grip; left hand cradles handguard.
+      const forendZ = -Math.min(0.22, Math.max(0.13, length * 0.24));
+      return {
+        mountRotation: [0, 0, 0],
+        rightPos: [0.006, -0.068, 0.105],
+        rightRot: [0.1, 0, 0.04],
+        leftPos: [-0.008, -0.058, forendZ],
+        leftRot: [0.22, -0.08, -0.18],
+        leftVisible: true,
+      };
+    }
+  }
+}
 
 /**
  * Rotate a loaded GLB so its barrel points down -Z and normalise its length to
@@ -43,9 +122,6 @@ const WEAPON_CLASS = Object.freeze({
  * the game is cheap after the first load.
  */
 export function orientModel(scene, file) {
-  // The shield file is a pack of twelve separate shields. Clone exactly one,
-  // not the entire pack (which would otherwise cover the view and waste draw
-  // calls). Its original faces lie in YZ; guns/knife use different axes.
   const selected = file === 'LowPolyShieldPack.glb'
     ? scene.getObjectByName('RectangularShield1')
     : scene;
@@ -56,9 +132,8 @@ export function orientModel(scene, file) {
   if (file === 'LowPolyShieldPack.glb') {
     oriented.rotation.y = Math.PI / 2;
   } else if (file === 'Military knife.glb') {
-    oriented.rotation.x = -Math.PI / 2; // authored long axis +Y -> forward -Z
+    oriented.rotation.x = -Math.PI / 2;
   } else if (file !== 'rocket_launcher_low.gltf') {
-    // Existing GLBs were authored along +X with +Z up.
     const rotation = new THREE.Matrix4().makeBasis(
       new THREE.Vector3(0, 0, -1),
       new THREE.Vector3(-1, 0, 0),
@@ -83,19 +158,19 @@ export function orientModel(scene, file) {
   fitted.add(centered);
   fitted.userData.baseScale = fitted.scale.clone();
   fitted.userData.normalizedLength = 1;
-  fitted.traverse((part) => {
-    if (part.isMesh) {
-      part.castShadow = false;
-      part.receiveShadow = false;
-      part.frustumCulled = false;
+  fitted.traverse((meshPart) => {
+    if (meshPart.isMesh) {
+      meshPart.castShadow = false;
+      meshPart.receiveShadow = false;
+      meshPart.frustumCulled = false;
     }
   });
   return fitted;
 }
 
-// Core firearms preload for the menu. The three larger new models load only
-// when a menu stand or a player actually needs them; requests are deduplicated.
-const CORE_FILES = ['smg.glb', 'shotgun.glb', 'sniper.glb', 'pistol.glb', 'lmg.glb', 'knife.glb'];
+// Preload every active arsenal model during boot so switching to Knife, RPG,
+// or Combat Shield mid-fight never triggers a network fetch stall.
+const CORE_FILES = WEAPON_MODEL_FILES;
 
 export class WeaponModelLibrary {
   constructor() {
@@ -189,8 +264,6 @@ export class WeaponModelLibrary {
   }
 }
 
-// Clones borrow cached geometry/materials/textures. Dispose the shared owners
-// once on teardown, never while a viewmodel or remote operator still uses them.
 function disposeModels(models) {
   const geometries = new Set();
   const materials = new Set();
@@ -222,9 +295,6 @@ function part(geometry, material, parent, position, rotation = [0, 0, 0], scale 
   return mesh;
 }
 
-// First-person presentation: a GLB weapon plus gloved hands, both parented to
-// the camera. The server independently resolves every shot and every point of
-// damage; nothing here can change the outcome of a fight.
 export class WeaponEffects {
   constructor(scene, camera, modelLibrary) {
     this.scene = scene;
@@ -239,6 +309,7 @@ export class WeaponEffects {
     this.impactGeometry = new THREE.SphereGeometry(1, 10, 8);
     this.aimAmount = 0;
     this.aimProfile = null;
+    this.opticalScopeHidden = false;
     this.blockingTarget = false;
     this.blockingAmount = 0;
     this.meleeStartedAt = null;
@@ -252,6 +323,7 @@ export class WeaponEffects {
     this.recoil = 0;
     this.switchTransition = null;
     this.currentModel = null;
+    this.currentPose = computeWeaponPose('SMG', 0.73);
     this.geometries = [];
     this.materials = [];
     this.viewMaterialCache = new Map();
@@ -261,13 +333,19 @@ export class WeaponEffects {
     this.viewModel.rotation.set(-0.015, -0.035, 0);
     camera.add(this.viewModel);
     this.gun = this.viewModel;
+
+    // Both the weapon mesh and the articulated hand groups live inside
+    // weaponMount so tilted melee stances, recoils, and slashes keep the hands
+    // locked to the physical handle with zero detachment.
+    this.weaponMount = new THREE.Group();
+    this.viewModel.add(this.weaponMount);
+
     this.handRig = new THREE.Group();
-    this.viewModel.add(this.handRig);
+    this.weaponMount.add(this.handRig);
 
     this.buildHands();
     this.buildFlash();
-    // Draw hands/weapons after all world geometry (including transparency) so
-    // nearby cover cannot clip the first-person model. Keep depth within the rig.
+
     for (const material of this.materials) material.transparent = true;
     this.viewModel.traverse((object) => { if (object.isMesh) object.renderOrder = 1000; });
     this.buildViewModelDepthReset();
@@ -277,70 +355,96 @@ export class WeaponEffects {
   }
 
   /**
-   * Gloved hands wrapped around the grip.
+   * Articulated, cohesive left and right hand sub-rigs.
    *
-   * Placement rule this method exists to enforce: nothing may sit closer than
-   * ~0.35 m to the camera. The previous rig put the forearm capsules at local
-   * z +0.42/+0.50, which after the group offset left them 0.10–0.20 m from the
-   * lens — straddling the near plane, so they were clipped into a screen-filling
-   * black mass. Every part below stays forward of the gun's rear face and the
-   * arms run back toward the bottom corners of the frame.
+   * Each hand is an integrated anatomical group (`rightHandGroup` /
+   * `leftHandGroup`) whose origin `(0, 0, 0)` is the grip contact center.
+   * Moving or rotating a hand group moves its forearm, cuff, palm, 4 curled
+   * fingers, thumb, and knuckle plate together as one solid glove — eliminating
+   * detached fingers or floating palms across weapon classes while keeping
+   * every mesh strictly forward of the camera near plane (`max.z < -0.30 m`).
    */
   buildHands() {
     const sleeve = new THREE.MeshStandardMaterial({
-      color: '#3a5169', roughness: 0.82, metalness: 0.12, emissive: '#10222f', emissiveIntensity: 0.85,
+      color: '#344b63', roughness: 0.78, metalness: 0.14, emissive: '#0e1f2c', emissiveIntensity: 0.75,
     });
     const glove = new THREE.MeshStandardMaterial({
-      color: '#243141', roughness: 0.62, metalness: 0.28, emissive: '#0b2532', emissiveIntensity: 0.9,
+      color: '#212d3b', roughness: 0.58, metalness: 0.28, emissive: '#0a202c', emissiveIntensity: 0.8,
     });
     const seam = new THREE.MeshStandardMaterial({
-      color: '#4a7891', roughness: 0.4, metalness: 0.55, emissive: '#123a4a', emissiveIntensity: 1,
+      color: '#46748d', roughness: 0.38, metalness: 0.52, emissive: '#103443', emissiveIntensity: 0.9,
     });
     const accent = new THREE.MeshStandardMaterial({
-      color: '#2b6b84', roughness: 0.35, metalness: 0.6, emissive: '#1e8fb0', emissiveIntensity: 1.2,
+      color: '#2d728e', roughness: 0.32, metalness: 0.58, emissive: '#1f8fb0', emissiveIntensity: 1.15,
     });
     this.materials.push(sleeve, glove, seam, accent);
 
-    const armGeometry = new THREE.CapsuleGeometry(0.055, 0.34, 4, 10);
-    const palmGeometry = new THREE.SphereGeometry(0.062, 12, 10);
-    const fingerGeometry = new THREE.CapsuleGeometry(0.016, 0.075, 2, 6);
-    const cuffGeometry = new THREE.CylinderGeometry(0.062, 0.056, 0.08, 10);
-    const thumbGeometry = new THREE.CapsuleGeometry(0.017, 0.055, 2, 6);
-    const knuckleGeometry = new THREE.BoxGeometry(0.05, 0.012, 0.05);
-    this.geometries.push(armGeometry, palmGeometry, fingerGeometry, cuffGeometry, thumbGeometry, knuckleGeometry);
+    const armGeometry = new THREE.CapsuleGeometry(0.038, 0.15, 4, 10);
+    const cuffGeometry = new THREE.CylinderGeometry(0.044, 0.040, 0.052, 10);
+    const palmGeometry = new THREE.BoxGeometry(0.036, 0.064, 0.068);
+    const fingerGeometry = new THREE.CapsuleGeometry(0.010, 0.036, 3, 6);
+    const thumbGeometry = new THREE.CapsuleGeometry(0.011, 0.034, 3, 6);
+    const knuckleGeometry = new THREE.BoxGeometry(0.014, 0.052, 0.048);
+    this.geometries.push(
+      armGeometry,
+      cuffGeometry,
+      palmGeometry,
+      fingerGeometry,
+      thumbGeometry,
+      knuckleGeometry,
+    );
 
-    // Forearms enter from the bottom corners and converge on the grip. Their
-    // rear ends sit at z ≈ +0.2 in viewmodel space, i.e. ~0.45 m from the eye.
-    this.leftArm = part(armGeometry, sleeve, this.handRig, [-0.16, -0.30, 0.06], [0.45, 0, -0.42]);
-    this.rightArm = part(armGeometry, sleeve, this.handRig, [0.17, -0.28, 0.10], [0.4, 0, 0.4]);
-    this.leftCuff = part(cuffGeometry, seam, this.handRig, [-0.115, -0.19, -0.02], [0.35, 0, -0.4]);
-    this.rightCuff = part(cuffGeometry, seam, this.handRig, [0.125, -0.175, 0.035], [0.32, 0, 0.4]);
+    this.rightHandGroup = new THREE.Group();
+    this.leftHandGroup = new THREE.Group();
+    this.handRig.add(this.rightHandGroup, this.leftHandGroup);
 
-    // Trigger hand on the grip, support hand on the handguard.
-    this.rightPalm = part(palmGeometry, glove, this.handRig, [0.085, -0.075, 0.115], [0.25, 0, 0], [1, 0.85, 0.95]);
-    this.leftPalm = part(palmGeometry, glove, this.handRig, [-0.085, -0.085, -0.145], [0.25, 0, 0], [1.05, 0.8, 0.9]);
+    // Dominant right hand: palm hugs +X of grip, fingers wrap across front/left,
+    // cuff & forearm run seamlessly back-down-right with zero gaps.
+    this.rightPalm = part(palmGeometry, glove, this.rightHandGroup, [0.022, -0.004, 0.004], [0.08, 0.04, 0.08]);
+    this.rightCuff = part(cuffGeometry, seam, this.rightHandGroup, [0.036, -0.028, 0.038], [1.12, 0.0, -0.32]);
+    this.rightArm = part(armGeometry, sleeve, this.rightHandGroup, [0.068, -0.070, 0.082], [1.14, 0.0, -0.34]);
+    this.rightThumb = part(thumbGeometry, glove, this.rightHandGroup, [-0.004, 0.024, -0.012], [0.35, 0.35, 1.15]);
+
+    // Support left hand: palm cradles -X / underside of forend or grip,
+    // fingers curl around underside/right, cuff & forearm run back-down-left.
+    this.leftPalm = part(palmGeometry, glove, this.leftHandGroup, [-0.022, -0.006, 0.004], [0.08, -0.04, -0.08]);
+    this.leftCuff = part(cuffGeometry, seam, this.leftHandGroup, [-0.036, -0.030, 0.038], [1.12, 0.0, 0.32]);
+    this.leftArm = part(armGeometry, sleeve, this.leftHandGroup, [-0.068, -0.074, 0.082], [1.14, 0.0, 0.34]);
+    this.leftThumb = part(thumbGeometry, glove, this.leftHandGroup, [0.004, 0.022, -0.012], [0.35, -0.35, -1.15]);
 
     this.fingers = [];
-    for (let finger = 0; finger < 4; finger += 1) {
-      const offset = (finger - 1.5) * 0.024;
-      this.fingers.push(part(fingerGeometry, glove, this.handRig,
-        [0.055 + offset * 0.4, -0.055, 0.075 - offset], [0.9, 0, 0.15]));
-      this.fingers.push(part(fingerGeometry, glove, this.handRig,
-        [-0.055 + offset * 0.4, -0.045, -0.185 - offset], [1.1, 0, -0.15]));
+    this.rightFingers = [];
+    this.leftFingers = [];
+    for (let i = 0; i < 4; i += 1) {
+      const spread = (i - 1.5) * 0.015;
+      const rf = part(
+        fingerGeometry,
+        glove,
+        this.rightHandGroup,
+        [-0.002, spread, -0.018],
+        [0.08, 0.0, Math.PI / 2 - 0.12],
+      );
+      const lf = part(
+        fingerGeometry,
+        glove,
+        this.leftHandGroup,
+        [0.002, spread - 0.002, -0.018],
+        [0.08, 0.0, -Math.PI / 2 + 0.12],
+      );
+      this.rightFingers.push(rf);
+      this.leftFingers.push(lf);
+      this.fingers.push(rf, lf);
     }
-    this.leftThumb = part(thumbGeometry, glove, this.handRig, [-0.115, -0.065, -0.13], [0.5, 0, -0.9]);
-    this.rightThumb = part(thumbGeometry, glove, this.handRig, [0.045, -0.07, 0.15], [0.4, 0, 0.9]);
 
-    // Cyan knuckle plates: a readable accent that separates glove from weapon.
     this.knuckles = [
-      part(knuckleGeometry, accent, this.handRig, [0.075, -0.028, 0.075], [0.9, 0, 0.15]),
-      part(knuckleGeometry, accent, this.handRig, [-0.075, -0.03, -0.19], [1.1, 0, -0.15]),
+      part(knuckleGeometry, accent, this.rightHandGroup, [0.041, -0.002, 0.002], [0.08, 0.04, 0.08]),
+      part(knuckleGeometry, accent, this.leftHandGroup, [-0.041, -0.004, 0.002], [0.08, -0.04, -0.08]),
     ];
   }
 
   buildFlash() {
     this.muzzle = new THREE.Object3D();
-    this.viewModel.add(this.muzzle);
+    this.weaponMount.add(this.muzzle);
     this.flashMaterial = new THREE.MeshBasicMaterial({ color: '#ffe6a3', transparent: true, opacity: 0.95 });
     this.flashMesh = new THREE.Mesh(new THREE.SphereGeometry(0.055, 10, 8), this.flashMaterial);
     this.flashMesh.visible = false;
@@ -362,57 +466,52 @@ export class WeaponEffects {
     this.viewModel.add(this.depthReset);
   }
 
-  /**
-   * Dedicated viewmodel lighting.
-   *
-   * The hands and gun are lit by their own small rig parented to the camera, so
-   * they keep their form and highlights on a dark map and never read as a flat
-   * black shape. Short range keeps it from flattening the arena itself.
-   */
   buildViewModelLight() {
     this.viewModelLight = new THREE.Group();
-    this.viewModelLight.position.set(0.18, 0.22, -0.12);
+    this.viewModelLight.position.set(0.18, 0.24, -0.12);
 
-    const key = new THREE.PointLight('#dff2ff', 3.4, 2.6, 2);
-    key.position.set(0.1, 0.18, 0.35);
-    const rim = new THREE.PointLight('#4fd8ff', 1.6, 2.2, 2);
-    rim.position.set(-0.35, -0.1, -0.6);
+    const key = new THREE.PointLight('#e4f5ff', 3.6, 2.8, 2);
+    key.position.set(0.12, 0.2, 0.34);
+    const rim = new THREE.PointLight('#56daff', 1.75, 2.4, 2);
+    rim.position.set(-0.34, -0.08, -0.58);
     this.viewModelLight.add(key, rim);
     this.camera.add(this.viewModelLight);
     this.lights = [key, rim];
   }
 
-  /** Pull the viewmodel closer for short guns and push long guns forward. */
   layoutForWeapon(weaponId) {
     const length = this.modelLibrary.getLength(weaponId);
     const weaponClass = WEAPON_CLASS[weaponId] ?? 'light';
-    // Bulky weapons sit lower and further out; sidearms sit tighter and higher.
     const profile = WEAPON_PROFILES[weaponClass] ?? WEAPON_PROFILES.light;
     this.basePosition = {
       x: profile.x,
       y: profile.y,
       z: -0.42 - length * profile.reach,
     };
-    // Hands ride with the grip; the support hand only reaches as far as the
-    // handguard, which is why short weapons tuck it back.
-    this.handRig.position.set(profile.handX, profile.handY, Math.min(0.12, length * 0.1));
+    this.currentPose = computeWeaponPose(weaponId, length);
+    this.handRig.position.set(0, 0, 0);
     this.handRig.scale.setScalar(profile.handScale);
-    if (this.leftPalm) {
-      this.leftPalm.position.z = -Math.min(0.24, length * 0.34);
-    }
+
+    this.rightHandGroup.position.set(...this.currentPose.rightPos);
+    this.rightHandGroup.rotation.set(...this.currentPose.rightRot);
+    this.leftHandGroup.position.set(...this.currentPose.leftPos);
+    this.leftHandGroup.rotation.set(...this.currentPose.leftRot);
+    this.leftHandGroup.visible = this.currentPose.leftVisible !== false;
+
+    const [mx, my, mz] = this.currentPose.mountRotation;
+    this.weaponMount.rotation.set(mx, my, mz);
+
     this.updateMuzzlePosition();
   }
 
-  /**
-   * Reset transient presentation (reload dip, recoil, switch animation).
-   * Called on respawn so a player never comes back mid-reload or mid-swap.
-   */
   resetPresentation() {
     this.reloadStartedAt = null;
     this.recoil = 0;
     this.meleeStartedAt = null;
     this.blockingTarget = false;
     this.blockingAmount = 0;
+    this.opticalScopeHidden = false;
+    this.weaponMount.visible = true;
     if (this.switchTransition) {
       const { from, to } = this.switchTransition;
       from?.removeFromParent();
@@ -426,14 +525,17 @@ export class WeaponEffects {
     this.flashUntil = 0;
     this.flashMesh.visible = false;
     this.flashLight.visible = false;
-    if (this.basePosition) this.viewModel.position.set(this.basePosition.x, this.basePosition.y, this.basePosition.z);
+    if (this.basePosition) {
+      this.viewModel.position.set(this.basePosition.x, this.basePosition.y, this.basePosition.z);
+    }
+    if (this.currentPose) {
+      this.rightHandGroup.position.set(...this.currentPose.rightPos);
+      this.leftHandGroup.position.set(...this.currentPose.leftPos);
+      const [mx, my, mz] = this.currentPose.mountRotation;
+      this.weaponMount.rotation.set(mx, my, mz);
+    }
   }
 
-  /**
-   * Show or hide the whole first-person rig (gun + hands + its light).
-   * Kept as one switch so hands can never float in the menu or over the
-   * scoreboard while the weapon is hidden.
-   */
   setVisible(visible) {
     const on = Boolean(visible);
     this.viewModel.visible = on;
@@ -444,6 +546,11 @@ export class WeaponEffects {
     }
   }
 
+  setOpticalScopeHidden(hidden) {
+    this.opticalScopeHidden = Boolean(hidden);
+    this.weaponMount.visible = !this.opticalScopeHidden;
+  }
+
   setWeapon(weaponId, bundleId = this.bundleId, animate = true) {
     if (!weaponId) return;
     const changed = weaponId !== this.weaponId;
@@ -451,6 +558,12 @@ export class WeaponEffects {
     if (!changed && !bundleChanged) return;
     this.weaponId = weaponId;
     if (bundleId) this.bundleId = bundleId;
+    if (changed) {
+      this.reloadStartedAt = null;
+      this.meleeStartedAt = null;
+      this.opticalScopeHidden = false;
+      this.weaponMount.visible = true;
+    }
     this.layoutForWeapon(weaponId);
     if (changed) this.installActiveModel(performance.now(), animate);
   }
@@ -464,7 +577,6 @@ export class WeaponEffects {
     if (this.currentModel?.userData.weaponId === this.weaponId) return;
     const next = this.modelLibrary.createModel(this.weaponId);
     if (!next) {
-      // Never show the previous weapon under the newly selected HUD label.
       this.switchTransition?.from?.removeFromParent();
       this.switchTransition?.to?.removeFromParent();
       this.switchTransition = null;
@@ -493,7 +605,13 @@ export class WeaponEffects {
         if (!source) return source;
         if (!this.viewMaterialCache.has(source)) {
           const copy = source.clone();
-          copy.transparent = true; // draw after the world's transparent objects
+          copy.transparent = true;
+          // Without an HDRI environment map, pure metalness=1.0 glTF materials
+          // crush diffuse albedo; moderating the viewmodel clone preserves PBR
+          // baseColor detail while leaving shared world materials untouched.
+          if (typeof copy.metalness === 'number' && copy.metalness > 0.72) {
+            copy.metalness = 0.72;
+          }
           this.viewMaterialCache.set(source, copy);
         }
         return this.viewMaterialCache.get(source);
@@ -502,7 +620,7 @@ export class WeaponEffects {
         ? object.material.map(overlayMaterial)
         : overlayMaterial(object.material);
     });
-    this.viewModel.add(next);
+    this.weaponMount.add(next);
     this.currentModel = next;
     this.updateMuzzlePosition();
 
@@ -557,8 +675,6 @@ export class WeaponEffects {
     if (present) this.presentFire(now, weaponId, bundleId);
   }
 
-  // Cosmetic feedback is allowed before the server confirms the shot. It never
-  // creates a hit marker, damage or explosion; accepted events carry those.
   presentFire(now = performance.now(), weaponId = this.weaponId, bundleId = this.bundleId) {
     if (weaponId === 'KNIFE' || weaponId === 'GOD_FIST') {
       this.meleeStartedAt = now;
@@ -571,7 +687,10 @@ export class WeaponEffects {
       this.flashUntil = now + 55;
       this.flashMesh.visible = true;
       this.flashLight.visible = true;
-      this.recoil = Math.min(1.4, this.recoil + (weaponId === 'SHOTGUN' || weaponId === 'SNIPER' || weaponId === 'RAILGUN' ? 0.9 : 0.45));
+      const kick = weaponId === 'ROCKET'
+        ? 1.05
+        : (weaponId === 'SHOTGUN' || weaponId === 'SNIPER' || weaponId === 'RAILGUN' ? 0.88 : 0.44);
+      this.recoil = Math.min(1.4, this.recoil + kick);
     }
   }
 
@@ -723,41 +842,69 @@ export class WeaponEffects {
     this.flashLight.visible = flashVisible;
 
     const moving = this.movementAmount;
-    const bob = Math.sin(now * 0.011) * 0.013 * moving;
-    const sway = Math.cos(now * 0.0055) * 0.007 * moving;
+    const bob = Math.sin(now * 0.011) * 0.011 * moving;
+    const sway = Math.cos(now * 0.0055) * 0.006 * moving;
     const reloadProgress = this.reloadStartedAt === null
       ? 0
       : Math.max(0, Math.min(1, (now - this.reloadStartedAt) / this.reloadDuration));
     if (reloadProgress >= 1) this.reloadStartedAt = null;
-    const reloadDip = this.reloadStartedAt === null ? 0 : Math.sin(reloadProgress * Math.PI) * 0.13;
+    const reloadWave = this.reloadStartedAt === null ? 0 : Math.sin(reloadProgress * Math.PI);
+    const reloadDip = reloadWave * 0.12;
 
     this.recoil = Math.max(0, this.recoil - RECOIL_DECAY_PER_SECOND * delta);
 
     const base = this.basePosition ?? { x: 0.26, y: -0.22, z: -0.62 };
     const aim = this.aimProfile?.offset ?? [base.x, base.y, base.z];
     const amount = this.aimAmount;
-    this.blockingAmount += ((this.blockingTarget ? 1 : 0) - this.blockingAmount) * (1 - Math.exp(-12 * delta));
-    const meleeProgress = this.meleeStartedAt === null ? 1 : (now - this.meleeStartedAt) / 260;
+    this.blockingAmount += ((this.blockingTarget ? 1 : 0) - this.blockingAmount) * (1 - Math.exp(-14 * delta));
+    const meleeProgress = this.meleeStartedAt === null ? 1 : (now - this.meleeStartedAt) / 240;
     const swing = meleeProgress >= 0 && meleeProgress < 1 ? Math.sin(meleeProgress * Math.PI) : 0;
+    const slashArc = meleeProgress >= 0 && meleeProgress < 1 ? Math.sin(meleeProgress * Math.PI * 2) : 0;
     if (meleeProgress >= 1) this.meleeStartedAt = null;
-    this.viewModel.position.x = base.x + (aim[0] - base.x) * amount + sway * (1 - amount * 0.85) - this.recoil * 0.004 - this.blockingAmount * 0.07 + swing * 0.05;
-    this.viewModel.position.y = base.y + (aim[1] - base.y) * amount + bob * (1 - amount * 0.85) - reloadDip + this.recoil * 0.012 + this.blockingAmount * 0.10;
-    this.viewModel.position.z = base.z + (aim[2] - base.z) * amount + reloadDip * 0.5 + this.recoil * 0.05 - swing * 0.12;
-    this.viewModel.rotation.z = Math.sin(now * 0.0055) * 0.015 * moving * (1 - amount) - swing * 0.35;
-    this.viewModel.rotation.x = -0.015 * (1 - amount) + reloadDip * 0.55 - this.recoil * 0.06 + swing * 0.5;
-    this.viewModel.rotation.y = -0.035 * (1 - amount);
+
+    this.viewModel.position.x = base.x + (aim[0] - base.x) * amount + sway * (1 - amount * 0.88)
+      - this.recoil * 0.003 - this.blockingAmount * 0.13 - swing * 0.07;
+    this.viewModel.position.y = base.y + (aim[1] - base.y) * amount + bob * (1 - amount * 0.88)
+      - reloadDip + this.recoil * 0.011 + this.blockingAmount * 0.095 + swing * 0.025;
+    this.viewModel.position.z = base.z + (aim[2] - base.z) * amount + reloadDip * 0.42
+      + this.recoil * 0.052 + this.blockingAmount * 0.035 - swing * 0.145;
+
+    this.viewModel.rotation.z = Math.sin(now * 0.0055) * 0.013 * moving * (1 - amount) - swing * 0.42;
+    this.viewModel.rotation.x = -0.015 * (1 - amount) + reloadDip * 0.5 - this.recoil * 0.055 + swing * 0.44;
+    this.viewModel.rotation.y = -0.035 * (1 - amount) + slashArc * 0.18;
+
+    // Blend weaponMount rest orientation cleanly to zero as ADS approaches 1,
+    // and animate the cohesive support hand toward the magwell during reloads.
+    if (this.currentPose) {
+      const [mx, my, mz] = this.currentPose.mountRotation;
+      const hipFactor = 1 - amount;
+      const guardPitch = -this.blockingAmount * 0.04;
+      const guardYaw = -this.blockingAmount * 0.14;
+      this.weaponMount.rotation.set(
+        mx * hipFactor + guardPitch,
+        my * hipFactor + guardYaw,
+        mz * hipFactor,
+      );
+      const [lx, ly, lz] = this.currentPose.leftPos;
+      this.leftHandGroup.position.set(
+        lx + reloadWave * 0.018,
+        ly - reloadWave * 0.075,
+        lz + reloadWave * 0.095,
+      );
+    }
 
     if (this.switchTransition) {
       const { from, to, startedAt } = this.switchTransition;
       const progress = Math.max(0, Math.min(1, (now - startedAt) / SWITCH_DURATION_MS));
+      const eased = 1 - (1 - progress) * (1 - progress);
       if (from) {
-        from.position.y = -progress * 0.18;
-        from.rotation.x = -progress * 0.14;
-        from.scale.copy(from.userData.baseScale ?? from.scale).multiplyScalar(1 - progress * 0.1);
+        from.position.y = -eased * 0.18;
+        from.rotation.x = -eased * 0.16;
+        from.scale.copy(from.userData.baseScale ?? from.scale).multiplyScalar(1 - eased * 0.1);
       }
-      to.position.y = (1 - progress) * 0.18;
-      to.rotation.x = (1 - progress) * 0.14;
-      to.scale.copy(to.userData.baseScale ?? to.scale).multiplyScalar(0.9 + progress * 0.1);
+      to.position.y = (1 - eased) * -0.15;
+      to.rotation.x = (1 - eased) * -0.18;
+      to.scale.copy(to.userData.baseScale ?? to.scale).multiplyScalar(0.92 + eased * 0.08);
       if (progress >= 1) {
         if (from) from.removeFromParent();
         to.position.set(0, 0, 0);

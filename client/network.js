@@ -91,11 +91,20 @@ export function resolveSocketTarget(configuredValue, pageOrigin) {
   return { url, source: upgradedFromInsecure ? 'override-upgraded' : 'override' };
 }
 
+export function resolveApiUrl(baseUrl, pathname) {
+  const cleanBase = String(baseUrl || '').replace(/\/+$/, '');
+  const cleanPath = String(pathname || '').startsWith('/') ? pathname : `/${pathname}`;
+  return `${cleanBase}${cleanPath}`;
+}
+
 // Thin Socket.IO adapter: gameplay decisions never happen here, only inputs go
 // up and authoritative room/game snapshots and feedback come back down.
 export class GameNetwork {
-  constructor(handlers = {}) {
+  constructor(handlers = {}, initialSessionToken = null) {
     this.handlers = handlers;
+    this.sessionToken = typeof initialSessionToken === 'string' && initialSessionToken.trim()
+      ? initialSessionToken.trim()
+      : null;
     this.lastIssueSignature = null;
     this.probeInFlight = false;
     this.graceElapsed = false;
@@ -121,6 +130,7 @@ export class GameNetwork {
       reconnectionDelayMax: RECONNECT_DELAY_MAX_MS,
       randomizationFactor: 0.4,
       timeout: CONNECT_TIMEOUT_MS,
+      auth: this.sessionToken ? { sessionToken: this.sessionToken } : {},
     });
 
     this.socket.on('connect', () => {
@@ -167,6 +177,9 @@ export class GameNetwork {
     this.socket.on(EVENTS.PROFILE_UPDATE, (data) => this.handlers.onProfileUpdate?.(data));
     this.socket.on(EVENTS.SMOKE_UPDATE, (data) => this.handlers.onSmokeUpdate?.(data));
     this.socket.on(EVENTS.COVER_DESTROYED, (data) => this.handlers.onCoverDestroyed?.(data));
+    this.socket.on(EVENTS.NET_PONG, (data) => this.handlers.onPong?.(data));
+    this.socket.on(EVENTS.WALLET_UPDATE, (data) => this.handlers.onWalletUpdate?.(data));
+    this.socket.on(EVENTS.REWARD_EARNED, (data) => this.handlers.onRewardEarned?.(data));
   }
 
   get id() {
@@ -388,11 +401,61 @@ export class GameNetwork {
     this.socket.emit(EVENTS.START_GAME);
   }
 
-  sendInput(input, reliable = false) {
+  sendInput(input) {
     if (!this.socket.connected) return;
-    // Movement is replaceable state, not an ordered action backlog. Neutral
-    // release and a fire-associated aim sample can explicitly be reliable.
-    (reliable ? this.socket : this.socket.volatile).emit(EVENTS.PLAYER_INPUT, input);
+    // InputCadence already rate-limits packets to server tick cadence + edge
+    // transitions (~20 pkt/s while moving, 0 while idle). Reliable emit keeps
+    // inputAck monotonic so local prediction never replays stale windows.
+    this.socket.emit(EVENTS.PLAYER_INPUT, input);
+  }
+
+  sendPing(payload) {
+    if (!this.socket.connected) return;
+    this.socket.volatile.emit(EVENTS.NET_PING, payload);
+  }
+
+  setSessionToken(token) {
+    const clean = typeof token === 'string' && token.trim() ? token.trim() : null;
+    this.sessionToken = clean;
+    this.socket.auth = clean ? { sessionToken: clean } : {};
+    if (this.socket.connected) {
+      this.socket.emit(EVENTS.AUTH_SYNC, { sessionToken: clean });
+    }
+  }
+
+  async apiRequest(pathname, { method = 'GET', body, signal } = {}) {
+    const url = resolveApiUrl(this.target.url, pathname);
+    const headers = { Accept: 'application/json' };
+    if (body !== undefined) {
+      headers['Content-Type'] = 'application/json';
+    }
+    if (this.sessionToken) {
+      headers.Authorization = `Bearer ${this.sessionToken}`;
+    }
+    const response = await fetch(url, {
+      method,
+      headers,
+      credentials: this.target.source === 'same-origin' ? 'same-origin' : 'omit',
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+      signal,
+    });
+    const text = await response.text();
+    let data = {};
+    if (text) {
+      try {
+        data = JSON.parse(text);
+      } catch {
+        data = { message: text };
+      }
+    }
+    if (!response.ok) {
+      const error = new Error(data?.message || `Request failed (${response.status})`);
+      error.status = response.status;
+      error.code = data?.code || 'HTTP_ERROR';
+      error.payload = data;
+      throw error;
+    }
+    return data;
   }
 
   shoot(shotId) {

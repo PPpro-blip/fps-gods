@@ -1,4 +1,6 @@
+import { randomUUID } from 'node:crypto';
 import { EVENTS, ROOM_MODES } from '../shared/events.js';
+import { CURRENCY_CONFIG } from '../shared/economy.js';
 import { BOT, PLAYER } from '../shared/gameConfig.js';
 import { collidesWithCover, simulateMovement } from '../shared/movement.js';
 import { getMap, resolveMapId } from '../shared/maps.js';
@@ -102,6 +104,8 @@ function makeGamePlayer(record, spawn, now, map, cover) {
   const player = {
     id: record.id,
     profileId: record.profileId ?? null,
+    accountId: record.accountId ?? null,
+    joinedAt: now,
     lifetimeKills: Math.max(0, Number(record.lifetimeKills) || 0),
     bundleId,
     currentWeaponId,
@@ -129,11 +133,14 @@ function makeGamePlayer(record, spawn, now, map, cover) {
     pitch: 0,
     health: PLAYER.maxHealth,
     kills: 0,
+    assists: 0,
     deaths: 0,
     alive: true,
     grounded: true,
     ready: record.ready,
     input: { forward: 0, strafe: 0, jump: false },
+    pendingJump: false,
+    recentDamagers: new Map(),
     lastInputAt: now,
     lastInputSequence: -1,
     lastProcessedInputSequence: -1,
@@ -156,8 +163,13 @@ export class GameState {
     emitRoom = () => {},
     emitPlayer = () => {},
     onHumanKill = () => null,
+    onElimination = () => null,
+    onMatchFinished = () => null,
   } = {}, now = Date.now()) {
     this.room = room;
+    this.matchId = randomUUID();
+    this.startedAt = now;
+    this.killSequence = 0;
     this.mode = room.mode ?? ROOM_MODES.MULTIPLAYER;
     // The server owns the arena choice. `room.mapId` was already normalised
     // through `resolveMapId` when the room was created; resolving again keeps a
@@ -167,6 +179,8 @@ export class GameState {
     this.emitRoom = emitRoom;
     this.emitPlayer = emitPlayer;
     this.onHumanKill = onHumanKill;
+    this.onElimination = onElimination;
+    this.onMatchFinished = onMatchFinished;
     this.players = new Map();
     this.feed = [];
     this.finished = false;
@@ -215,6 +229,9 @@ export class GameState {
       strafe: clamp(finiteNumber(payload.strafe, 0), -1, 1),
       jump: payload.jump === true,
     };
+    if (payload.jump === true && player.alive) {
+      player.pendingJump = true;
+    }
     player.lastInputAt = now;
     this.updateShieldInput(player, payload.blocking === true, now);
   }
@@ -394,6 +411,14 @@ export class GameState {
   }
 
   updatePlayer(player, delta) {
+    if (player.pendingJump) {
+      const heldJump = player.input.jump;
+      player.input.jump = true;
+      player.pendingJump = false;
+      simulateMovement(player, delta, this.map, this.cover);
+      player.input.jump = heldJump;
+      return;
+    }
     simulateMovement(player, delta, this.map, this.cover);
   }
 
@@ -720,6 +745,14 @@ export class GameState {
       });
 
       if (damage > 0) {
+        if (shooter.id !== target.id) {
+          const prev = target.recentDamagers.get(shooter.id);
+          const fresh = prev && (now - prev.at <= CURRENCY_CONFIG.antiFarming.assistWindowMs);
+          target.recentDamagers.set(shooter.id, {
+            damage: (fresh ? prev.damage : 0) + damage,
+            at: now,
+          });
+        }
         this.emitPlayer(target.id, EVENTS.HEALTH_UPDATE, {
           health: target.health,
           maxHealth: PLAYER.maxHealth,
@@ -727,7 +760,7 @@ export class GameState {
         });
       }
       if (damage > 0 && !blockedByShield && weapon.knockback) this.applyKnockback(shooter, target, weapon);
-      if (killed) this.killPlayer(shooter, target, hit.headshot, now);
+      if (killed) this.killPlayer(shooter, target, hit.headshot, now, weapon?.id);
     }
   }
 
@@ -789,7 +822,7 @@ export class GameState {
     });
   }
 
-  killPlayer(killer, victim, headshot, now) {
+  killPlayer(killer, victim, headshot, now, weaponId = null) {
     if (!victim.alive) return;
     victim.alive = false;
     victim.health = 0;
@@ -802,7 +835,23 @@ export class GameState {
     victim.input.forward = 0;
     victim.input.strafe = 0;
     victim.input.jump = false;
+    victim.pendingJump = false;
     killer.kills += 1;
+
+    const assisters = [];
+    for (const [attackerId, entry] of victim.recentDamagers.entries()) {
+      if (attackerId === killer.id || attackerId === victim.id) continue;
+      if (now - entry.at > CURRENCY_CONFIG.antiFarming.assistWindowMs) continue;
+      if (entry.damage < CURRENCY_CONFIG.antiFarming.assistMinDamage) continue;
+      const assister = this.players.get(attackerId);
+      if (assister && !assister.isBot) {
+        assister.assists = (assister.assists || 0) + 1;
+        assisters.push(assister);
+      }
+    }
+    victim.recentDamagers.clear();
+
+    const killSeq = ++this.killSequence;
 
     if (!killer.isBot && killer.profileId) {
       const profile = this.onHumanKill(killer);
@@ -812,12 +861,25 @@ export class GameState {
       }
     }
 
+    this.onElimination({
+      matchId: this.matchId,
+      killSeq,
+      killer,
+      victim,
+      assisters,
+      headshot: Boolean(headshot),
+      weaponId,
+      isSoloBots: this.mode === ROOM_MODES.SOLO_VS_BOTS,
+      now,
+    });
+
     const feedEntry = {
       id: `${now}-${killer.id}-${victim.id}`,
       killerId: killer.id,
       killerName: killer.name,
       victimId: victim.id,
       victimName: victim.name,
+      assisterName: assisters[0]?.name ?? null,
       headshot,
       at: now,
     };
@@ -841,6 +903,21 @@ export class GameState {
         kills: killer.kills,
         ...(killer.isBot ? { isBot: true } : {}),
       };
+      this.onMatchFinished({
+        matchId: this.matchId,
+        winner: killer,
+        players: [...this.players.values()].map((p) => ({
+          id: p.id,
+          accountId: p.accountId ?? null,
+          isBot: Boolean(p.isBot),
+          connected: Boolean(p.connected),
+          kills: p.kills,
+          assists: p.assists ?? 0,
+          participationMs: Math.max(0, now - (p.joinedAt ?? this.startedAt)),
+        })),
+        isSoloBots: this.mode === ROOM_MODES.SOLO_VS_BOTS,
+        now,
+      });
     }
   }
 
@@ -872,6 +949,8 @@ export class GameState {
     player.input.forward = 0;
     player.input.strafe = 0;
     player.input.jump = false;
+    player.pendingJump = false;
+    player.recentDamagers.clear();
     player.wasJumping = false;
     player.shieldBlocking = false;
     player.shieldBlockUntil = 0;
@@ -953,6 +1032,13 @@ export class GameState {
     for (const entry of this.feed) {
       if (entry.killerId === previousId) entry.killerId = nextId;
       if (entry.victimId === previousId) entry.victimId = nextId;
+    }
+    for (const other of this.players.values()) {
+      if (other.recentDamagers?.has(previousId)) {
+        const dmg = other.recentDamagers.get(previousId);
+        other.recentDamagers.delete(previousId);
+        other.recentDamagers.set(nextId, dmg);
+      }
     }
     syncActiveWeapon(player, now);
     this.sendAmmo(player, now);

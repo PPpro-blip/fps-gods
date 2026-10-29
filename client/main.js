@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { PLAYER } from '../shared/gameConfig.js';
-import { DEFAULT_MAP_ID, getMap } from '../shared/maps.js';
+import { DEFAULT_MAP_ID } from '../shared/maps.js';
 import { BUNDLE_BY_ID } from '../shared/bundles.js';
 import { GameNetwork } from './network.js';
 import { PlayerController, RemotePlayers, StateInterpolator } from './player.js';
@@ -16,16 +16,37 @@ import { MenuStage } from './MenuStage.js';
 import { assetManager } from './AssetManager.js';
 import { QUALITY_PRESETS, SettingsStore, sensitivityToRadiansPerPixel } from './settings.js';
 import { AudioEngine } from './audio.js';
+import { RuntimeDiagnostics } from './diagnostics.js';
 
 /* ────────────────────────────── local identity ───────────────────────────── */
 
+const SESSION_TOKEN_KEY = 'fps-gods-auth-token';
+
 function getOrCreateProfileId() {
   const stored = localStorage.getItem('fps-gods-profile-id');
-  if (stored && /^[A-Za-z0-9_-]{1,96}$/.test(stored)) return stored;
+  if (stored && !stored.startsWith('acct_') && /^[A-Za-z0-9_-]{1,96}$/.test(stored)) return stored;
   const profileId = window.crypto?.randomUUID?.()
     ?? `profile-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
   localStorage.setItem('fps-gods-profile-id', profileId);
   return profileId;
+}
+
+function readStoredAuthToken() {
+  try {
+    const token = window.sessionStorage?.getItem(SESSION_TOKEN_KEY) ?? null;
+    return token && typeof token === 'string' && token.length >= 24 ? token : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredAuthToken(token) {
+  try {
+    if (token) window.sessionStorage?.setItem(SESSION_TOKEN_KEY, token);
+    else window.sessionStorage?.removeItem(SESSION_TOKEN_KEY);
+  } catch {
+    // Ignore restricted storage contexts; same-origin HttpOnly cookies still work.
+  }
 }
 
 function readRoomSession() {
@@ -47,14 +68,17 @@ function clearRoomSession() {
 
 /* ───────────────────────────────── ui + audio ────────────────────────────── */
 
-const profileId = getOrCreateProfileId();
+const guestProfileId = getOrCreateProfileId();
+const diagnostics = new RuntimeDiagnostics();
+window.__FPS_GODS_DIAGNOSTICS__ = diagnostics;
+
 const urlParams = new URLSearchParams(window.location.search);
 const roomCodeFromUrl = urlParams.get('room');
 
 const audio = new AudioEngine();
 const settings = new SettingsStore({ onChange: (next) => applySettings(next) });
 const ui = new GameUI({
-  profileId,
+  profileId: guestProfileId,
   settings: settings.snapshot,
   onChange: (patch) => settings.update(patch),
 });
@@ -90,7 +114,12 @@ const interpolator = new StateInterpolator();
 const prediction = new LocalPrediction();
 const inputCadence = new InputCadence();
 const weaponEffects = new WeaponEffects(scene, camera, weaponModels);
-const aim = new AimController(camera, weaponEffects);
+const aim = new AimController(camera, weaponEffects, {
+  onStateChange: (state) => {
+    controller.setLookScale(state.lookScale ?? 1);
+    ui.setAimPresentation(state);
+  },
+});
 const remotePlayers = new RemotePlayers(scene, nameTagRoot, weaponModels, assetManager);
 const trigger = new WeaponTrigger();
 const inputPump = new InputPump(() => {
@@ -100,10 +129,9 @@ const inputPump = new InputPump(() => {
   }
   const now = performance.now();
   if (trigger.shouldRepeat) fireOnce(now);
-  const input = currentInput();
-  if (inputCadence.shouldSend(input, now)) {
-    network.sendInput(input);
-    inputCadence.sent(input, now);
+  const probe = sampleLocalInput();
+  if (inputCadence.shouldSend(probe, now, prediction.hasActiveMotion())) {
+    sendCurrentInput(false, now);
   }
 }, { timers: window });
 
@@ -114,17 +142,12 @@ const assetBoot = assetManager.init().catch((error) => {
 });
 assetManager.onProgress((progress) => ui.setLoadingProgress(progress));
 
-// The menu stage needs the operator rig and the environment kit; the weapon
-// library is awaited as well so the stands are populated on the first frame.
 Promise.allSettled([assetBoot, weaponModels.ready]).then(() => {
   menuStage = new MenuStage(assetManager, { weaponModels });
   const built = menuStage.build();
   menuStage.resize(window.innerWidth / Math.max(1, window.innerHeight));
   menuStage.show();
   if (menuStage) menuStage.setBundle(ui.selectedBundleId);
-  // Lazy models may finish after the menu was built; fill their stands once.
-  // Failed weapon loads are visible to players rather than silently presenting
-  // empty hands under a weapon label.
   const reportedWeaponFailures = new Set();
   weaponModels.onReady(() => {
     menuStage?.setBundle(ui.selectedBundleId);
@@ -137,9 +160,6 @@ Promise.allSettled([assetBoot, weaponModels.ready]).then(() => {
   if (!built) console.warn('[FPS GODS] Menu stage running without the operator asset.');
   if (!weaponModels.settled) ui.showToast('Weapon models are still loading…');
 
-  // Required assets are named individually, with the URL the build actually
-  // requested, instead of a single vague "operator unavailable" toast. The
-  // diagnostic snapshot stays on `window` for bug reports.
   window.__FPS_GODS_ASSETS__ = assetManager.diagnostics();
   if (assetManager.hasFailures) {
     const note = !assetManager.ready && !assetManager.mapReady
@@ -179,25 +199,48 @@ let serverClockOffset = 0;
 let latestPlayerAlive = false;
 let lastSnapshotTick = -1;
 let predictionCover = [];
+let nextPingId = 1;
+let pingInterval = null;
 
 function canPlay() {
   return matchActive && !matchEnded && currentRoom?.state === 'PLAYING';
 }
 
+function startPingLoop() {
+  stopPingLoop();
+  const firePing = () => {
+    if (!network.connected) return;
+    const payload = diagnostics.createPing(performance.now());
+    network.sendPing(payload);
+  };
+  firePing();
+  pingInterval = setInterval(firePing, 2_000);
+  pingInterval.unref?.();
+}
+
+function stopPingLoop() {
+  if (pingInterval) {
+    clearInterval(pingInterval);
+    pingInterval = null;
+  }
+}
+
 /**
  * The single place that decides whether the mouse/keyboard are captured.
- *
- * Called on every transition that can change the answer — pointer lock,
- * death, respawn, disconnect, room state, weapon wheel, tab focus — so a
- * respawned operator never ends up with a camera that ignores the mouse, and a
- * dead one never keeps a held key that walks them around.
  */
 function syncInputState() {
   const locked = document.pointerLockElement === canvas;
   const playable = canPlay() && !weaponWheelOpen && !ui.scoreboardOpen && latestPlayerAlive && windowFocused && !document.hidden;
   const wasEnabled = controller.enabled;
   controller.setEnabled(locked && playable);
-  if (controller.enabled) inputPump.start(); else inputPump.stop();
+  if (controller.enabled) {
+    inputPump.start();
+    // Flush held movement immediately on capture/respawn so keys pressed prior
+    // to pointer lock or respawn never suffer a startup delay.
+    if (!wasEnabled) sendCurrentInput(true);
+  } else {
+    inputPump.stop();
+  }
   if (!locked || !playable) {
     trigger.release();
     releaseRightAction();
@@ -237,13 +280,6 @@ function clearMatchPresentation() {
   if (menuStage) menuStage.show();
 }
 
-/**
- * Build the arena the server picked.
- *
- * The map always comes from the room payload (which the server validated) or
- * from GAME_START — never from a local choice — so two clients in the same room
- * can never render different geometry from the collision they are fighting in.
- */
 function syncArena(mapId, { announce = false } = {}) {
   const changed = world.setMap(mapId);
   if (!changed) return false;
@@ -251,7 +287,6 @@ function syncArena(mapId, { announce = false } = {}) {
   if (renderer) {
     renderer.toneMappingExposure = world.map?.lighting?.exposure ?? renderer.toneMappingExposure;
   }
-  // Re-derive fog and pixel ratio for the new arena.
   applySettings(settings.snapshot);
   ui.setArena(world.map);
   if (announce) ui.showToast(`Arena: ${world.map.name}`);
@@ -280,7 +315,6 @@ function enterMatch(room = currentRoom) {
     releaseRightAction();
     aim.reset(true);
   }
-  // Build the authoritative arena before the first frame of the match.
   syncArena(room.mapId ?? DEFAULT_MAP_ID);
   world.resetCover();
   if (menuStage) menuStage.hide();
@@ -314,8 +348,6 @@ function applySettings(next) {
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, preset.pixelRatio));
     renderer.setSize(window.innerWidth, window.innerHeight, false);
   }
-  // Fog starts from the map's own atmosphere and the quality preset scales it,
-  // so changing quality never erases a map's identity (or floods it).
   if (scene.fog && world.map) {
     const base = world.map.palette.fog.density;
     scene.fog.density = base * (preset.fog / QUALITY_PRESETS.high.fog);
@@ -325,7 +357,6 @@ function applySettings(next) {
 }
 applySettings(settings.snapshot);
 
-// Audio may only start inside a user gesture; arm it once and forget.
 function unlockAudio() {
   if (audio.unlock()) return;
 }
@@ -336,277 +367,339 @@ for (const eventName of ['pointerdown', 'keydown']) {
 /* ───────────────────────────────── network ───────────────────────────────── */
 
 let autoJoinAttempted = false;
+const initialAuthToken = readStoredAuthToken();
 
-const network = new GameNetwork({
-  onConnect: (_socketId, recovered) => {
-    ui.setConnectionState('connected');
-    ui.setServerTarget(describeTarget(network.connectionTarget));
-    network.requestProfile(profileId, ui.playerName);
-    if (!recovered) network.resumeRoom(readRoomSession());
-    if (roomCodeFromUrl && !autoJoinAttempted) {
-      autoJoinAttempted = true;
-      ui.showToast(`Joining room ${roomCodeFromUrl.toUpperCase()}…`);
-      window.setTimeout(() => {
-        network.joinRoom(roomCodeFromUrl, ui.playerName, ui.bundleId, ui.profileId);
-      }, 400);
-    }
-  },
-  onDisconnect: (reason) => {
-    if (reason === 'io client disconnect') ui.setConnectionState('offline');
-    else ui.setConnectionState('offline', 'Connection interrupted. Reconnecting…');
-    controller.reset();
-    controller.setEnabled(false);
-    inputPump.stop();
-    prediction.reset();
-    inputCadence.reset();
-    trigger.release();
-    releaseRightAction();
-    predictedShots.clear();
-    closeWeaponWheel(false);
-    if (matchActive) {
-      latestPlayerAlive = false;
-      ui.setPaused(true);
-    }
-  },
-  onConnectionError: (detail = {}) => ui.setConnectionState(detail.badge ?? 'offline', detail.message),
-  onProfileUpdate: (profile) => {
-    ui.setProfile(profile);
-    if (menuStage) menuStage.setBundle(ui.selectedBundleId);
-  },
-  onRoomSession: (session) => localStorage.setItem('fps-gods-room-session', JSON.stringify(session)),
-  onRoomResumeFailed: (error) => {
-    clearRoomSession();
-    currentRoom = null;
-    if (matchActive) clearMatchPresentation();
-    ui.showScreen('play');
-    ui.showToast(error?.message ?? 'The previous room session has expired.');
-  },
-  onRoomLeft: () => {
-    clearRoomSession();
-    currentRoom = null;
-    clearMatchPresentation();
-    ui.showScreen('play');
-  },
-  onRoomList: (payload) => ui.setRoomList(payload),
-  onRoomState: (room) => {
-    const previousState = currentRoom?.state;
-    const previousMap = currentRoom?.mapId;
-    currentRoom = room;
-    // The host can change the arena while the room is in its lobby; rebuild as
-    // soon as the server says so, not when the match starts.
-    syncArena(room.mapId ?? DEFAULT_MAP_ID);
-    if (previousMap && previousMap !== room.mapId) ui.setArena(world.map);
-    ui.room = room;
-    ui.selfId = network.id;
-
-    if (room.state === 'PLAYING') {
-      enterMatch(room);
-    } else if (room.state === 'LOBBY') {
-      if (previousState === 'PLAYING' || previousState === 'ENDED' || matchActive) clearMatchPresentation();
-      if (menuStage) menuStage.show();
+const network = new GameNetwork(
+  {
+    onConnect: (_socketId, recovered) => {
+      ui.setConnectionState('connected');
+      ui.setServerTarget(describeTarget(network.connectionTarget));
+      startPingLoop();
+      if (network.sessionToken) {
+        network.setSessionToken(network.sessionToken);
+      } else {
+        network.requestProfile(guestProfileId, ui.playerName);
+      }
+      bootstrapAuthSession();
+      if (!recovered) network.resumeRoom(readRoomSession());
+      if (roomCodeFromUrl && !autoJoinAttempted) {
+        autoJoinAttempted = true;
+        ui.showToast(`Joining room ${roomCodeFromUrl.toUpperCase()}…`);
+        window.setTimeout(() => {
+          network.joinRoom(roomCodeFromUrl, ui.playerName, ui.bundleId, ui.profileId);
+        }, 400);
+      }
+    },
+    onDisconnect: (reason) => {
+      stopPingLoop();
+      if (reason === 'io client disconnect') ui.setConnectionState('offline');
+      else ui.setConnectionState('offline', 'Connection interrupted. Reconnecting…');
+      controller.reset();
+      controller.setEnabled(false);
+      inputPump.stop();
+      prediction.reset();
+      inputCadence.reset();
+      trigger.release();
+      releaseRightAction();
+      predictedShots.clear();
+      closeWeaponWheel(false);
+      if (matchActive) {
+        latestPlayerAlive = false;
+        ui.setPaused(true);
+      }
+    },
+    onConnectionError: (detail = {}) => ui.setConnectionState(detail.badge ?? 'offline', detail.message),
+    onPong: (payload = {}) => {
+      const rtt = diagnostics.recordPong(payload, performance.now());
+      if (rtt !== null) ui.setPing(rtt);
+    },
+    onProfileUpdate: (profile) => {
+      ui.setProfile(profile);
+      if (menuStage) menuStage.setBundle(ui.selectedBundleId);
+    },
+    onWalletUpdate: (wallet) => {
+      ui.setWallet(wallet, { loading: false, error: '' });
+    },
+    onRewardEarned: (reward) => {
+      ui.showRewardEarned(reward);
+    },
+    onRoomSession: (session) => localStorage.setItem('fps-gods-room-session', JSON.stringify(session)),
+    onRoomResumeFailed: (error) => {
+      clearRoomSession();
+      currentRoom = null;
+      if (matchActive) clearMatchPresentation();
+      ui.showScreen('play');
+      ui.showToast(error?.message ?? 'The previous room session has expired.');
+    },
+    onRoomLeft: () => {
+      clearRoomSession();
+      currentRoom = null;
+      clearMatchPresentation();
+      ui.showScreen('play');
+    },
+    onRoomList: (payload) => ui.setRoomList(payload),
+    onRoomState: (room) => {
+      const previousState = currentRoom?.state;
+      const previousMap = currentRoom?.mapId;
       currentRoom = room;
-      ui.showLobby(room, network.id);
-    } else if (room.state === 'ENDED') {
+      syncArena(room.mapId ?? DEFAULT_MAP_ID);
+      if (previousMap && previousMap !== room.mapId) ui.setArena(world.map);
+      ui.room = room;
+      ui.selfId = network.id;
+
+      if (room.state === 'PLAYING') {
+        enterMatch(room);
+      } else if (room.state === 'LOBBY') {
+        if (previousState === 'PLAYING' || previousState === 'ENDED' || matchActive) clearMatchPresentation();
+        if (menuStage) menuStage.show();
+        currentRoom = room;
+        ui.showLobby(room, network.id);
+      } else if (room.state === 'ENDED') {
+        matchEnded = true;
+        trigger.release();
+        releaseRightAction();
+        closeWeaponWheel(false);
+        controller.setEnabled(false);
+        inputPump.stop();
+        if (document.pointerLockElement === canvas) document.exitPointerLock();
+      }
+    },
+    onRoomError: (error) => ui.showError(error?.message),
+    onGameStart: (payload = {}) => {
+      if (currentRoom && payload.mapId) currentRoom.mapId = payload.mapId;
+      enterMatch(currentRoom);
+    },
+    onGameState: (state) => {
+      if (!matchActive || state.code !== currentRoom?.code) return;
+      if (Number.isSafeInteger(state.tick)) {
+        if (state.tick <= lastSnapshotTick) return;
+        lastSnapshotTick = state.tick;
+      }
+      const receivedAt = performance.now();
+      latestPlayers = state.players ?? [];
+      interpolator.push(latestPlayers, receivedAt);
+      serverClockOffset = (state.serverTime ?? Date.now()) - Date.now();
+      latestLocalPlayer = latestPlayers.find((player) => player.id === network.id) ?? null;
+      const aliveNow = Boolean(latestLocalPlayer?.alive && latestLocalPlayer?.connected !== false);
+      if (Array.isArray(state.cover)) {
+        const ids = new Set(state.cover);
+        predictionCover = world.map.cover.flatMap((block, id) => ids.has(id) ? [{ ...block, id }] : []);
+      }
+      if (aliveNow && latestLocalPlayer) {
+        let driftMeters = 0;
+        if (!latestPlayerAlive) prediction.reset(latestLocalPlayer);
+        else driftMeters = prediction.reconcile(latestLocalPlayer, world.map, predictionCover);
+        diagnostics.recordSnapshot(latestLocalPlayer.inputAck, driftMeters, receivedAt);
+      } else if (!aliveNow) {
+        prediction.reset();
+      }
+      if (aliveNow !== latestPlayerAlive) {
+        latestPlayerAlive = aliveNow;
+        if (!aliveNow) {
+          controller.reset();
+          trigger.release();
+          releaseRightAction();
+          closeWeaponWheel(false);
+        }
+        syncInputState();
+      }
+      trigger.sync(latestLocalPlayer?.currentWeaponId, latestLocalPlayer?.auto);
+      world.updateCover(state.cover);
+      weaponEffects.updateSmokeClouds(state.smokeClouds ?? []);
+      weaponEffects.updateProjectiles(state.projectiles ?? [], receivedAt);
+      if (latestLocalPlayer) {
+        syncLocalWeapon(latestLocalPlayer.currentWeaponId, latestLocalPlayer.bundleId);
+        weaponEffects.setBlocking(rightMouseHeld && latestLocalPlayer.blocking === true);
+        weaponEffects.setMovementSpeed(Math.hypot(latestLocalPlayer.vx ?? 0, latestLocalPlayer.vz ?? 0));
+        ui.updateHud(
+          latestLocalPlayer,
+          Date.now() + serverClockOffset,
+          latestPlayers.filter((player) => player.alive && player.connected !== false).length,
+        );
+      }
+      ui.updateScoreboard(latestPlayers, network.id);
+    },
+    onGameEnd: (result) => {
       matchEnded = true;
       trigger.release();
       releaseRightAction();
       closeWeaponWheel(false);
+      controller.reset();
       controller.setEnabled(false);
       inputPump.stop();
       if (document.pointerLockElement === canvas) document.exitPointerLock();
-    }
-  },
-  onRoomError: (error) => ui.showError(error?.message),
-  onGameStart: (payload = {}) => {
-    if (currentRoom && payload.mapId) currentRoom.mapId = payload.mapId;
-    enterMatch(currentRoom);
-  },
-  onGameState: (state) => {
-    if (!matchActive || state.code !== currentRoom?.code) return;
-    if (Number.isSafeInteger(state.tick)) {
-      if (state.tick <= lastSnapshotTick) return;
-      lastSnapshotTick = state.tick;
-    }
-    const receivedAt = performance.now();
-    latestPlayers = state.players ?? [];
-    interpolator.push(latestPlayers, receivedAt);
-    serverClockOffset = (state.serverTime ?? Date.now()) - Date.now();
-    latestLocalPlayer = latestPlayers.find((player) => player.id === network.id) ?? null;
-    const aliveNow = Boolean(latestLocalPlayer?.alive && latestLocalPlayer?.connected !== false);
-    if (Array.isArray(state.cover)) {
-      const ids = new Set(state.cover);
-      predictionCover = world.map.cover.flatMap((block, id) => ids.has(id) ? [{ ...block, id }] : []);
-    }
-    if (aliveNow && latestLocalPlayer) {
-      if (!latestPlayerAlive) prediction.reset(latestLocalPlayer);
-      else prediction.reconcile(latestLocalPlayer, world.map, predictionCover);
-    } else if (!aliveNow) prediction.reset();
-    if (aliveNow !== latestPlayerAlive) {
-      latestPlayerAlive = aliveNow;
-      if (!aliveNow) {
-        controller.reset();
-        trigger.release();
-        releaseRightAction();
-        closeWeaponWheel(false);
+      ui.showGameEnd(result, network.id);
+    },
+    onReturnToLobby: () => {
+      clearMatchPresentation();
+      if (menuStage) menuStage.show();
+      if (currentRoom) ui.showLobby(currentRoom, network.id);
+    },
+    onPlayerDied: (data) => {
+      if (data.victimId !== network.id) return;
+      latestPlayerAlive = false;
+      prediction.reset();
+      if (latestLocalPlayer) {
+        latestLocalPlayer.alive = false;
+        latestLocalPlayer.health = 0;
+        latestLocalPlayer.respawnAt = data.respawnAt;
+        ui.updateHud(
+          latestLocalPlayer,
+          Date.now() + serverClockOffset,
+          latestPlayers.filter((player) => player.alive && player.connected !== false).length,
+        );
       }
+      controller.reset();
+      trigger.release();
+      releaseRightAction();
+      closeWeaponWheel(false);
       syncInputState();
-    }
-    trigger.sync(latestLocalPlayer?.currentWeaponId, latestLocalPlayer?.auto);
-    world.updateCover(state.cover);
-    weaponEffects.updateSmokeClouds(state.smokeClouds ?? []);
-    weaponEffects.updateProjectiles(state.projectiles ?? [], receivedAt);
-    if (latestLocalPlayer) {
-      syncLocalWeapon(latestLocalPlayer.currentWeaponId, latestLocalPlayer.bundleId);
-      weaponEffects.setBlocking(rightMouseHeld && latestLocalPlayer.blocking === true);
-      weaponEffects.setMovementSpeed(Math.hypot(latestLocalPlayer.vx ?? 0, latestLocalPlayer.vz ?? 0));
-      ui.updateHud(
-        latestLocalPlayer,
-        Date.now() + serverClockOffset,
-        latestPlayers.filter((player) => player.alive && player.connected !== false).length,
-      );
-    }
-    ui.updateScoreboard(latestPlayers, network.id);
-  },
-  onGameEnd: (result) => {
-    matchEnded = true;
-    trigger.release();
-    releaseRightAction();
-    closeWeaponWheel(false);
-    controller.reset();
-    controller.setEnabled(false);
-    inputPump.stop();
-    if (document.pointerLockElement === canvas) document.exitPointerLock();
-    ui.showGameEnd(result, network.id);
-  },
-  onReturnToLobby: () => {
-    clearMatchPresentation();
-    if (menuStage) menuStage.show();
-    if (currentRoom) ui.showLobby(currentRoom, network.id);
-  },
-  onPlayerDied: (data) => {
-    if (data.victimId !== network.id) return;
-    latestPlayerAlive = false;
-    prediction.reset();
-    if (latestLocalPlayer) {
-      latestLocalPlayer.alive = false;
-      latestLocalPlayer.health = 0;
-      latestLocalPlayer.respawnAt = data.respawnAt;
-      ui.updateHud(
-        latestLocalPlayer,
-        Date.now() + serverClockOffset,
-        latestPlayers.filter((player) => player.alive && player.connected !== false).length,
-      );
-    }
-    controller.reset();
-    trigger.release();
-    releaseRightAction();
-    closeWeaponWheel(false);
-    syncInputState();
-  },
-  onPlayerRespawned: (data) => {
-    if (data.id !== network.id) return;
-    latestPlayerAlive = true;
-    if (latestLocalPlayer) Object.assign(latestLocalPlayer, data, { alive: true, grounded: true, vx: 0, vy: 0, vz: 0, knockbackVX: 0, knockbackVZ: 0, wasJumping: false });
-    prediction.reset(latestLocalPlayer);
-    inputCadence.reset();
-    releaseRightAction();
-    aim.reset(true);
-    nextClientShotByWeapon.clear();
-    predictedShots.clear();
-    controller.reset();
-    // Rebind input immediately: the pointer is still locked, so the operator
-    // should be able to aim and move on the first frame after redeploying.
-    syncInputState();
-    // Never come back mid-reload or mid-swap: reset the viewmodel presentation
-    // and re-show the rig in case death hid it.
-    weaponEffects.resetPresentation();
-    weaponEffects.setVisible(true);
-    audio.play('spawn');
-    ui.showToast('Redeployed. Two seconds of spawn protection.');
-  },
-  onKillFeed: (entry) => ui.addKillFeed(entry, network.id),
-  onScoreUpdate: (data) => ui.updateScoreboard(data?.players, network.id),
-  onHitConfirmed: (hit) => {
-    ui.showHitMarker(hit);
-    if (hit?.hit) audio.play(hit.killed ? 'kill' : 'hit');
-  },
-  onAmmoUpdate: (data) => {
-    if (!latestLocalPlayer) return;
-    Object.assign(latestLocalPlayer, data);
-    trigger.sync(latestLocalPlayer.currentWeaponId, latestLocalPlayer.auto);
-    syncLocalWeapon(latestLocalPlayer.currentWeaponId, latestLocalPlayer.bundleId);
-    if (data.reloading) {
-      weaponEffects.startReload((data.reloadCompletesAt ?? Date.now() + 900) - (Date.now() + serverClockOffset));
-      audio.play('reload');
-    }
-    ui.updateHud(
-      latestLocalPlayer,
-      Date.now() + serverClockOffset,
-      latestPlayers.filter((player) => player.alive && player.connected !== false).length,
-    );
-  },
-  onWeaponUpdate: (data) => {
-    const player = latestPlayers.find((candidate) => candidate.id === data.playerId);
-    if (player) {
-      player.bundleId = data.bundleId;
-      player.currentWeaponId = data.weaponId;
-      player.currentWeaponName = data.weaponName;
-      player.currentWeaponIcon = data.weaponIcon;
-    }
-    if (data.playerId === network.id && latestLocalPlayer) {
-      Object.assign(latestLocalPlayer, {
-        bundleId: data.bundleId,
-        currentWeaponId: data.weaponId,
-        currentWeaponName: data.weaponName,
-        currentWeaponIcon: data.weaponIcon,
-        auto: data.auto === true,
-        fireRate: data.fireRate,
-      });
-      trigger.sync(data.weaponId, data.auto);
-      syncLocalWeapon(data.weaponId, data.bundleId);
-      ui.updateHud(
-        latestLocalPlayer,
-        Date.now() + serverClockOffset,
-        latestPlayers.filter((candidate) => candidate.alive && candidate.connected !== false).length,
-      );
-    }
-  },
-  onWeaponOverheated: (data) => {
-    if (data.weaponId === latestLocalPlayer?.currentWeaponId) ui.showToast('MINIGUN OVERHEATED — cooling down.');
-  },
-  onWeaponFired: (data) => {
-    if (data.playerId === network.id) {
-      const predicted = predictedShots.consume(data.shotId);
-      if (data.weaponId === latestLocalPlayer?.currentWeaponId) {
-        weaponEffects.fire(performance.now(), data.weaponId, data.bundleId, data, !predicted);
-        if (!predicted) audio.play('shot', { weaponClass: weaponEffects.weaponClass });
-      } else {
-        weaponEffects.showRemoteTracer(data);
+    },
+    onPlayerRespawned: (data) => {
+      if (data.id !== network.id) return;
+      latestPlayerAlive = true;
+      if (latestLocalPlayer) {
+        Object.assign(latestLocalPlayer, data, {
+          alive: true, grounded: true, vx: 0, vy: 0, vz: 0, knockbackVX: 0, knockbackVZ: 0, wasJumping: false,
+        });
       }
-      return;
-    }
-    remotePlayers.flashWeapon(data.playerId, data.weaponId, data.bundleId);
-    weaponEffects.showRemoteTracer(data);
+      prediction.reset(latestLocalPlayer);
+      inputCadence.reset();
+      releaseRightAction();
+      aim.reset(true);
+      nextClientShotByWeapon.clear();
+      predictedShots.clear();
+      controller.reset();
+      syncInputState();
+      weaponEffects.resetPresentation();
+      weaponEffects.setVisible(true);
+      audio.play('spawn');
+      ui.showToast('Redeployed. Two seconds of spawn protection.');
+    },
+    onKillFeed: (entry) => ui.addKillFeed(entry, network.id),
+    onScoreUpdate: (data) => ui.updateScoreboard(data?.players, network.id),
+    onHitConfirmed: (hit) => {
+      ui.showHitMarker(hit);
+      if (hit?.hit) audio.play(hit.killed ? 'kill' : 'hit');
+    },
+    onAmmoUpdate: (data) => {
+      if (!latestLocalPlayer) return;
+      Object.assign(latestLocalPlayer, data);
+      trigger.sync(latestLocalPlayer.currentWeaponId, latestLocalPlayer.auto);
+      syncLocalWeapon(latestLocalPlayer.currentWeaponId, latestLocalPlayer.bundleId);
+      if (data.reloading) {
+        weaponEffects.startReload((data.reloadCompletesAt ?? Date.now() + 900) - (Date.now() + serverClockOffset));
+        audio.play('reload');
+      }
+      ui.updateHud(
+        latestLocalPlayer,
+        Date.now() + serverClockOffset,
+        latestPlayers.filter((player) => player.alive && player.connected !== false).length,
+      );
+    },
+    onWeaponUpdate: (data) => {
+      const player = latestPlayers.find((candidate) => candidate.id === data.playerId);
+      if (player) {
+        player.bundleId = data.bundleId;
+        player.currentWeaponId = data.weaponId;
+        player.currentWeaponName = data.weaponName;
+        player.currentWeaponIcon = data.weaponIcon;
+      }
+      if (data.playerId === network.id && latestLocalPlayer) {
+        Object.assign(latestLocalPlayer, {
+          bundleId: data.bundleId,
+          currentWeaponId: data.weaponId,
+          currentWeaponName: data.weaponName,
+          currentWeaponIcon: data.weaponIcon,
+          auto: data.auto === true,
+          fireRate: data.fireRate,
+        });
+        trigger.sync(data.weaponId, data.auto);
+        syncLocalWeapon(data.weaponId, data.bundleId);
+        ui.updateHud(
+          latestLocalPlayer,
+          Date.now() + serverClockOffset,
+          latestPlayers.filter((candidate) => candidate.alive && candidate.connected !== false).length,
+        );
+      }
+    },
+    onWeaponOverheated: (data) => {
+      if (data.weaponId === latestLocalPlayer?.currentWeaponId) ui.showToast('MINIGUN OVERHEATED — cooling down.');
+    },
+    onWeaponFired: (data) => {
+      if (data.playerId === network.id) {
+        const now = performance.now();
+        diagnostics.recordShotConfirmed(now);
+        const predicted = predictedShots.consume(data.shotId);
+        if (data.weaponId === latestLocalPlayer?.currentWeaponId) {
+          weaponEffects.fire(now, data.weaponId, data.bundleId, data, !predicted);
+          if (!predicted) audio.play('shot', { weaponClass: weaponEffects.weaponClass });
+        } else {
+          weaponEffects.showRemoteTracer(data);
+        }
+        return;
+      }
+      remotePlayers.flashWeapon(data.playerId, data.weaponId, data.bundleId);
+      weaponEffects.showRemoteTracer(data);
+    },
+    onSmokeUpdate: (data) => weaponEffects.updateSmokeClouds(data.smokeClouds ?? []),
+    onProjectileImpact: (data) => weaponEffects.showImpact(data),
+    onCoverDestroyed: (data) => world.destroyCover(data.blockId),
+    onHealthUpdate: (data) => {
+      if (!latestLocalPlayer) return;
+      const previous = latestLocalPlayer.health;
+      latestLocalPlayer.health = data.health;
+      if (typeof previous === 'number' && data.health < previous) audio.play('damage');
+      ui.updateHud(
+        latestLocalPlayer,
+        Date.now() + serverClockOffset,
+        latestPlayers.filter((player) => player.alive && player.connected !== false).length,
+      );
+    },
   },
-  onSmokeUpdate: (data) => weaponEffects.updateSmokeClouds(data.smokeClouds ?? []),
-  onProjectileImpact: (data) => weaponEffects.showImpact(data),
-  onCoverDestroyed: (data) => world.destroyCover(data.blockId),
-  onHealthUpdate: (data) => {
-    if (!latestLocalPlayer) return;
-    const previous = latestLocalPlayer.health;
-    latestLocalPlayer.health = data.health;
-    if (typeof previous === 'number' && data.health < previous) audio.play('damage');
-    ui.updateHud(
-      latestLocalPlayer,
-      Date.now() + serverClockOffset,
-      latestPlayers.filter((player) => player.alive && player.connected !== false).length,
-    );
-  },
-});
+  initialAuthToken,
+);
 
-// The deployment badge is filled in as soon as the socket target is known; it
-// must not wait for (or be coupled to) the asset promises above.
 ui.setServerTarget(describeTarget(network.connectionTarget));
+
+/* ─────────────────────────── email otp + wallet api ──────────────────────── */
+
+let authBootInFlight = false;
+
+async function bootstrapAuthSession() {
+  if (authBootInFlight) return;
+  authBootInFlight = true;
+  try {
+    const res = await network.apiRequest('/api/auth/me');
+    if (res?.status) ui.setAuthStatus(res.status);
+    if (res?.authenticated && res.account) {
+      ui.setProfile(res.account);
+      ui.setWallet(res.wallet, { loading: false, error: '' });
+      if (network.connected) network.setSessionToken(network.sessionToken);
+    } else {
+      writeStoredAuthToken(null);
+      network.setSessionToken(null);
+      ui.setWallet({ accountId: null, authenticated: false, balance: 0, lifetimeEarned: 0, recentTransactions: [] });
+    }
+  } catch {
+    // Offline or non-HTTP test harness: guest play remains fully operational.
+  } finally {
+    authBootInFlight = false;
+  }
+}
+
+async function refreshWallet() {
+  if (!ui.profile.authenticated) return;
+  ui.setWallet(null, { loading: true, error: '' });
+  try {
+    const res = await network.apiRequest('/api/wallet');
+    ui.setWallet(res.wallet, { loading: false, error: '' });
+  } catch (error) {
+    ui.setWallet(null, { loading: false, error: error?.message || 'Could not load wallet.' });
+  }
+}
+
+bootstrapAuthSession();
 
 /* ───────────────────────────────── ui wiring ─────────────────────────────── */
 
@@ -617,6 +710,14 @@ ui.setHandlers({
   },
   onProfileCallsign: (name) => {
     localStorage.setItem('fps-gods-callsign', name);
+    if (ui.profile.authenticated) {
+      network.apiRequest('/api/auth/profile', {
+        method: 'POST',
+        body: { callsign: name },
+      }).then((res) => {
+        if (res?.account) ui.setProfile(res.account);
+      }).catch(() => {});
+    }
     if (network.connected) network.requestProfile(ui.profileId, name);
   },
   onBundleSelected: (bundleId) => {
@@ -625,7 +726,46 @@ ui.setHandlers({
   onBundleChange: (bundleId) => {
     if (menuStage) menuStage.setBundle(bundleId);
     ui.setServerTarget(describeTarget(network.connectionTarget));
+    if (ui.profile.authenticated) {
+      network.apiRequest('/api/auth/profile', {
+        method: 'POST',
+        body: { selectedBundle: bundleId },
+      }).catch(() => {});
+    }
   },
+  onRequestOtp: async (email) => {
+    await network.apiRequest('/api/auth/otp/request', {
+      method: 'POST',
+      body: { email },
+    });
+  },
+  onVerifyOtp: async ({ email, code, callsign, selectedBundle }) => {
+    const res = await network.apiRequest('/api/auth/otp/verify', {
+      method: 'POST',
+      body: { email, code, callsign, selectedBundle },
+    });
+    if (res?.sessionToken) {
+      writeStoredAuthToken(res.sessionToken);
+      network.setSessionToken(res.sessionToken);
+    } else if (network.connected) {
+      network.setSessionToken(null);
+    }
+    if (res?.account) ui.setProfile(res.account);
+    if (res?.wallet) ui.setWallet(res.wallet, { loading: false, error: '' });
+  },
+  onLogout: async () => {
+    try {
+      await network.apiRequest('/api/auth/logout', { method: 'POST' });
+    } finally {
+      writeStoredAuthToken(null);
+      network.setSessionToken(null);
+      ui.resetToGuestProfile(guestProfileId);
+      if (network.connected) {
+        network.requestProfile(guestProfileId, ui.playerName);
+      }
+    }
+  },
+  onRefreshWallet: () => refreshWallet(),
   onPlayNow: (name, bundleId, id, mapId) => {
     if (!network.connected) {
       ui.clearAction();
@@ -644,8 +784,6 @@ ui.setHandlers({
     network.createRoom(name, bundleId, id, mapId ?? ui.selectedMapId);
   },
   onSelectMap: (mapId) => {
-    // Never trust the local pick as authority: only the host's request to the
-    // server changes the room, and every client renders what the server sends.
     ui.selectedMapId = mapId;
     if (network.connected && currentRoom?.state === 'LOBBY') network.setRoomMap(mapId);
   },
@@ -685,6 +823,10 @@ ui.setHandlers({
 });
 
 /* ───────────────────────────────── input ─────────────────────────────────── */
+
+controller.onInputEdge = () => {
+  if (controller.enabled) sendCurrentInput(true);
+};
 
 canvas.addEventListener('click', () => {
   unlockAudio();
@@ -734,7 +876,7 @@ document.addEventListener('mousedown', (event) => {
     if (rightMouseHeld) return;
     rightMouseHeld = true;
     if (latestLocalPlayer.currentWeaponId === 'COMBAT_SHIELD') {
-      weaponEffects.setBlocking(true); // cosmetic only; server validates the block
+      weaponEffects.setBlocking(true);
       sendCurrentInput(true);
     } else {
       aim.setHeld(true);
@@ -764,8 +906,6 @@ window.addEventListener('focus', () => {
   windowFocused = true;
   syncInputState();
 });
-// UI toggles the scoreboard on the earlier window listener; it owns input
-// while open and clears any held keys, trigger or ADS through the same gate.
 window.addEventListener('keydown', (event) => {
   if (event.code === 'Tab' && !event.repeat) syncInputState();
 });
@@ -774,14 +914,6 @@ window.addEventListener('contextmenu', (event) => event.preventDefault());
 
 document.addEventListener('keydown', (event) => {
   if (controller.isTyping(event.target)) return;
-
-  // A render stall must not delay the server seeing a key edge. Keep the
-  // frame heartbeat for held input, but send state transitions immediately.
-  if (['KeyW', 'KeyA', 'KeyS', 'KeyD', 'Space'].includes(event.code)
-    && !event.repeat && controller.enabled) {
-    sendCurrentInput(true);
-    return;
-  }
 
   if (event.code === 'KeyQ' && !event.repeat && controller.enabled) {
     event.preventDefault();
@@ -816,9 +948,6 @@ document.addEventListener('keydown', (event) => {
 
 document.addEventListener('keyup', (event) => {
   if (event.code === 'KeyQ') closeWeaponWheel(true);
-  if (['KeyW', 'KeyA', 'KeyS', 'KeyD', 'Space'].includes(event.code) && controller.enabled) {
-    sendCurrentInput(true);
-  }
 });
 
 document.addEventListener('wheel', (event) => {
@@ -840,33 +969,61 @@ document.addEventListener('wheel', (event) => {
   trigger.sync(nextWeaponId, false);
 }, { passive: false });
 
-function currentInput() {
-  const input = controller.getInput(inputSequence++);
+/**
+ * Non-destructive frame sample for local prediction: never burns network `seq`
+ * numbers and never clears `jumpTapLatched` before a packet is sent.
+ */
+function sampleLocalInput() {
+  const forward = latestPlayerAlive
+    ? Number(controller.keys.has('KeyW')) - Number(controller.keys.has('KeyS'))
+    : 0;
+  const strafe = latestPlayerAlive
+    ? Number(controller.keys.has('KeyD')) - Number(controller.keys.has('KeyA'))
+    : 0;
+  const jump = latestPlayerAlive
+    ? (controller.keys.has('Space') || controller.jumpTapLatched)
+    : false;
+  return {
+    seq: Math.max(1, inputSequence),
+    forward,
+    strafe,
+    jump,
+    yaw: controller.yaw,
+    pitch: controller.pitch,
+    blocking: Boolean(rightMouseHeld && controller.enabled && latestLocalPlayer?.currentWeaponId === 'COMBAT_SHIELD'),
+  };
+}
+
+function buildNetworkInput(now = performance.now()) {
+  const seq = ++inputSequence;
+  const input = controller.getInput(seq, { consumeJumpTap: true });
   if (!latestPlayerAlive) {
     input.forward = 0;
     input.strafe = 0;
     input.jump = false;
   }
   input.blocking = Boolean(rightMouseHeld && controller.enabled && latestLocalPlayer?.currentWeaponId === 'COMBAT_SHIELD');
+  diagnostics.recordInputSent(seq, now);
   return input;
 }
 
 function sendNeutralInput() {
   if (!network.connected || !canPlay()) return;
-  const input = currentInput();
+  const now = performance.now();
+  const input = buildNetworkInput(now);
   input.forward = 0;
   input.strafe = 0;
   input.jump = false;
   input.blocking = false;
   network.sendInput(input, true);
-  inputCadence.sent(input, performance.now());
+  inputCadence.sent(input, now);
 }
 
-function sendCurrentInput(reliable = false) {
+function sendCurrentInput(reliable = false, now = performance.now()) {
   if (!network.connected || !canPlay()) return;
-  const input = currentInput();
+  const input = buildNetworkInput(now);
   network.sendInput(input, reliable);
-  inputCadence.sent(input, performance.now());
+  inputCadence.sent(input, now);
 }
 
 function releaseRightAction() {
@@ -897,11 +1054,10 @@ function fireOnce(now) {
   }
   const rate = Math.max(50, Number(latestLocalPlayer.fireRate) || 100);
   nextClientShotByWeapon.set(weaponId, now + rate);
-  // Send the current aim immediately before the action; the server still owns
-  // the shot ray and all ammo/cooldown/hit decisions.
-  sendCurrentInput(true);
+  sendCurrentInput(true, now);
   const shotId = nextShotId++;
   predictedShots.remember(shotId, now);
+  diagnostics.recordShotSent(now);
   network.shoot(shotId);
   weaponEffects.presentFire(now, weaponId, latestLocalPlayer.bundleId);
   audio.play('shot', { weaponClass: weaponEffects.weaponClass });
@@ -926,15 +1082,17 @@ let lastFrameTime = performance.now();
 
 function animate(now = performance.now()) {
   requestAnimationFrame(animate);
-  const frameElapsed = Math.max(0, (now - lastFrameTime) / 1000);
+  const frameElapsedMs = Math.max(0, now - lastFrameTime);
+  const frameElapsed = frameElapsedMs / 1000;
   const delta = Math.min(frameElapsed, 0.1);
   lastFrameTime = now;
+  diagnostics.recordFrame(frameElapsed);
 
   if (!matchActive && menuStage?.built && !menuStage.visible) menuStage.show();
 
   if (matchActive) {
     if (canPlay() && network.connected) {
-      const input = currentInput();
+      const input = sampleLocalInput();
       if (latestPlayerAlive) prediction.step(input, delta, world.map, predictionCover);
     }
 
@@ -942,7 +1100,7 @@ function animate(now = performance.now()) {
     camera.rotation.y = controller.yaw;
     camera.rotation.x = controller.pitch;
     camera.rotation.z = 0;
-    const renderAt = now - 90;
+    const renderAt = now - interpolator.delayMs;
     const localPose = prediction.sample(delta) ?? latestLocalPlayer;
     if (localPose) camera.position.set(localPose.x, localPose.y + PLAYER.eyeHeight, localPose.z);
     camera.updateMatrixWorld(true);
@@ -954,8 +1112,6 @@ function animate(now = performance.now()) {
     if (matchActive) menuStage.hide();
     menuStage.update(delta);
   }
-  // ADS is presentation and should catch up after a slow frame; movement
-  // simulation remains clamped separately.
   aim.update(frameElapsed);
   weaponEffects.update(now, delta);
 
@@ -973,11 +1129,10 @@ function animate(now = performance.now()) {
 }
 requestAnimationFrame(animate);
 
-// Console breadcrumb for the deployment badge; matches the README's guidance.
 console.info(`[FPS GODS] Socket.IO target: ${network.connectionTarget.url} (source: ${network.connectionTarget.source})`);
 
 window.addEventListener('beforeunload', () => {
-  // Release GPU resources, sockets and timers on a full page teardown.
+  stopPingLoop();
   trigger.release();
   controller.dispose();
   weaponEffects.dispose();

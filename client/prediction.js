@@ -2,12 +2,16 @@ import { simulateMovement } from '../shared/movement.js';
 
 const MAX_PENDING_STEPS = 240;
 const MAX_CORRECTION_DISTANCE = 2;
-const CORRECTION_DECAY = 14;
+const CORRECTION_DECAY = 16;
 
 function fromSnapshot(snapshot) {
   return {
-    x: snapshot.x, y: snapshot.y, z: snapshot.z,
-    vx: snapshot.vx ?? 0, vy: snapshot.vy ?? 0, vz: snapshot.vz ?? 0,
+    x: snapshot.x,
+    y: snapshot.y,
+    z: snapshot.z,
+    vx: snapshot.vx ?? 0,
+    vy: snapshot.vy ?? 0,
+    vz: snapshot.vz ?? 0,
     yaw: snapshot.yaw ?? 0,
     grounded: snapshot.grounded ?? snapshot.y <= 0,
     wasJumping: snapshot.wasJumping === true,
@@ -35,12 +39,27 @@ export class LocalPrediction {
     this.offset = { x: 0, y: 0, z: 0 };
   }
 
+  hasActiveMotion() {
+    if (!this.state) return false;
+    return (
+      !this.state.grounded
+      || Math.hypot(this.state.vx || 0, this.state.vz || 0) > 0.015
+      || Math.abs(this.state.vy || 0) > 0.015
+    );
+  }
+
   step(input, delta, map, cover) {
     if (!this.state || !map || !Number.isFinite(delta) || delta <= 0) return;
     const step = {
       seq: input.seq,
       delta: Math.min(delta, 0.1),
-      input: { forward: input.forward, strafe: input.strafe, jump: input.jump, yaw: input.yaw },
+      input: {
+        forward: input.forward,
+        strafe: input.strafe,
+        jump: input.jump,
+        yaw: input.yaw,
+        blocking: Boolean(input.blocking),
+      },
     };
     this.apply(step, map, cover);
     this.pending.push(step);
@@ -54,15 +73,15 @@ export class LocalPrediction {
   }
 
   reconcile(snapshot, map, cover) {
-    if (!snapshot || !map) return;
+    if (!snapshot || !map) return 0;
     if (!this.state) {
       this.reset(snapshot);
-      return;
+      return 0;
     }
     // Older servers do not acknowledge inputs. Still accept authority; do not
     // replay an unknowable history on top of their snapshots.
     const ack = Number.isSafeInteger(snapshot.inputAck) ? snapshot.inputAck : null;
-    if (ack !== null && ack < this.lastAck) return;
+    if (ack !== null && ack < this.lastAck) return 0;
     const displayed = {
       x: this.state.x + this.offset.x,
       y: this.state.y + this.offset.y,
@@ -77,10 +96,12 @@ export class LocalPrediction {
       y: displayed.y - this.state.y,
       z: displayed.z - this.state.z,
     };
+    const dist = Math.hypot(correction.x, correction.y, correction.z);
     // Respawns and very large corrections must not interpolate through walls.
-    this.offset = Math.hypot(correction.x, correction.y, correction.z) > MAX_CORRECTION_DISTANCE
+    this.offset = dist > MAX_CORRECTION_DISTANCE
       ? { x: 0, y: 0, z: 0 }
       : correction;
+    return dist;
   }
 
   sample(delta = 0) {
