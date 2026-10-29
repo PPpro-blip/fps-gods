@@ -2,7 +2,12 @@ import { simulateMovement } from '../shared/movement.js';
 
 const MAX_PENDING_STEPS = 240;
 const MAX_CORRECTION_DISTANCE = 2;
-const CORRECTION_DECAY = 16;
+const CORRECTION_DECAY = 14;
+// Single-tick (50ms @ 7.2 m/s = 0.36m) packet arrival phase jitter on high-RTT
+// links cancels out on the next snapshot; damping sub-tick offsets while moving
+// prevents +/-36cm camera surge/hitch oscillations without delaying stops.
+const JITTER_PHASE_BAND_METERS = 0.48;
+const JITTER_CORRECTION_DECAY = 4.2;
 
 function fromSnapshot(snapshot) {
   return {
@@ -106,7 +111,12 @@ export class LocalPrediction {
 
   sample(delta = 0) {
     if (!this.state) return null;
-    const decay = Math.exp(-CORRECTION_DECAY * Math.max(0, Math.min(delta, 0.1)));
+    const clampedDelta = Math.max(0, Math.min(delta, 0.1));
+    const offsetMag = Math.hypot(this.offset.x, this.offset.y, this.offset.z);
+    const rate = (this.hasActiveMotion() && offsetMag <= JITTER_PHASE_BAND_METERS)
+      ? JITTER_CORRECTION_DECAY
+      : CORRECTION_DECAY;
+    const decay = Math.exp(-rate * clampedDelta);
     this.offset.x *= decay;
     this.offset.y *= decay;
     this.offset.z *= decay;
@@ -118,12 +128,12 @@ export class LocalPrediction {
   }
 }
 
-// Latest-state input is sufficient for the server. Send key edges immediately
-// and a 20 Hz heartbeat while held, rather than a packet per display frame.
-// Angle changes are included in every heartbeat.
+// Latest-state input is sufficient for the server. Send key edges immediately,
+// a 20 Hz heartbeat while moving/looking, and a lightweight keepalive while idle.
 export class InputCadence {
-  constructor(intervalMs = 50) {
+  constructor(intervalMs = 50, idleIntervalMs = 200) {
     this.intervalMs = intervalMs;
+    this.idleIntervalMs = Math.max(intervalMs, idleIntervalMs);
     this.reset();
   }
 
@@ -133,9 +143,15 @@ export class InputCadence {
   }
 
   shouldSend(input, now) {
-    const changed = !this.last || ['forward', 'strafe', 'jump', 'blocking']
+    if (!this.last) return true;
+    const changed = ['forward', 'strafe', 'jump', 'blocking']
       .some((key) => Boolean(input[key]) !== Boolean(this.last[key]) || input[key] !== this.last[key]);
-    return changed || now - this.lastSentAt >= this.intervalMs;
+    if (changed) return true;
+    const angleChanged = Math.abs((input.yaw ?? 0) - (this.last.yaw ?? 0)) > 0.0015
+      || Math.abs((input.pitch ?? 0) - (this.last.pitch ?? 0)) > 0.0015;
+    const active = Boolean(input.forward || input.strafe || input.jump || input.blocking || angleChanged);
+    const targetInterval = active ? this.intervalMs : this.idleIntervalMs;
+    return now - this.lastSentAt >= targetInterval;
   }
 
   sent(input, now) {

@@ -5,6 +5,8 @@
 // localStorage because the game has no account-synced settings store yet, and
 // the settings screen says so explicitly.
 
+import { DEFAULT_BOT_DIFFICULTY, resolveBotDifficulty } from '../shared/gameConfig.js';
+
 export const SETTINGS_STORAGE_KEY = 'fps-gods-settings';
 
 // Quality only controls things the renderer can actually change at runtime:
@@ -25,6 +27,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
   invertY: false,
   crosshair: 'standard',
   showFps: false,
+  botDifficulty: DEFAULT_BOT_DIFFICULTY,
 });
 
 export const SETTINGS_LIMITS = Object.freeze({
@@ -54,6 +57,7 @@ export function sanitizeSettings(raw) {
     invertY: source.invertY === true,
     crosshair: CROSSHAIR_STYLES.includes(source.crosshair) ? source.crosshair : DEFAULT_SETTINGS.crosshair,
     showFps: source.showFps === true,
+    botDifficulty: resolveBotDifficulty(source.botDifficulty),
   });
 }
 

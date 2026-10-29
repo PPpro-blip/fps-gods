@@ -16,13 +16,14 @@ const NO_FLASH = new Set(['KNIFE', 'GOD_FIST', 'SMOKE_GRENADE', 'COMBAT_SHIELD']
 const SWITCH_DURATION_MS = 190;
 const RECOIL_DECAY_PER_SECOND = 10;
 
-// Base hip-fire framing per weapon class.
+// Base hip-fire framing per weapon class (compact Krunker-inspired lower-right
+// placement that keeps the center crosshair unobstructed across 60..110 FOV).
 const WEAPON_PROFILES = Object.freeze({
-  light: Object.freeze({ x: 0.2, y: -0.2, reach: 0.4, handScale: 1 }),
-  heavy: Object.freeze({ x: 0.24, y: -0.26, reach: 0.4, handScale: 1.04 }),
-  melee: Object.freeze({ x: 0.22, y: -0.25, reach: 0.38, handScale: 0.96 }),
-  utility: Object.freeze({ x: 0.21, y: -0.23, reach: 0.34, handScale: 0.98 }),
-  shield: Object.freeze({ x: 0.34, y: -0.32, reach: 0.4, handScale: 1.02 }),
+  light: Object.freeze({ x: 0.22, y: -0.21, reach: 0.38, baseZ: -0.44, handScale: 0.96 }),
+  heavy: Object.freeze({ x: 0.24, y: -0.25, reach: 0.38, baseZ: -0.44, handScale: 1.0 }),
+  melee: Object.freeze({ x: 0.22, y: -0.22, reach: 0.34, baseZ: -0.44, handScale: 0.94 }),
+  utility: Object.freeze({ x: 0.21, y: -0.22, reach: 0.38, baseZ: -0.44, handScale: 0.96 }),
+  shield: Object.freeze({ x: 0.34, y: -0.32, reach: 0.36, baseZ: -0.43, handScale: 1.0 }),
 });
 
 const WEAPON_CLASS = Object.freeze({
@@ -42,73 +43,117 @@ const WEAPON_CLASS = Object.freeze({
 
 /**
  * Weapon-specific grip & mount pose authored against the measured Z-slices of
- * every oriented GLB/GLTF (`-Z` forward, `+Z` toward camera):
- *  - Military knife.glb: blade [-0.23..0.00], guard [0.00..+0.058], handle [+0.058..+0.230]
- *  - rocket_launcher_low.gltf: front vertical grip z=-0.055 y=-0.115, rear trigger grip z=+0.115 y=-0.115
- *  - LowPolyShieldPack.glb (RectangularShield1): front boss z=-0.036, rear inner grip z=+0.032
- *  - Firearms: rear pistol grip z=+0.10..+0.15, forend z=-0.16..-0.24
+ * every oriented GLB/GLTF (`-Z` forward muzzle/blade, `+Z` toward camera):
+ *  - SMG (`smg.glb` 0.50m): rear pistol grip [y=-0.055, z=+0.150], barrel handguard [y=+0.072, z=-0.150]
+ *  - SHOTGUN (`shotgun.glb` 0.72m): rear stock wrist [y=-0.008, z=+0.185], pump forend [y=-0.002, z=-0.175]
+ *  - SNIPER (`sniper.glb` 0.94m): rear grip [y=-0.035, z=+0.180], forend [y=+0.012, z=-0.210]
+ *  - PISTOL / SMOKE (`pistol.glb` 0.38m): two-handed Weaver grip on rear handle [y=-0.068, z=+0.112]
+ *  - LMG / RAILGUN / MINIGUN (`lmg.glb` 0.78m): rear grip [y=-0.085, z=+0.145], forend [y=+0.048, z=-0.195]
+ *  - ROCKET (`rocket_launcher_low.gltf` 0.72m, rotated 180° so warhead faces -Z):
+ *      rear trigger grip [y=-0.120, z=+0.068], front vertical grip [y=-0.120, z=-0.115]
+ *  - KNIFE (`Military knife.glb` 0.34m): single dominant right-hand grip on handle [y=+0.002, z=+0.095]
+ *  - COMBAT_SHIELD (`LowPolyShieldPack.glb` 0.58m): dual rear-strap brace [z=+0.058] behind front plate
  */
 function computeWeaponPose(weaponId, length) {
   switch (weaponId) {
     case 'KNIFE':
       return {
-        mountRotation: [0.36, 0.14, -0.22],
-        rightPos: [0.004, -0.012, Math.min(0.14, length * 0.24)],
-        rightRot: [-0.28, 0.04, 0.08],
-        leftPos: [-0.115, -0.095, 0.015],
-        leftRot: [0.22, -0.24, -0.18],
-        leftVisible: true,
+        mountRotation: [0.34, 0.22, -0.24],
+        rightPos: [0.006, 0.002, Math.min(0.105, length * 0.28)],
+        rightRot: [-0.22, 0.04, 0.06],
+        // Kept in valid camera-space bounds while hidden so one-handed combat
+        // knife never renders a disembodied floating off-hand.
+        leftPos: [-0.075, -0.095, 0.035],
+        leftRot: [0.18, -0.16, -0.14],
+        leftVisible: false,
       };
     case 'GOD_FIST':
       return {
-        mountRotation: [0.28, 0.12, -0.14],
-        rightPos: [0.01, -0.015, Math.min(0.13, length * 0.22)],
-        rightRot: [-0.2, 0.05, 0.06],
-        leftPos: [-0.12, -0.06, -0.02],
-        leftRot: [0.25, -0.18, -0.16],
+        mountRotation: [0.14, 0.08, -0.08],
+        rightPos: [0.006, -0.018, 0.142],
+        rightRot: [0.08, 0, 0.04],
+        leftPos: [-0.008, 0.018, -0.115],
+        leftRot: [0.22, -0.08, -0.18],
         leftVisible: true,
       };
     case 'PISTOL':
     case 'SMOKE_GRENADE':
       return {
         mountRotation: [0, 0, 0],
-        // Two-handed Weaver/isosceles grip directly on the rear pistol handle.
-        rightPos: [0.006, -0.072, Math.min(0.105, length * 0.18)],
-        rightRot: [0.1, 0, 0.04],
-        leftPos: [-0.012, -0.082, Math.min(0.088, length * 0.15)],
-        leftRot: [0.14, -0.08, -0.08],
+        // Two-handed Weaver/isosceles grip directly cupping the pistol handle.
+        rightPos: [0.006, -0.066, Math.min(0.112, length * 0.29)],
+        rightRot: [0.08, 0, 0.04],
+        leftPos: [-0.012, -0.076, Math.min(0.096, length * 0.25)],
+        leftRot: [0.12, -0.08, -0.08],
+        leftVisible: true,
+      };
+    case 'SHOTGUN':
+      return {
+        mountRotation: [0, 0, 0],
+        rightPos: [0.006, -0.010, 0.182],
+        rightRot: [0.14, 0, 0.04],
+        leftPos: [-0.008, -0.004, -0.175],
+        leftRot: [0.22, -0.08, -0.22],
+        leftVisible: true,
+      };
+    case 'SMG':
+      return {
+        mountRotation: [0, 0, 0],
+        rightPos: [0.006, -0.052, 0.148],
+        rightRot: [0.10, 0, 0.04],
+        leftPos: [-0.008, 0.068, -0.148],
+        leftRot: [0.20, -0.08, -0.20],
+        leftVisible: true,
+      };
+    case 'SNIPER':
+      return {
+        mountRotation: [0, 0, 0],
+        rightPos: [0.004, -0.036, 0.178],
+        rightRot: [0.12, 0, 0.04],
+        leftPos: [-0.010, 0.010, -0.205],
+        leftRot: [0.22, -0.08, -0.20],
+        leftVisible: true,
+      };
+    case 'LMG':
+    case 'RAILGUN':
+    case 'MINIGUN':
+      return {
+        mountRotation: [0, 0, 0],
+        rightPos: [0.006, -0.084, 0.145],
+        rightRot: [0.10, 0, 0.04],
+        leftPos: [-0.008, 0.046, -0.192],
+        leftRot: [0.22, -0.08, -0.20],
         leftVisible: true,
       };
     case 'ROCKET':
       return {
-        mountRotation: [0, 0, 0],
-        // Matches both actual under-slung grips on rocket_launcher_low.gltf.
-        rightPos: [0.006, -0.115, 0.115],
-        rightRot: [0.12, 0, 0.05],
-        leftPos: [-0.008, -0.115, -0.055],
-        leftRot: [0.16, -0.06, -0.08],
+        // Shoulder-mounted inward yaw angles the PG-7V warhead toward center
+        // screen while tucking the rear exhaust bell over the right shoulder.
+        mountRotation: [0.02, 0.28, -0.02],
+        baseOffset: [0.04, 0, -0.02],
+        rightPos: [0.006, -0.118, 0.068],
+        rightRot: [0.10, 0, 0.04],
+        leftPos: [-0.008, -0.118, -0.115],
+        leftRot: [0.14, -0.06, -0.08],
         leftVisible: true,
       };
     case 'COMBAT_SHIELD':
       return {
         mountRotation: [0.04, 0.16, -0.04],
-        // Both hands brace the rear inner handle/straps (+Z side > +0.036) so
-        // zero glove geometry ever pokes through the -Z front face.
-        rightPos: [0.024, -0.025, 0.072],
+        // Both hands brace the rear inner straps (+Z > +0.035) behind the shield face.
+        rightPos: [0.046, -0.022, 0.058],
         rightRot: [0.08, 0, 0.06],
-        leftPos: [-0.078, -0.045, 0.072],
-        leftRot: [0.1, -0.06, -0.08],
+        leftPos: [-0.068, -0.028, 0.058],
+        leftRot: [0.10, -0.06, -0.08],
         leftVisible: true,
       };
     default: {
-      // Rifles / SMG / Shotgun / Sniper / LMG / Railgun / Minigun:
-      // Right hand wraps around rear pistol grip; left hand cradles handguard.
-      const forendZ = -Math.min(0.22, Math.max(0.13, length * 0.24));
+      const forendZ = -Math.min(0.20, Math.max(0.12, length * 0.24));
       return {
         mountRotation: [0, 0, 0],
-        rightPos: [0.006, -0.068, 0.105],
-        rightRot: [0.1, 0, 0.04],
-        leftPos: [-0.008, -0.058, forendZ],
+        rightPos: [0.006, -0.052, 0.125],
+        rightRot: [0.10, 0, 0.04],
+        leftPos: [-0.008, 0.010, forendZ],
         leftRot: [0.22, -0.08, -0.18],
         leftVisible: true,
       };
@@ -116,10 +161,39 @@ function computeWeaponPose(weaponId, length) {
   }
 }
 
+function hasAllZeroVertexColors(geometry) {
+  const colorAttr = geometry?.attributes?.color;
+  if (!colorAttr || colorAttr.count === 0) return false;
+  const sampleStep = Math.max(1, Math.floor(colorAttr.count / 64));
+  for (let i = 0; i < colorAttr.count; i += sampleStep) {
+    if (colorAttr.getX(i) > 0.02 || colorAttr.getY(i) > 0.02 || colorAttr.getZ(i) > 0.02) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function normalizeWeaponMaterial(source, file, strippedZeroVertexColors) {
+  if (!source) return source;
+  const mat = source.clone();
+  if (strippedZeroVertexColors) {
+    mat.vertexColors = false;
+  }
+  // Several low-poly OB* firearms export metalness=1, roughness=1 with dark
+  // albedo and no scene HDRI envMap, which collapses lit diffuse shading to black.
+  if (typeof mat.metalness === 'number' && mat.metalness > 0.46) {
+    mat.metalness = 0.44;
+  }
+  if (typeof mat.roughness === 'number') {
+    mat.roughness = Math.min(0.58, Math.max(0.36, mat.roughness));
+  }
+  return mat;
+}
+
 /**
  * Rotate a loaded GLB so its barrel points down -Z and normalise its length to
- * the measured real-world size. Clones share geometry, so every weapon rig in
- * the game is cheap after the first load.
+ * the measured real-world size. Clones share normalized geometry, so every
+ * weapon rig in the game is cheap after the first load.
  */
 export function orientModel(scene, file) {
   const selected = file === 'LowPolyShieldPack.glb'
@@ -133,7 +207,10 @@ export function orientModel(scene, file) {
     oriented.rotation.y = Math.PI / 2;
   } else if (file === 'Military knife.glb') {
     oriented.rotation.x = -Math.PI / 2;
-  } else if (file !== 'rocket_launcher_low.gltf') {
+  } else if (file === 'rocket_launcher_low.gltf') {
+    // Orient PG-7V warhead forward (-Z) and flared exhaust cone rearward (+Z).
+    oriented.rotation.y = Math.PI;
+  } else {
     const rotation = new THREE.Matrix4().makeBasis(
       new THREE.Vector3(0, 0, -1),
       new THREE.Vector3(-1, 0, 0),
@@ -158,12 +235,30 @@ export function orientModel(scene, file) {
   fitted.add(centered);
   fitted.userData.baseScale = fitted.scale.clone();
   fitted.userData.normalizedLength = 1;
+  const normalizedMaterialCache = new Map();
   fitted.traverse((meshPart) => {
-    if (meshPart.isMesh) {
-      meshPart.castShadow = false;
-      meshPart.receiveShadow = false;
-      meshPart.frustumCulled = false;
+    if (!meshPart.isMesh) return;
+    meshPart.castShadow = false;
+    meshPart.receiveShadow = false;
+    meshPart.frustumCulled = false;
+
+    let strippedZeroColors = false;
+    if (hasAllZeroVertexColors(meshPart.geometry)) {
+      meshPart.geometry = meshPart.geometry.clone();
+      meshPart.geometry.deleteAttribute('color');
+      strippedZeroColors = true;
     }
+    const mapMat = (mat) => {
+      if (!mat) return mat;
+      const key = `${mat.uuid}:${strippedZeroColors ? 1 : 0}`;
+      if (!normalizedMaterialCache.has(key)) {
+        normalizedMaterialCache.set(key, normalizeWeaponMaterial(mat, file, strippedZeroColors));
+      }
+      return normalizedMaterialCache.get(key);
+    };
+    meshPart.material = Array.isArray(meshPart.material)
+      ? meshPart.material.map(mapMat)
+      : mapMat(meshPart.material);
   });
   return fitted;
 }
@@ -285,10 +380,26 @@ function disposeModels(models) {
   for (const texture of textures) texture.dispose();
 }
 
+const UP_AXIS = new THREE.Vector3(0, 1, 0);
+
 function part(geometry, material, parent, position, rotation = [0, 0, 0], scale = [1, 1, 1]) {
   const mesh = new THREE.Mesh(geometry, material);
   mesh.position.set(...position);
   mesh.rotation.set(...rotation);
+  mesh.scale.set(...scale);
+  mesh.frustumCulled = false;
+  parent.add(mesh);
+  return mesh;
+}
+
+function connectedSegment(geometry, material, parent, fromPoint, toPoint, scale = [1, 1, 1]) {
+  const start = new THREE.Vector3(...fromPoint);
+  const end = new THREE.Vector3(...toPoint);
+  const delta = end.clone().sub(start);
+  const dir = delta.lengthSq() > 1e-8 ? delta.clone().normalize() : UP_AXIS;
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.position.copy(start).addScaledVector(delta, 0.5);
+  mesh.quaternion.setFromUnitVectors(UP_AXIS, dir);
   mesh.scale.set(...scale);
   mesh.frustumCulled = false;
   parent.add(mesh);
@@ -365,26 +476,31 @@ export class WeaponEffects {
    * every mesh strictly forward of the camera near plane (`max.z < -0.30 m`).
    */
   buildHands() {
+    // Grounded tactical operator sleeve & glove materials (subtle low-intensity
+    // fill emissive avoids pitch-black undersides without neon glowing hands).
     const sleeve = new THREE.MeshStandardMaterial({
-      color: '#344b63', roughness: 0.78, metalness: 0.14, emissive: '#0e1f2c', emissiveIntensity: 0.75,
+      color: '#1e2630', roughness: 0.80, metalness: 0.06, emissive: '#080e14', emissiveIntensity: 0.14,
     });
     const glove = new THREE.MeshStandardMaterial({
-      color: '#212d3b', roughness: 0.58, metalness: 0.28, emissive: '#0a202c', emissiveIntensity: 0.8,
+      color: '#161c24', roughness: 0.64, metalness: 0.14, emissive: '#060a10', emissiveIntensity: 0.14,
     });
     const seam = new THREE.MeshStandardMaterial({
-      color: '#46748d', roughness: 0.38, metalness: 0.52, emissive: '#103443', emissiveIntensity: 0.9,
+      color: '#2d3d4e', roughness: 0.52, metalness: 0.26, emissive: '#0a131c', emissiveIntensity: 0.16,
     });
     const accent = new THREE.MeshStandardMaterial({
-      color: '#2d728e', roughness: 0.32, metalness: 0.58, emissive: '#1f8fb0', emissiveIntensity: 1.15,
+      color: '#39586e', roughness: 0.44, metalness: 0.34, emissive: '#10222e', emissiveIntensity: 0.20,
     });
     this.materials.push(sleeve, glove, seam, accent);
 
-    const armGeometry = new THREE.CapsuleGeometry(0.038, 0.15, 4, 10);
-    const cuffGeometry = new THREE.CylinderGeometry(0.044, 0.040, 0.052, 10);
-    const palmGeometry = new THREE.BoxGeometry(0.036, 0.064, 0.068);
-    const fingerGeometry = new THREE.CapsuleGeometry(0.010, 0.036, 3, 6);
-    const thumbGeometry = new THREE.CapsuleGeometry(0.011, 0.034, 3, 6);
-    const knuckleGeometry = new THREE.BoxGeometry(0.014, 0.052, 0.048);
+    // Unit-height tapered sleeve cylinder stretched dynamically each frame from
+    // the wrist cuff to a camera-lower-edge shoulder/ribcage anchor so forearms
+    // never float or terminate mid-screen during hip-fire, ADS, or reloads.
+    const armGeometry = new THREE.CylinderGeometry(0.023, 0.029, 1.0, 10, 1);
+    const cuffGeometry = new THREE.CylinderGeometry(0.027, 0.025, 0.032, 10);
+    const palmGeometry = new THREE.BoxGeometry(0.024, 0.050, 0.054);
+    const fingerGeometry = new THREE.CapsuleGeometry(0.0068, 0.024, 3, 6);
+    const thumbGeometry = new THREE.CapsuleGeometry(0.0074, 0.024, 3, 6);
+    const knuckleGeometry = new THREE.BoxGeometry(0.008, 0.042, 0.040);
     this.geometries.push(
       armGeometry,
       cuffGeometry,
@@ -397,39 +513,39 @@ export class WeaponEffects {
     this.rightHandGroup = new THREE.Group();
     this.leftHandGroup = new THREE.Group();
     this.handRig.add(this.rightHandGroup, this.leftHandGroup);
+    this._wristTmp = new THREE.Vector3();
+    this._elbowCamTmp = new THREE.Vector3();
+    this._elbowWorldTmp = new THREE.Vector3();
+    this._armDirTmp = new THREE.Vector3();
 
-    // Dominant right hand: palm hugs +X of grip, fingers wrap across front/left,
-    // cuff & forearm run seamlessly back-down-right with zero gaps.
-    this.rightPalm = part(palmGeometry, glove, this.rightHandGroup, [0.022, -0.004, 0.004], [0.08, 0.04, 0.08]);
-    this.rightCuff = part(cuffGeometry, seam, this.rightHandGroup, [0.036, -0.028, 0.038], [1.12, 0.0, -0.32]);
-    this.rightArm = part(armGeometry, sleeve, this.rightHandGroup, [0.068, -0.070, 0.082], [1.14, 0.0, -0.34]);
-    this.rightThumb = part(thumbGeometry, glove, this.rightHandGroup, [-0.004, 0.024, -0.012], [0.35, 0.35, 1.15]);
+    this.rightPalm = part(palmGeometry, glove, this.rightHandGroup, [0.020, -0.003, 0.004], [0.10, 0.04, 0.06]);
+    this.rightCuff = part(cuffGeometry, seam, this.rightHandGroup, [0.026, -0.018, 0.030]);
+    this.rightArm = part(armGeometry, sleeve, this.rightHandGroup, [0.046, -0.052, 0.078], [0, 0, 0], [1, 0.14, 1]);
+    this.rightThumb = part(thumbGeometry, glove, this.rightHandGroup, [0.004, 0.020, -0.010], [0.35, 0.30, 1.08]);
 
-    // Support left hand: palm cradles -X / underside of forend or grip,
-    // fingers curl around underside/right, cuff & forearm run back-down-left.
-    this.leftPalm = part(palmGeometry, glove, this.leftHandGroup, [-0.022, -0.006, 0.004], [0.08, -0.04, -0.08]);
-    this.leftCuff = part(cuffGeometry, seam, this.leftHandGroup, [-0.036, -0.030, 0.038], [1.12, 0.0, 0.32]);
-    this.leftArm = part(armGeometry, sleeve, this.leftHandGroup, [-0.068, -0.074, 0.082], [1.14, 0.0, 0.34]);
-    this.leftThumb = part(thumbGeometry, glove, this.leftHandGroup, [0.004, 0.022, -0.012], [0.35, -0.35, -1.15]);
+    this.leftPalm = part(palmGeometry, glove, this.leftHandGroup, [-0.020, -0.005, 0.004], [0.10, -0.04, -0.06]);
+    this.leftCuff = part(cuffGeometry, seam, this.leftHandGroup, [-0.026, -0.020, 0.030]);
+    this.leftArm = part(armGeometry, sleeve, this.leftHandGroup, [-0.046, -0.054, 0.078], [0, 0, 0], [1, 0.14, 1]);
+    this.leftThumb = part(thumbGeometry, glove, this.leftHandGroup, [-0.004, 0.018, -0.010], [0.35, -0.30, -1.08]);
 
     this.fingers = [];
     this.rightFingers = [];
     this.leftFingers = [];
     for (let i = 0; i < 4; i += 1) {
-      const spread = (i - 1.5) * 0.015;
+      const spread = (i - 1.5) * 0.0115;
       const rf = part(
         fingerGeometry,
         glove,
         this.rightHandGroup,
-        [-0.002, spread, -0.018],
-        [0.08, 0.0, Math.PI / 2 - 0.12],
+        [-0.009, spread - 0.002, -0.016],
+        [0.08, 0.16, Math.PI / 2 - 0.18],
       );
       const lf = part(
         fingerGeometry,
         glove,
         this.leftHandGroup,
-        [0.002, spread - 0.002, -0.018],
-        [0.08, 0.0, -Math.PI / 2 + 0.12],
+        [0.009, spread - 0.004, -0.016],
+        [0.08, -0.16, -Math.PI / 2 + 0.18],
       );
       this.rightFingers.push(rf);
       this.leftFingers.push(lf);
@@ -437,8 +553,8 @@ export class WeaponEffects {
     }
 
     this.knuckles = [
-      part(knuckleGeometry, accent, this.rightHandGroup, [0.041, -0.002, 0.002], [0.08, 0.04, 0.08]),
-      part(knuckleGeometry, accent, this.leftHandGroup, [-0.041, -0.004, 0.002], [0.08, -0.04, -0.08]),
+      part(knuckleGeometry, accent, this.rightHandGroup, [0.033, -0.002, 0.003], [0.10, 0.04, 0.06]),
+      part(knuckleGeometry, accent, this.leftHandGroup, [-0.033, -0.004, 0.003], [0.10, -0.04, -0.06]),
     ];
   }
 
@@ -470,25 +586,68 @@ export class WeaponEffects {
     this.viewModelLight = new THREE.Group();
     this.viewModelLight.position.set(0.18, 0.24, -0.12);
 
-    const key = new THREE.PointLight('#e4f5ff', 3.6, 2.8, 2);
+    const key = new THREE.PointLight('#eef6ff', 1.45, 2.8, 2);
     key.position.set(0.12, 0.2, 0.34);
-    const rim = new THREE.PointLight('#56daff', 1.75, 2.4, 2);
+    const rim = new THREE.PointLight('#6ccfff', 0.85, 2.4, 2);
     rim.position.set(-0.34, -0.08, -0.58);
     this.viewModelLight.add(key, rim);
     this.camera.add(this.viewModelLight);
     this.lights = [key, rim];
   }
 
+  syncForearmLimb(handGroup, cuffMesh, armMesh, wristX, wristY, wristZ, cameraAnchorX, cameraAnchorY, cameraAnchorZ) {
+    this._wristTmp.set(wristX, wristY, wristZ);
+    this._elbowCamTmp.set(cameraAnchorX, cameraAnchorY, cameraAnchorZ);
+    this._elbowWorldTmp.copy(this._elbowCamTmp).applyMatrix4(this.camera.matrixWorld);
+    handGroup.worldToLocal(this._elbowWorldTmp);
+
+    this._armDirTmp.subVectors(this._elbowWorldTmp, this._wristTmp);
+    const rawLen = this._armDirTmp.length();
+    const len = Math.min(0.62, Math.max(0.12, rawLen));
+    if (rawLen > 1e-5) this._armDirTmp.divideScalar(rawLen);
+    else this._armDirTmp.set(0, -1, 0);
+
+    cuffMesh.position.copy(this._wristTmp).addScaledVector(this._armDirTmp, 0.014);
+    cuffMesh.quaternion.setFromUnitVectors(UP_AXIS, this._armDirTmp);
+
+    armMesh.position.copy(this._wristTmp).addScaledVector(this._armDirTmp, len * 0.5 + 0.012);
+    armMesh.quaternion.copy(cuffMesh.quaternion);
+    armMesh.scale.set(1, len, 1);
+  }
+
+  syncForearmAnchors() {
+    if (!this.rightHandGroup || !this.leftHandGroup) return;
+    this.camera.updateMatrixWorld(true);
+    this.viewModel.updateMatrixWorld(true);
+    // Camera-local shoulder/ribcage anchors sit below the bottom viewport edge
+    // while staying strictly forward of -0.35m so no limb ever clips the near plane.
+    this.syncForearmLimb(
+      this.rightHandGroup,
+      this.rightCuff,
+      this.rightArm,
+      0.020, -0.008, 0.018,
+      0.36, -0.48, -0.39,
+    );
+    this.syncForearmLimb(
+      this.leftHandGroup,
+      this.leftCuff,
+      this.leftArm,
+      -0.020, -0.010, 0.018,
+      -0.24, -0.48, -0.42,
+    );
+  }
+
   layoutForWeapon(weaponId) {
     const length = this.modelLibrary.getLength(weaponId);
     const weaponClass = WEAPON_CLASS[weaponId] ?? 'light';
     const profile = WEAPON_PROFILES[weaponClass] ?? WEAPON_PROFILES.light;
-    this.basePosition = {
-      x: profile.x,
-      y: profile.y,
-      z: -0.42 - length * profile.reach,
-    };
     this.currentPose = computeWeaponPose(weaponId, length);
+    const [ox = 0, oy = 0, oz = 0] = this.currentPose.baseOffset ?? [0, 0, 0];
+    this.basePosition = {
+      x: profile.x + ox,
+      y: profile.y + oy,
+      z: (profile.baseZ ?? -0.44) - length * profile.reach + oz,
+    };
     this.handRig.position.set(0, 0, 0);
     this.handRig.scale.setScalar(profile.handScale);
 
@@ -500,6 +659,10 @@ export class WeaponEffects {
 
     const [mx, my, mz] = this.currentPose.mountRotation;
     this.weaponMount.rotation.set(mx, my, mz);
+    if (this.basePosition) {
+      this.viewModel.position.set(this.basePosition.x, this.basePosition.y, this.basePosition.z);
+    }
+    this.syncForearmAnchors();
 
     this.updateMuzzlePosition();
   }
@@ -512,6 +675,7 @@ export class WeaponEffects {
     this.blockingAmount = 0;
     this.opticalScopeHidden = false;
     this.weaponMount.visible = true;
+    this.setVisible(true);
     if (this.switchTransition) {
       const { from, to } = this.switchTransition;
       from?.removeFromParent();
@@ -530,10 +694,14 @@ export class WeaponEffects {
     }
     if (this.currentPose) {
       this.rightHandGroup.position.set(...this.currentPose.rightPos);
+      this.rightHandGroup.rotation.set(...this.currentPose.rightRot);
       this.leftHandGroup.position.set(...this.currentPose.leftPos);
+      this.leftHandGroup.rotation.set(...this.currentPose.leftRot);
+      this.leftHandGroup.visible = this.currentPose.leftVisible !== false;
       const [mx, my, mz] = this.currentPose.mountRotation;
       this.weaponMount.rotation.set(mx, my, mz);
     }
+    this.syncForearmAnchors();
   }
 
   setVisible(visible) {
@@ -877,13 +1045,14 @@ export class WeaponEffects {
     // and animate the cohesive support hand toward the magwell during reloads.
     if (this.currentPose) {
       const [mx, my, mz] = this.currentPose.mountRotation;
+      const [amx = 0, amy = 0, amz = 0] = this.currentPose.mountAimRotation ?? [0, 0, 0];
       const hipFactor = 1 - amount;
       const guardPitch = -this.blockingAmount * 0.04;
       const guardYaw = -this.blockingAmount * 0.14;
       this.weaponMount.rotation.set(
-        mx * hipFactor + guardPitch,
-        my * hipFactor + guardYaw,
-        mz * hipFactor,
+        mx * hipFactor + amx * amount + guardPitch,
+        my * hipFactor + amy * amount + guardYaw,
+        mz * hipFactor + amz * amount,
       );
       const [lx, ly, lz] = this.currentPose.leftPos;
       this.leftHandGroup.position.set(
@@ -892,6 +1061,7 @@ export class WeaponEffects {
         lz + reloadWave * 0.095,
       );
     }
+    this.syncForearmAnchors();
 
     if (this.switchTransition) {
       const { from, to, startedAt } = this.switchTransition;

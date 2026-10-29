@@ -232,7 +232,9 @@ function syncInputState() {
   const locked = document.pointerLockElement === canvas;
   const playable = canPlay() && !weaponWheelOpen && !ui.scoreboardOpen && latestPlayerAlive && windowFocused && !document.hidden;
   const wasEnabled = controller.enabled;
-  controller.setEnabled(locked && playable);
+  controller.setEnabled(locked && playable, {
+    preserveKeys: canPlay() && !weaponWheelOpen,
+  });
   if (controller.enabled) {
     inputPump.start();
     // Flush held movement immediately on capture/respawn so keys pressed prior
@@ -246,7 +248,7 @@ function syncInputState() {
     releaseRightAction();
   }
   if (wasEnabled && !controller.enabled) sendNeutralInput();
-  if (canPlay()) ui.setPaused(!locked && latestPlayerAlive && !matchEnded);
+  if (canPlay()) ui.setPaused(!locked && (latestPlayerAlive || latestLocalPlayer === null) && !matchEnded);
 }
 
 function clearMatchPresentation() {
@@ -315,8 +317,8 @@ function enterMatch(room = currentRoom) {
     releaseRightAction();
     aim.reset(true);
   }
-  syncArena(room.mapId ?? DEFAULT_MAP_ID);
-  world.resetCover();
+  const mapChanged = syncArena(room.mapId ?? DEFAULT_MAP_ID);
+  if (!wasActive || mapChanged) world.resetCover();
   if (menuStage) menuStage.hide();
   ui.showMatch(room);
   ui.setLobbyVisible(false);
@@ -464,9 +466,15 @@ const network = new GameNetwork(
         if (document.pointerLockElement === canvas) document.exitPointerLock();
       }
     },
-    onRoomError: (error) => ui.showError(error?.message),
+    onRoomError: (error) => {
+      if (!matchActive && document.pointerLockElement === canvas) {
+        document.exitPointerLock?.();
+      }
+      ui.showError(error?.message);
+    },
     onGameStart: (payload = {}) => {
       if (currentRoom && payload.mapId) currentRoom.mapId = payload.mapId;
+      if (currentRoom && payload.botDifficulty) currentRoom.botDifficulty = payload.botDifficulty;
       enterMatch(currentRoom);
     },
     onGameState: (state) => {
@@ -474,6 +482,10 @@ const network = new GameNetwork(
       if (Number.isSafeInteger(state.tick)) {
         if (state.tick <= lastSnapshotTick) return;
         lastSnapshotTick = state.tick;
+      }
+      if (state.botDifficulty && currentRoom && currentRoom.botDifficulty !== state.botDifficulty) {
+        currentRoom.botDifficulty = state.botDifficulty;
+        ui.syncBotDifficultyUI(state.botDifficulty);
       }
       const receivedAt = performance.now();
       latestPlayers = state.players ?? [];
@@ -496,7 +508,7 @@ const network = new GameNetwork(
       if (aliveNow !== latestPlayerAlive) {
         latestPlayerAlive = aliveNow;
         if (!aliveNow) {
-          controller.reset();
+          controller.resetTransientState();
           trigger.release();
           releaseRightAction();
           closeWeaponWheel(false);
@@ -549,7 +561,7 @@ const network = new GameNetwork(
           latestPlayers.filter((player) => player.alive && player.connected !== false).length,
         );
       }
-      controller.reset();
+      controller.resetTransientState();
       trigger.release();
       releaseRightAction();
       closeWeaponWheel(false);
@@ -569,7 +581,7 @@ const network = new GameNetwork(
       aim.reset(true);
       nextClientShotByWeapon.clear();
       predictedShots.clear();
-      controller.reset();
+      controller.resetTransientState();
       syncInputState();
       weaponEffects.resetPresentation();
       weaponEffects.setVisible(true);
@@ -766,14 +778,22 @@ ui.setHandlers({
     }
   },
   onRefreshWallet: () => refreshWallet(),
-  onPlayNow: (name, bundleId, id, mapId) => {
+  onBotDifficultyChange: (botDifficulty) => {
+    if (network.connected && currentRoom?.mode === 'SOLO_VS_BOTS') {
+      network.setBotDifficulty(botDifficulty);
+    }
+  },
+  onPlayNow: (name, bundleId, id, mapId, botDifficulty) => {
     if (!network.connected) {
       ui.clearAction();
       ui.showError('Still connecting to the game server. Try again in a moment.');
       return;
     }
     unlockAudio();
-    network.playNow(name, bundleId, id, mapId);
+    if (document.pointerLockElement !== canvas) {
+      canvas.requestPointerLock?.()?.catch?.(() => {});
+    }
+    network.playNow(name, bundleId, id, mapId, botDifficulty ?? ui.botDifficulty);
   },
   onCreate: (name, bundleId, id, mapId) => {
     if (!network.connected) {
@@ -804,14 +824,24 @@ ui.setHandlers({
   },
   onLeaveRoom: () => network.leaveRoom(),
   onReady: (ready) => network.setReady(ready),
-  onStart: () => network.startGame(),
+  onStart: () => {
+    unlockAudio();
+    if (document.pointerLockElement !== canvas) {
+      canvas.requestPointerLock?.()?.catch?.(() => {});
+    }
+    network.startGame();
+  },
   onReturnToLobby: () => network.returnToLobby(),
   onPlayAgain: () => {
     if (!network.connected) {
       ui.showError('Still reconnecting to the game server. Try again in a moment.');
       return;
     }
-    network.playAgain();
+    unlockAudio();
+    if (document.pointerLockElement !== canvas) {
+      canvas.requestPointerLock?.()?.catch?.(() => {});
+    }
+    network.playAgain(ui.botDifficulty);
   },
   onResume: () => {
     unlockAudio();
@@ -974,13 +1004,16 @@ document.addEventListener('wheel', (event) => {
  * numbers and never clears `jumpTapLatched` before a packet is sent.
  */
 function sampleLocalInput() {
-  const forward = latestPlayerAlive
-    ? Number(controller.keys.has('KeyW')) - Number(controller.keys.has('KeyS'))
+  const active = latestPlayerAlive && controller.enabled && document.pointerLockElement === canvas;
+  const forward = active
+    ? Number(controller.keys.has('KeyW') || controller.keys.has('ArrowUp'))
+      - Number(controller.keys.has('KeyS') || controller.keys.has('ArrowDown'))
     : 0;
-  const strafe = latestPlayerAlive
-    ? Number(controller.keys.has('KeyD')) - Number(controller.keys.has('KeyA'))
+  const strafe = active
+    ? Number(controller.keys.has('KeyD') || controller.keys.has('ArrowRight'))
+      - Number(controller.keys.has('KeyA') || controller.keys.has('ArrowLeft'))
     : 0;
-  const jump = latestPlayerAlive
+  const jump = active
     ? (controller.keys.has('Space') || controller.jumpTapLatched)
     : false;
   return {
@@ -990,7 +1023,7 @@ function sampleLocalInput() {
     jump,
     yaw: controller.yaw,
     pitch: controller.pitch,
-    blocking: Boolean(rightMouseHeld && controller.enabled && latestLocalPlayer?.currentWeaponId === 'COMBAT_SHIELD'),
+    blocking: Boolean(rightMouseHeld && active && latestLocalPlayer?.currentWeaponId === 'COMBAT_SHIELD'),
   };
 }
 

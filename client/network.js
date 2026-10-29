@@ -384,13 +384,24 @@ export class GameNetwork {
     this.socket.emit(EVENTS.JOIN_ROOM, { code, name, bundleId, profileId });
   }
 
-  playNow(name, bundleId, profileId, mapId = null) {
-    this.socket.emit(EVENTS.PLAY_NOW, { name, bundleId, profileId, mapId });
+  playNow(name, bundleId, profileId, mapId = null, botDifficulty = null) {
+    this.socket.emit(EVENTS.PLAY_NOW, {
+      name,
+      bundleId,
+      profileId,
+      mapId,
+      ...(botDifficulty ? { botDifficulty } : {}),
+    });
   }
 
   /** Host-only, lobby-only arena change. The server re-validates and rebroadcasts. */
   setRoomMap(mapId) {
     this.socket.emit(EVENTS.SET_ROOM_MAP, { mapId });
+  }
+
+  /** Host-only solo bot difficulty preset update. */
+  setBotDifficulty(botDifficulty) {
+    this.socket.emit(EVENTS.SET_BOT_DIFFICULTY, { botDifficulty });
   }
 
   setReady(ready) {
@@ -474,8 +485,8 @@ export class GameNetwork {
     this.socket.emit(EVENTS.RETURN_TO_LOBBY);
   }
 
-  playAgain() {
-    this.socket.emit(EVENTS.PLAY_AGAIN);
+  playAgain(botDifficulty = null) {
+    this.socket.emit(EVENTS.PLAY_AGAIN, botDifficulty ? { botDifficulty } : {});
   }
 
   disconnect() {

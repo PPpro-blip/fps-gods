@@ -29,6 +29,8 @@ export const EVENTS = Object.freeze({
   // Host-only arena change while the room is still in its lobby. Additive: a
   // client that never sends it keeps playing whatever the room created with.
   SET_ROOM_MAP: 'SET_ROOM_MAP',
+  // Host-only bot difficulty preset change for solo-vs-bots matches.
+  SET_BOT_DIFFICULTY: 'SET_BOT_DIFFICULTY',
 
   // Lobby and weapon actions are explicit, shared socket contracts.
   PLAYER_READY: 'PLAYER_READY',
