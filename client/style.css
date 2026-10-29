@@ -2190,3 +2190,79 @@ kbd {
   padding: 2px 8px;
   border-radius: 3px;
 }
+
+/* ============================================================================
+   Bot Difficulty Selector (Play, Pause Overlay & HUD)
+   ========================================================================== */
+
+.bot-difficulty-picker {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.difficulty-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.difficulty-pill {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: linear-gradient(180deg, rgba(19, 27, 36, 0.9), rgba(10, 15, 21, 0.9));
+  color: var(--text-soft);
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  cursor: pointer;
+  transition: border-color 150ms var(--ease), background 150ms var(--ease), color 150ms var(--ease);
+}
+
+.difficulty-pill:hover:not(:disabled) {
+  border-color: var(--line-strong);
+  color: var(--text);
+}
+
+.difficulty-pill.is-selected {
+  border-color: var(--accent-deep);
+  box-shadow: inset 0 0 0 1px rgba(47, 224, 255, 0.2);
+  background: linear-gradient(180deg, rgba(24, 44, 56, 0.96), rgba(10, 18, 24, 0.96));
+  color: var(--accent);
+}
+
+.difficulty-pill small {
+  font-family: var(--font);
+  font-size: 9.5px;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.difficulty-grid.is-compact .difficulty-pill {
+  padding: 7px 8px;
+}
+
+.pause-difficulty {
+  width: 100%;
+  margin: 6px 0 14px;
+  text-align: left;
+}
+
+.hud-bot-badge {
+  padding: 2px 7px;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(47, 224, 255, 0.28);
+  background: rgba(15, 32, 44, 0.72);
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+}
+

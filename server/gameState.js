@@ -1,7 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { EVENTS, ROOM_MODES } from '../shared/events.js';
 import { CURRENCY_CONFIG } from '../shared/economy.js';
-import { BOT, PLAYER } from '../shared/gameConfig.js';
+import {
+  BOT,
+  DEFAULT_BOT_DIFFICULTY,
+  getBotDifficultyConfig,
+  PLAYER,
+  resolveBotDifficulty,
+} from '../shared/gameConfig.js';
 import { collidesWithCover, simulateMovement } from '../shared/movement.js';
 import { getMap, resolveMapId } from '../shared/maps.js';
 import { DEFAULT_BUNDLE_ID } from '../shared/bundles.js';
@@ -12,6 +18,22 @@ const clamp = (value, minimum, maximum) => Math.min(maximum, Math.max(minimum, v
 const wrapAngle = (angle) => ((angle + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI;
 const finiteNumber = (value, fallback) => (Number.isFinite(value) ? value : fallback);
 const MAX_PROJECTILES = 64;
+
+function stepAngleToward(current, desired, maxDelta) {
+  const delta = wrapAngle(desired - current);
+  if (Math.abs(delta) <= maxDelta) return wrapAngle(desired);
+  return wrapAngle(current + Math.sign(delta) * maxDelta);
+}
+
+function randomBetween(minimum, maximum) {
+  return minimum + Math.random() * Math.max(0, maximum - minimum);
+}
+
+function randomIntInclusive(minimum, maximum) {
+  const low = Math.ceil(minimum);
+  const high = Math.floor(Math.max(low, maximum));
+  return low + Math.floor(Math.random() * (high - low + 1));
+}
 
 function shuffled(values) {
   const result = [...values];
@@ -95,6 +117,30 @@ function syncActiveWeapon(player, now = Date.now()) {
   player.overheatCompletesAt = state.overheatedUntil;
 }
 
+function createBotBrain(spawn, now, map, cover) {
+  return {
+    waypoint: randomBotWaypoint(map, cover),
+    nextWaypointAt: now + botWaypointDuration(),
+    stuckThinkCount: 0,
+    lastX: spawn.x,
+    lastZ: spawn.z,
+    targetId: null,
+    currentlyVisible: false,
+    visibleSince: null,
+    lastSeenAt: -Infinity,
+    lastKnownX: spawn.x,
+    lastKnownZ: spawn.z,
+    reactionUntil: 0,
+    respawnGraceUntil: 0,
+    nextFireAt: now,
+    burstRemaining: 0,
+    burstCooldownUntil: 0,
+    lastTargetSpeed: 0,
+    strafeSign: -1,
+    nextStrafeFlipAt: now + 1_600,
+  };
+}
+
 function makeGamePlayer(record, spawn, now, map, cover) {
   const bundleId = record.bundleId ?? DEFAULT_BUNDLE_ID;
   const loadout = getBundleLoadout(bundleId);
@@ -114,13 +160,7 @@ function makeGamePlayer(record, spawn, now, map, cover) {
     color: record.color,
     isBot: record.isBot === true,
     connected: record.isBot === true || record.connected !== false,
-    botBrain: record.isBot === true ? {
-      waypoint: randomBotWaypoint(map, cover),
-      nextWaypointAt: now + botWaypointDuration(),
-      stuckThinkCount: 0,
-      lastX: spawn.x,
-      lastZ: spawn.z,
-    } : null,
+    botBrain: record.isBot === true ? createBotBrain(spawn, now, map, cover) : null,
     x: spawn.x,
     y: 0,
     z: spawn.z,
@@ -171,6 +211,9 @@ export class GameState {
     this.startedAt = now;
     this.killSequence = 0;
     this.mode = room.mode ?? ROOM_MODES.MULTIPLAYER;
+    this.botDifficulty = this.mode === ROOM_MODES.SOLO_VS_BOTS
+      ? resolveBotDifficulty(room.botDifficulty ?? DEFAULT_BOT_DIFFICULTY)
+      : DEFAULT_BOT_DIFFICULTY;
     // The server owns the arena choice. `room.mapId` was already normalised
     // through `resolveMapId` when the room was created; resolving again keeps a
     // hand-built room (tests, recovery) from ever reaching an unknown map.
@@ -195,6 +238,10 @@ export class GameState {
 
     const records = [...room.players.values()];
     if (this.mode === ROOM_MODES.SOLO_VS_BOTS) {
+      const preset = getBotDifficultyConfig(this.botDifficulty);
+      const allowedBundles = preset.allowedBundles?.length
+        ? preset.allowedBundles.filter((id) => BUNDLE_IDS.includes(id))
+        : BUNDLE_IDS.filter((id) => id !== 'GODS_TIER');
       const botColors = ['#ff9858', '#ff647c', '#b18cff', '#ffc857', '#ff72cc'];
       for (let index = 1; index <= BOT.count; index += 1) {
         const name = `GOD_BOT_${String(index).padStart(2, '0')}`;
@@ -204,7 +251,7 @@ export class GameState {
           color: botColors[index - 1],
           ready: true,
           isBot: true,
-          bundleId: BUNDLE_IDS[Math.floor(Math.random() * BUNDLE_IDS.length)],
+          bundleId: allowedBundles[(index - 1) % allowedBundles.length],
         });
       }
     }
@@ -263,13 +310,96 @@ export class GameState {
     }
   }
 
+  getBotPreset() {
+    return getBotDifficultyConfig(this.botDifficulty);
+  }
+
+  setBotDifficulty(nextDifficulty, now = Date.now()) {
+    if (this.mode !== ROOM_MODES.SOLO_VS_BOTS) return false;
+    const resolved = resolveBotDifficulty(nextDifficulty);
+    this.botDifficulty = resolved;
+    if (this.room) this.room.botDifficulty = resolved;
+    const preset = getBotDifficultyConfig(resolved);
+    for (const player of this.players.values()) {
+      if (!player.isBot || !player.botBrain) continue;
+      const brain = player.botBrain;
+      brain.burstRemaining = Math.min(brain.burstRemaining, preset.burstShotsMax);
+      if (brain.currentlyVisible && brain.visibleSince !== null) {
+        brain.reactionUntil = Math.max(
+          now,
+          brain.visibleSince + randomBetween(preset.reactionMinMs, preset.reactionMaxMs),
+        );
+      } else {
+        brain.reactionUntil = 0;
+      }
+    }
+    return true;
+  }
+
+  hasBotLineOfSight(bot, target, aimY = target.y + PLAYER.height * 0.6) {
+    const origin = { x: bot.x, y: bot.y + PLAYER.eyeHeight, z: bot.z };
+    const dx = target.x - origin.x;
+    const dy = aimY - origin.y;
+    const dz = target.z - origin.z;
+    const distance = Math.hypot(dx, dy, dz);
+    if (distance <= 1e-4) return true;
+    const direction = { x: dx / distance, y: dy / distance, z: dz / distance };
+    const blockedCover = raycastCover({
+      origin,
+      direction,
+      maxDistance: distance,
+      cover: this.cover,
+    });
+    if (blockedCover && blockedCover.distance < distance - 0.15) return false;
+
+    for (const cloud of this.smokeClouds) {
+      const toCloudX = cloud.x - origin.x;
+      const toCloudY = (cloud.y ?? 1.2) - origin.y;
+      const toCloudZ = cloud.z - origin.z;
+      const along = toCloudX * direction.x + toCloudY * direction.y + toCloudZ * direction.z;
+      if (along <= 0 || along >= distance) continue;
+      const closestX = origin.x + direction.x * along - cloud.x;
+      const closestY = origin.y + direction.y * along - (cloud.y ?? 1.2);
+      const closestZ = origin.z + direction.z * along - cloud.z;
+      const radius = (cloud.radius ?? 4.2) * 0.88;
+      if (closestX * closestX + closestY * closestY + closestZ * closestZ <= radius * radius) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  ensureBotCombatWeapon(bot, targetDistance, now) {
+    const current = getWeapon(bot.currentWeaponId);
+    const currentState = bot.weaponStates?.[bot.currentWeaponId];
+    const currentUsable = current
+      && current.behavior !== 'shield'
+      && current.behavior !== 'smoke'
+      && (current.range >= Math.max(4, targetDistance - 0.5))
+      && (current.unlimitedAmmo || (currentState?.ammo ?? 0) + (currentState?.reserveAmmo ?? 0) > 0);
+    if (currentUsable) return current;
+
+    for (const [weaponId, state] of Object.entries(bot.weaponStates ?? {})) {
+      const candidate = getWeapon(weaponId);
+      if (!candidate || candidate.behavior === 'shield' || candidate.behavior === 'smoke') continue;
+      const hasAmmo = candidate.unlimitedAmmo || (state.ammo + state.reserveAmmo) > 0;
+      if (!hasAmmo) continue;
+      if (candidate.range >= Math.max(4, targetDistance - 0.5)) {
+        this.switchWeapon(bot.id, weaponId, now);
+        return candidate;
+      }
+    }
+    return current;
+  }
+
   update(deltaSeconds, now = Date.now()) {
     if (this.finished) return { winner: this.winner };
     const delta = clamp(finiteNumber(deltaSeconds, 0), 0, 0.1);
     this.tickSequence += 1;
     if (this.mode === ROOM_MODES.SOLO_VS_BOTS && now - this.lastBotThinkAt >= BOT.thinkIntervalMs) {
+      const thinkElapsedMs = now - this.lastBotThinkAt;
       this.lastBotThinkAt = now;
-      this.updateBots(now);
+      this.updateBots(now, thinkElapsedMs);
     }
 
     const previousSmokeCount = this.smokeClouds.length;
@@ -331,9 +461,12 @@ export class GameState {
     }
   }
 
-  updateBots(now) {
+  updateBots(now, thinkElapsedMs = BOT.thinkIntervalMs) {
+    const preset = this.getBotPreset();
+    const thinkDelta = clamp(finiteNumber(thinkElapsedMs, BOT.thinkIntervalMs) / 1_000, 0.02, 0.25);
     const humanPlayers = [...this.players.values()].filter((player) => !player.isBot && player.connected && player.alive);
     const humanTargets = new Map(humanPlayers.map((player) => [player.id, player]));
+    const fireIntents = [];
 
     for (const bot of this.players.values()) {
       if (!bot.isBot || !bot.alive) continue;
@@ -359,31 +492,158 @@ export class GameState {
         brain.stuckThinkCount = 0;
       }
 
-      const toWaypointX = brain.waypoint.x - bot.x;
-      const toWaypointZ = brain.waypoint.z - bot.z;
-      const waypointDistance = Math.hypot(toWaypointX, toWaypointZ);
-      const target = humanPlayers.reduce((nearest, player) => {
-        const distance = Math.hypot(player.x - bot.x, player.z - bot.z);
-        return !nearest || distance < nearest.distance ? { player, distance } : nearest;
-      }, null)?.player;
+      const inRespawnGrace = now < (brain.respawnGraceUntil ?? 0);
+      let chosen = null;
+      if (!inRespawnGrace && humanPlayers.length > 0) {
+        for (const candidate of humanPlayers) {
+          const dx = candidate.x - bot.x;
+          const dz = candidate.z - bot.z;
+          const distance = Math.hypot(dx, dz);
+          const bearingYaw = wrapAngle(Math.atan2(-dx, -dz));
+          const angleOffBow = Math.abs(wrapAngle(bearingYaw - bot.yaw));
+          const withinAwareness = distance <= preset.hearingRadius
+            || angleOffBow <= preset.visionHalfAngleRad
+            || brain.targetId === candidate.id;
+          if (!withinAwareness) continue;
 
-      if (target) {
-        const deltaX = target.x - bot.x;
-        const deltaZ = target.z - bot.z;
-        const horizontalDistance = Math.hypot(deltaX, deltaZ);
-        bot.yaw = wrapAngle(Math.atan2(-deltaX, -deltaZ));
-        bot.pitch = clamp(
-          Math.atan2(target.y - bot.y, horizontalDistance),
+          const torsoY = candidate.y + PLAYER.height * preset.aimHeightRatio;
+          if (!this.hasBotLineOfSight(bot, candidate, torsoY)) continue;
+
+          const switchPenalty = brain.targetId && brain.targetId !== candidate.id ? 2.5 : 0;
+          const score = distance + switchPenalty;
+          if (!chosen || score < chosen.score) {
+            chosen = { player: candidate, distance, score, torsoY };
+          }
+        }
+      }
+
+      if (chosen) {
+        const target = chosen.player;
+        const targetChanged = brain.targetId !== target.id;
+        const reacquiredAfterLoss = !brain.currentlyVisible
+          && (now - brain.lastSeenAt > preset.targetMemoryMs || brain.visibleSince === null);
+
+        if (targetChanged || reacquiredAfterLoss) {
+          const baseDelay = randomBetween(preset.reactionMinMs, preset.reactionMaxMs);
+          const spawnSafeAt = (target.spawnProtectionUntil ?? 0) > now
+            ? target.spawnProtectionUntil + baseDelay * 0.4
+            : now;
+          brain.visibleSince = now;
+          brain.reactionUntil = Math.max(now + baseDelay, spawnSafeAt);
+          brain.burstRemaining = 0;
+        } else if ((target.spawnProtectionUntil ?? 0) > now) {
+          brain.reactionUntil = Math.max(
+            brain.reactionUntil,
+            target.spawnProtectionUntil + preset.reactionMinMs * 0.35,
+          );
+        }
+
+        brain.targetId = target.id;
+        brain.currentlyVisible = true;
+        brain.lastSeenAt = now;
+        brain.lastKnownX = target.x;
+        brain.lastKnownZ = target.z;
+        brain.lastTargetSpeed = Math.hypot(target.vx ?? 0, target.vz ?? 0) + Math.abs(target.vy ?? 0) * 0.5;
+
+        // Track torso center-of-mass with human-like velocity lag so strafing and
+        // jumping players genuinely reduce incoming accuracy.
+        const laggedX = target.x - (target.vx ?? 0) * preset.trackingLagSeconds;
+        const laggedZ = target.z - (target.vz ?? 0) * preset.trackingLagSeconds;
+        const laggedY = chosen.torsoY - (target.vy ?? 0) * (preset.trackingLagSeconds * 0.6);
+        const deltaX = laggedX - bot.x;
+        const deltaZ = laggedZ - bot.z;
+        const horizontalDistance = Math.max(0.001, Math.hypot(deltaX, deltaZ));
+        const desiredYaw = wrapAngle(Math.atan2(-deltaX, -deltaZ));
+        const desiredPitch = clamp(
+          Math.atan2(laggedY - (bot.y + PLAYER.eyeHeight), horizontalDistance),
           -1.45,
           1.45,
         );
-      } else {
-        if (waypointDistance > 0) bot.yaw = wrapAngle(Math.atan2(-toWaypointX, -toWaypointZ));
-        bot.pitch = 0;
+
+        bot.yaw = stepAngleToward(bot.yaw, desiredYaw, preset.turnSpeedRadPerSec * thinkDelta);
+        bot.pitch = clamp(
+          bot.pitch + clamp(
+            desiredPitch - bot.pitch,
+            -preset.pitchSpeedRadPerSec * thinkDelta,
+            preset.pitchSpeedRadPerSec * thinkDelta,
+          ),
+          -1.45,
+          1.45,
+        );
+
+        const toWaypointX = brain.waypoint.x - bot.x;
+        const toWaypointZ = brain.waypoint.z - bot.z;
+        const waypointDistance = Math.hypot(toWaypointX, toWaypointZ);
+        const desiredX = waypointDistance > BOT.waypointReachDistance ? toWaypointX / waypointDistance : 0;
+        const desiredZ = waypointDistance > BOT.waypointReachDistance ? toWaypointZ / waypointDistance : 0;
+        const forwardX = -Math.sin(bot.yaw);
+        const forwardZ = -Math.cos(bot.yaw);
+        const rightX = Math.cos(bot.yaw);
+        const rightZ = -Math.sin(bot.yaw);
+
+        let forwardIntent = desiredX * forwardX + desiredZ * forwardZ;
+        let strafeIntent = desiredX * rightX + desiredZ * rightZ;
+
+        if (now >= brain.nextStrafeFlipAt) {
+          brain.strafeSign *= -1;
+          brain.nextStrafeFlipAt = now + randomBetween(1_350, 2_450);
+        }
+        if (Math.abs(strafeIntent) < 0.2) {
+          strafeIntent = brain.strafeSign * preset.strafeStrength;
+        }
+        if (bot.health <= preset.retreatHealthThreshold || chosen.distance < preset.preferredMinRange * 0.72) {
+          forwardIntent = Math.min(forwardIntent, -0.55);
+        } else if (chosen.distance > preset.preferredMaxRange) {
+          forwardIntent = Math.max(forwardIntent, 0.7);
+        }
+
+        bot.input.forward = clamp(forwardIntent, -1, 1);
+        bot.input.strafe = clamp(strafeIntent, -1, 1);
+        bot.input.jump = false;
+        bot.lastInputAt = now;
+
+        const weapon = this.ensureBotCombatWeapon(bot, chosen.distance, now);
+        if (!weapon || weapon.behavior === 'shield' || weapon.behavior === 'smoke') continue;
+        if (chosen.distance > weapon.range) continue;
+
+        const aimError = Math.abs(wrapAngle(desiredYaw - bot.yaw));
+        const spawnProtected = now < (target.spawnProtectionUntil ?? 0);
+        const reactionComplete = now >= brain.reactionUntil;
+        const cadenceReady = now >= brain.nextFireAt && now >= brain.burstCooldownUntil;
+        if (!spawnProtected && reactionComplete && cadenceReady && aimError <= preset.fireConeRad) {
+          fireIntents.push({ bot, target, weapon, distance: chosen.distance });
+        }
+        continue;
       }
 
-      const desiredX = waypointDistance > BOT.waypointReachDistance ? toWaypointX / waypointDistance : 0;
-      const desiredZ = waypointDistance > BOT.waypointReachDistance ? toWaypointZ / waypointDistance : 0;
+      // No currently visible target: lose visual lock cleanly and patrol or check
+      // brief memory of last known position without snapping through walls.
+      brain.currentlyVisible = false;
+      brain.lastTargetSpeed = 0;
+      if (brain.targetId && now - brain.lastSeenAt > preset.targetMemoryMs) {
+        brain.targetId = null;
+        brain.visibleSince = null;
+        brain.burstRemaining = 0;
+      }
+
+      const navX = (brain.targetId && now - brain.lastSeenAt <= preset.targetMemoryMs)
+        ? brain.lastKnownX
+        : brain.waypoint.x;
+      const navZ = (brain.targetId && now - brain.lastSeenAt <= preset.targetMemoryMs)
+        ? brain.lastKnownZ
+        : brain.waypoint.z;
+      const toNavX = navX - bot.x;
+      const toNavZ = navZ - bot.z;
+      const navDistance = Math.hypot(toNavX, toNavZ);
+      if (navDistance > 0.05) {
+        const patrolYaw = wrapAngle(Math.atan2(-toNavX, -toNavZ));
+        bot.yaw = stepAngleToward(bot.yaw, patrolYaw, preset.patrolTurnSpeedRadPerSec * thinkDelta);
+      }
+      bot.pitch = clamp(bot.pitch * 0.7, -1.45, 1.45);
+      if (Math.abs(bot.pitch) < 0.01) bot.pitch = 0;
+
+      const desiredX = navDistance > BOT.waypointReachDistance ? toNavX / navDistance : 0;
+      const desiredZ = navDistance > BOT.waypointReachDistance ? toNavZ / navDistance : 0;
       const forwardX = -Math.sin(bot.yaw);
       const forwardZ = -Math.cos(bot.yaw);
       const rightX = Math.cos(bot.yaw);
@@ -392,10 +652,16 @@ export class GameState {
       bot.input.strafe = clamp(desiredX * rightX + desiredZ * rightZ, -1, 1);
       bot.input.jump = false;
       bot.lastInputAt = now;
+    }
 
-      if (!target) continue;
-      const weapon = getWeapon(bot.currentWeaponId);
-      if (!weapon || weapon.behavior === 'shield') continue;
+    // Cap coordinated simultaneous focus fire against any single player per preset.
+    fireIntents.sort((left, right) => left.distance - right.distance);
+    const activeAttackersByTarget = new Map();
+    for (const intent of fireIntents) {
+      const count = activeAttackersByTarget.get(intent.target.id) ?? 0;
+      if (count >= preset.maxSimultaneousAttackers) continue;
+
+      const { bot, target, weapon } = intent;
       const visibleShot = castShot({
         origin: { x: bot.x, y: bot.y + PLAYER.eyeHeight, z: bot.z },
         direction: aimDirection(bot.yaw, bot.pitch),
@@ -404,9 +670,24 @@ export class GameState {
         maxDistance: weapon.range,
         cover: this.cover,
         smokeClouds: this.smokeClouds,
-        ignoreCover: weapon.piercesCover === true,
+        ignoreCover: false,
       });
-      if (visibleShot?.target.id === target.id) this.shoot(bot.id, now);
+      // Allow firing when either the direct aim ray hits the visible target or
+      // clear line-of-sight is confirmed (so torso/lagged aim near target edge still fires).
+      if (visibleShot?.hitType === 'cover') continue;
+      if (visibleShot?.target && visibleShot.target.id !== target.id) continue;
+
+      activeAttackersByTarget.set(target.id, count + 1);
+      const brain = bot.botBrain;
+      if (brain.burstRemaining <= 0) {
+        brain.burstRemaining = randomIntInclusive(preset.burstShotsMin, preset.burstShotsMax);
+      }
+      this.shoot(bot.id, now);
+      brain.nextFireAt = now + Math.round(weapon.fireRate * preset.fireIntervalMultiplier);
+      brain.burstRemaining -= 1;
+      if (brain.burstRemaining <= 0) {
+        brain.burstCooldownUntil = now + randomBetween(preset.burstCooldownMinMs, preset.burstCooldownMaxMs);
+      }
     }
   }
 
@@ -517,11 +798,24 @@ export class GameState {
 
     const origin = { x: shooter.x, y: shooter.y + PLAYER.eyeHeight, z: shooter.z };
     let direction = aimDirection(shooter.yaw, shooter.pitch);
-    if (shooter.isBot && Math.random() < BOT.missChance) {
-      const side = Math.random() < 0.5 ? -1 : 1;
-      const missAngle = BOT.minimumMissAngleRadians
-        + Math.random() * (BOT.maximumMissAngleRadians - BOT.minimumMissAngleRadians);
-      direction = aimDirection(wrapAngle(shooter.yaw + side * missAngle), shooter.pitch);
+    if (shooter.isBot) {
+      const preset = this.getBotPreset();
+      if (Math.random() < preset.missChance) {
+        const side = Math.random() < 0.5 ? -1 : 1;
+        const missAngle = preset.minimumMissAngleRadians
+          + Math.random() * (preset.maximumMissAngleRadians - preset.minimumMissAngleRadians);
+        direction = aimDirection(wrapAngle(shooter.yaw + side * missAngle), shooter.pitch);
+      } else {
+        const targetSpeed = shooter.botBrain?.lastTargetSpeed ?? 0;
+        const movingFactor = clamp(targetSpeed / PLAYER.moveSpeed, 0, 1.35);
+        const jitterSpan = preset.aimJitterRad + movingFactor * preset.movingTargetSpreadRad;
+        const yawJitter = (Math.random() * 2 - 1) * jitterSpan;
+        const pitchJitter = (Math.random() * 2 - 1) * (jitterSpan * 0.65);
+        direction = aimDirection(
+          wrapAngle(shooter.yaw + yawJitter),
+          clamp(shooter.pitch + pitchJitter, -1.45, 1.45),
+        );
+      }
     }
 
     this.emitRoom(EVENTS.WEAPON_FIRED, {
@@ -561,7 +855,7 @@ export class GameState {
         maxDistance: weapon.range,
         cover: this.cover,
         smokeClouds: this.smokeClouds,
-        ignoreCover: weapon.piercesCover === true,
+        ignoreCover: weapon.piercesCover === true && !shooter.isBot,
       });
       if (!result) continue;
       const damage = result.headshot
@@ -956,6 +1250,37 @@ export class GameState {
     player.shieldBlockUntil = 0;
     player.shieldCooldownUntil = 0;
     player.shieldNeedsRelease = false;
+    if (player.isBot && player.botBrain) {
+      const preset = this.getBotPreset();
+      const loadout = getBundleLoadout(player.bundleId);
+      player.currentWeaponId = loadout[0]?.id ?? player.currentWeaponId;
+      player.pitch = 0;
+      Object.assign(player.botBrain, {
+        waypoint: randomBotWaypoint(this.map, this.cover),
+        nextWaypointAt: now + botWaypointDuration(),
+        stuckThinkCount: 0,
+        lastX: spawn.x,
+        lastZ: spawn.z,
+        targetId: null,
+        currentlyVisible: false,
+        visibleSince: null,
+        lastSeenAt: -Infinity,
+        reactionUntil: 0,
+        respawnGraceUntil: now + preset.postRespawnGraceMs,
+        nextFireAt: now + preset.postRespawnGraceMs,
+        burstRemaining: 0,
+        burstCooldownUntil: 0,
+        lastTargetSpeed: 0,
+      });
+    } else if (!player.isBot) {
+      for (const other of this.players.values()) {
+        if (!other.isBot || other.botBrain?.targetId !== player.id) continue;
+        other.botBrain.targetId = null;
+        other.botBrain.currentlyVisible = false;
+        other.botBrain.visibleSince = null;
+        other.botBrain.burstRemaining = 0;
+      }
+    }
     syncActiveWeapon(player, now);
 
     this.emitRoom(EVENTS.PLAYER_RESPAWNED, {
@@ -1081,6 +1406,7 @@ export class GameState {
       tick: this.tickSequence,
       targetKills: PLAYER.targetKills,
       mode: this.mode,
+      botDifficulty: this.mode === ROOM_MODES.SOLO_VS_BOTS ? this.botDifficulty : null,
       players: [...this.players.values()].map((player) => {
         syncActiveWeapon(player, now);
         return {

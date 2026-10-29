@@ -7,6 +7,13 @@ import {
 } from '../shared/bundles.js';
 import { formatCredits } from '../shared/economy.js';
 import { ROOM_MODES } from '../shared/events.js';
+import {
+  BOT_DIFFICULTIES,
+  BOT_DIFFICULTY_IDS,
+  DEFAULT_BOT_DIFFICULTY,
+  getBotDifficultyConfig,
+  resolveBotDifficulty,
+} from '../shared/gameConfig.js';
 import { DEFAULT_MAP_ID, MAP_LIST, getMap, resolveMapId } from '../shared/maps.js';
 import { WEAPON_MODEL_FILE } from '../shared/weaponModels.js';
 import { CROSSHAIR_STYLES, DEFAULT_SETTINGS, QUALITY_PRESETS } from './settings.js';
@@ -57,6 +64,7 @@ export class GameUI {
     this.rewardPopTimer = null;
     this.rooms = { status: 'idle', entries: [], error: '' };
     this.selectedMapId = DEFAULT_MAP_ID;
+    this.botDifficulty = resolveBotDifficulty(settings?.botDifficulty ?? DEFAULT_BOT_DIFFICULTY);
     this.arena = getMap(DEFAULT_MAP_ID);
     this.roomPollTimer = null;
     this.actionTimer = null;
@@ -83,6 +91,7 @@ export class GameUI {
       'topbar-credits-button', 'topbar-credits-value', 'profile-chip',
       'profile-avatar', 'profile-callsign', 'profile-kills', 'brand-home', 'nav-rail',
       'menu-shell', 'hero-copy', 'stage-note', 'play-bundle-tag', 'play-now-button',
+      'play-now-sub', 'bot-difficulty-picker', 'bot-difficulty-grid', 'bot-difficulty-note',
       'create-room-button', 'browse-rooms-button', 'join-room-form', 'room-code-input',
       'join-room-button', 'play-error', 'play-loadout-line', 'play-server-line',
       'refresh-rooms-button', 'room-list', 'rooms-create-button', 'rooms-join-button',
@@ -101,15 +110,15 @@ export class GameUI {
       'profile-callsign-form',
       'profile-callsign-input', 'profile-message', 'settings-reset',
       'setting-sensitivity', 'setting-sensitivity-value', 'setting-fov',
-      'setting-fov-value', 'setting-volume', 'setting-volume-value', 'setting-quality',
-      'setting-crosshair', 'setting-invert', 'setting-fps', 'onboarding',
+      'setting-fov-value', 'setting-volume', 'setting-volume-value', 'setting-bot-difficulty',
+      'setting-quality', 'setting-crosshair', 'setting-invert', 'setting-fps', 'onboarding',
       'onboarding-identity', 'onboarding-loadout', 'step-one', 'step-two',
       'player-name', 'callsign-error', 'callsign-continue-button', 'onboarding-bundles',
       'bundle-error', 'bundle-back-button', 'bundle-continue-button', 'lobby-shell',
       'lobby-room-code', 'lobby-room-code-small', 'lobby-mode-tag', 'copy-room-code-button',
       'lobby-player-list', 'lobby-hint', 'room-error', 'leave-room-button', 'ready-button',
       'start-button', 'match-hud', 'hud-room', 'hud-room-code', 'hud-room-copy',
-      'hud-arena-name', 'map-grid', 'map-picker', 'map-picker-note',
+      'hud-arena-name', 'hud-bot-difficulty', 'map-grid', 'map-picker', 'map-picker-note',
       'lobby-arena', 'lobby-map-name', 'lobby-map-grid',
       'lobby-map-note', 'target-kills', 'alive-count', 'ping-value',
       'hud-credits-pill', 'hud-credits-value', 'hud-reward-pop',
@@ -118,7 +127,8 @@ export class GameUI {
       'health-state', 'shield-state', 'spawn-note', 'weapon-name', 'weapon-bundle',
       'ammo-mode', 'ammo-value', 'ammo-total', 'ammo-status', 'reload-hint',
       'weapon-wheel', 'weapon-wheel-options', 'wheel-center-name', 'wheel-center-state',
-      'pause-panel', 'resume-button', 'death-panel', 'respawn-countdown',
+      'pause-panel', 'pause-bot-difficulty', 'pause-bot-difficulty-grid',
+      'resume-button', 'death-panel', 'respawn-countdown',
       'scoreboard-panel', 'scoreboard-room', 'scoreboard-body', 'end-panel', 'end-kicker',
       'winner-name', 'winner-summary', 'end-scoreboard', 'return-lobby-button',
       'end-waiting', 'loading-overlay', 'loading-label', 'loading-fill', 'toast',
@@ -183,6 +193,9 @@ export class GameUI {
     el['setting-volume'].addEventListener('input', () => {
       this.emitSettings({ volume: Number(el['setting-volume'].value) });
     });
+    el['setting-bot-difficulty'].addEventListener('change', () => {
+      this.selectBotDifficulty(el['setting-bot-difficulty'].value, { fromSettings: true });
+    });
     el['setting-quality'].addEventListener('change', () => {
       this.emitSettings({ quality: el['setting-quality'].value });
     });
@@ -218,6 +231,10 @@ export class GameUI {
     el['setting-fov-value'].textContent = `${s.fov}°`;
     el['setting-volume'].value = String(s.volume);
     el['setting-volume-value'].textContent = `${Math.round(s.volume * 100)}%`;
+    const resolvedDifficulty = resolveBotDifficulty(s.botDifficulty ?? this.botDifficulty);
+    this.botDifficulty = resolvedDifficulty;
+    if (el['setting-bot-difficulty']) el['setting-bot-difficulty'].value = resolvedDifficulty;
+    this.syncBotDifficultyUI();
     el['setting-quality'].value = QUALITY_PRESETS[s.quality] ? s.quality : 'high';
     el['setting-crosshair'].value = CROSSHAIR_STYLES.includes(s.crosshair) ? s.crosshair : 'standard';
     el['setting-invert'].checked = s.invertY === true;
@@ -465,7 +482,81 @@ export class GameUI {
 
   /* ────────────────────────────── room actions ──────────────────────────── */
 
+  renderDifficultyPicker(container, { compact = false } = {}) {
+    if (!container) return;
+    container.replaceChildren();
+    for (const id of BOT_DIFFICULTY_IDS) {
+      const preset = BOT_DIFFICULTIES[id];
+      const button = document.createElement('button');
+      button.type = 'button';
+      const selected = id === this.botDifficulty;
+      button.className = `difficulty-pill${selected ? ' is-selected' : ''}`;
+      button.dataset.botDifficulty = id;
+      button.setAttribute('role', 'radio');
+      button.setAttribute('aria-checked', String(selected));
+
+      const title = document.createElement('strong');
+      title.textContent = preset.label;
+      button.append(title);
+      if (!compact) {
+        const sub = document.createElement('small');
+        sub.textContent = id === 'easy' ? 'CASUAL' : id === 'normal' ? 'BALANCED' : 'INTENSE';
+        button.append(sub);
+      }
+
+      button.addEventListener('click', () => {
+        this.selectBotDifficulty(id);
+      });
+      container.append(button);
+    }
+  }
+
+  selectBotDifficulty(value, { fromSettings = false } = {}) {
+    const resolved = resolveBotDifficulty(value);
+    this.botDifficulty = resolved;
+    this.emitSettings({ botDifficulty: resolved });
+    if (!fromSettings && this.el['setting-bot-difficulty']) {
+      this.el['setting-bot-difficulty'].value = resolved;
+    }
+    this.handlers.onBotDifficultyChange?.(resolved);
+  }
+
+  syncBotDifficultyUI(authoritativeDifficulty = null) {
+    const active = resolveBotDifficulty(authoritativeDifficulty ?? this.room?.botDifficulty ?? this.botDifficulty);
+    const preset = getBotDifficultyConfig(this.botDifficulty);
+    const matchPreset = getBotDifficultyConfig(active);
+    if (this.el['play-now-sub']) {
+      this.el['play-now-sub'].textContent = `SOLO · 5 BOTS · ${preset.label}`;
+    }
+    if (this.el['bot-difficulty-note']) {
+      this.el['bot-difficulty-note'].textContent = preset.summary;
+    }
+    for (const [grid, selectedId] of [
+      [this.el['bot-difficulty-grid'], this.botDifficulty],
+      [this.el['pause-bot-difficulty-grid'], active],
+    ]) {
+      if (!grid) continue;
+      for (const pill of grid.querySelectorAll('.difficulty-pill')) {
+        const isSelected = pill.dataset.botDifficulty === selectedId;
+        pill.classList.toggle('is-selected', isSelected);
+        pill.setAttribute('aria-checked', String(isSelected));
+      }
+    }
+    const isSolo = this.room?.mode === ROOM_MODES.SOLO_VS_BOTS;
+    if (this.el['hud-bot-difficulty']) {
+      this.el['hud-bot-difficulty'].hidden = !isSolo;
+      this.el['hud-bot-difficulty'].textContent = `BOTS · ${matchPreset.label}`;
+    }
+    if (this.el['pause-bot-difficulty']) {
+      this.el['pause-bot-difficulty'].hidden = !isSolo;
+    }
+  }
+
   bindPlayControls() {
+    this.renderDifficultyPicker(this.el['bot-difficulty-grid'], { compact: false });
+    this.renderDifficultyPicker(this.el['pause-bot-difficulty-grid'], { compact: true });
+    this.syncBotDifficultyUI();
+
     this.el['play-now-button'].addEventListener('click', () => {
       this.playUiSound();
       this.beginAction('play-now-button');
@@ -1335,6 +1426,7 @@ export class GameUI {
     this.el['scoreboard-room'].textContent = room?.code ?? '------';
     this.el['target-kills'].textContent = String(room?.targetKills ?? 30);
     this.setArena(getMap(room?.mapId ?? this.selectedMapId));
+    this.syncBotDifficultyUI(room?.botDifficulty ?? null);
     this.lastHealth = null;
   }
 
@@ -1343,6 +1435,7 @@ export class GameUI {
       this.el['pause-panel'].hidden = true;
       return;
     }
+    this.syncBotDifficultyUI(this.room?.botDifficulty ?? null);
     this.el['pause-panel'].hidden = !paused;
   }
 

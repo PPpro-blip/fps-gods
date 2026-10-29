@@ -11,7 +11,7 @@ export const ADS_PROFILES = Object.freeze({
   SMG: Object.freeze({
     fov: 61,
     durationMs: 170,
-    offset: Object.freeze([0, -0.225, -0.72]),
+    offset: Object.freeze([0, -0.154, -0.68]),
     scope: null,
     reticle: 'iron',
     magnification: '1.25×',
@@ -19,7 +19,7 @@ export const ADS_PROFILES = Object.freeze({
   SHOTGUN: Object.freeze({
     fov: 63,
     durationMs: 200,
-    offset: Object.freeze([0, -0.076, -0.76]),
+    offset: Object.freeze([0, -0.065, -0.74]),
     scope: null,
     reticle: 'iron',
     magnification: '1.2×',
@@ -27,7 +27,7 @@ export const ADS_PROFILES = Object.freeze({
   PISTOL: Object.freeze({
     fov: 62,
     durationMs: 145,
-    offset: Object.freeze([0, -0.185, -0.66]),
+    offset: Object.freeze([0, -0.121, -0.64]),
     scope: null,
     reticle: 'iron',
     magnification: '1.2×',
@@ -35,7 +35,7 @@ export const ADS_PROFILES = Object.freeze({
   SNIPER: Object.freeze({
     fov: 36,
     durationMs: 220,
-    offset: Object.freeze([0, -0.104, -0.85]),
+    offset: Object.freeze([0, -0.095, -0.85]),
     scope: 'optic',
     reticle: 'optic',
     magnification: '4.0×',
@@ -43,7 +43,7 @@ export const ADS_PROFILES = Object.freeze({
   LMG: Object.freeze({
     fov: 60,
     durationMs: 220,
-    offset: Object.freeze([0, -0.175, -0.79]),
+    offset: Object.freeze([0, -0.158, -0.78]),
     scope: null,
     reticle: 'iron',
     magnification: '1.3×',
@@ -59,7 +59,7 @@ export const ADS_PROFILES = Object.freeze({
   RAILGUN: Object.freeze({
     fov: 50,
     durationMs: 205,
-    offset: Object.freeze([0, -0.175, -0.79]),
+    offset: Object.freeze([0, -0.158, -0.78]),
     scope: 'rail',
     reticle: 'rail',
     magnification: '2.2×',
@@ -67,7 +67,7 @@ export const ADS_PROFILES = Object.freeze({
   MINIGUN: Object.freeze({
     fov: 63,
     durationMs: 240,
-    offset: Object.freeze([0, -0.175, -0.79]),
+    offset: Object.freeze([0, -0.158, -0.78]),
     scope: null,
     reticle: 'iron',
     magnification: '1.2×',

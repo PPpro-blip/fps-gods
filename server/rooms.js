@@ -1,7 +1,12 @@
 import { createHash, randomBytes, randomInt } from 'node:crypto';
 import { EVENTS, ROOM_MODES, ROOM_STATES } from '../shared/events.js';
 import { DEFAULT_BUNDLE_ID, BUNDLE_UNLOCK_KILLS } from '../shared/bundles.js';
-import { PLAYER } from '../shared/gameConfig.js';
+import {
+  DEFAULT_BOT_DIFFICULTY,
+  isValidBotDifficulty,
+  PLAYER,
+  resolveBotDifficulty,
+} from '../shared/gameConfig.js';
 import { DEFAULT_MAP_ID, describeMap, isValidMapId, resolveMapId } from '../shared/maps.js';
 import { PlayerProfileStore } from './profiles.js';
 import { getBundleLoadout, isBundleId } from './weaponConfig.js';
@@ -92,6 +97,9 @@ export class RoomManager {
       // An unknown or missing id falls back to the documented default instead
       // of failing the request, so older clients keep working.
       mapId: resolveMapId(selection?.mapId),
+      botDifficulty: mode === ROOM_MODES.SOLO_VS_BOTS
+        ? resolveBotDifficulty(selection?.botDifficulty ?? DEFAULT_BOT_DIFFICULTY)
+        : null,
       hostId: socket.id,
       createdAt: Date.now(),
       players: new Map(),
@@ -369,6 +377,32 @@ export class RoomManager {
     return room;
   }
 
+  setBotDifficulty(socket, requestedDifficulty, now = Date.now()) {
+    const room = this.getRoomForSocket(socket);
+    if (!room) {
+      this.emitError(socket, 'You are no longer in a room.');
+      return null;
+    }
+    if (room.mode !== ROOM_MODES.SOLO_VS_BOTS) {
+      this.emitError(socket, 'Bot difficulty only applies to solo bot matches.');
+      return null;
+    }
+    if (room.hostId !== socket.id) {
+      this.emitError(socket, 'Only the match host can change bot difficulty.');
+      return null;
+    }
+    if (!isValidBotDifficulty(requestedDifficulty)) {
+      this.emitError(socket, 'Choose Easy, Normal, or Hard bot difficulty.');
+      return null;
+    }
+
+    const difficulty = resolveBotDifficulty(requestedDifficulty);
+    room.botDifficulty = difficulty;
+    room.game?.setBotDifficulty(difficulty, now);
+    this.broadcastRoomState(room);
+    return room;
+  }
+
   /**
    * Start a fresh bot match in an ended SOLO_VS_BOTS room.
    *
@@ -377,7 +411,7 @@ export class RoomManager {
    * and human seat while launchRoom builds a brand-new GameState, which resets
    * bots, score, cover, and smoke.
    */
-  restartSoloMatch(socket) {
+  restartSoloMatch(socket, selection = {}) {
     const room = this.getRoomForSocket(socket);
     if (!room) return { error: 'You are no longer in a room.' };
     if (room.mode !== ROOM_MODES.SOLO_VS_BOTS) {
@@ -390,6 +424,11 @@ export class RoomManager {
       return { error: 'Only the match host can redeploy.' };
     }
 
+    if (selection?.botDifficulty !== undefined) {
+      room.botDifficulty = resolveBotDifficulty(selection.botDifficulty);
+    } else {
+      room.botDifficulty = resolveBotDifficulty(room.botDifficulty);
+    }
     room.state = ROOM_STATES.PLAYING;
     room.winner = null;
     room.game = null;
@@ -519,6 +558,9 @@ export class RoomManager {
       mode: room.mode,
       mapId: room.mapId ?? DEFAULT_MAP_ID,
       mapName: getMapName(room.mapId),
+      botDifficulty: room.mode === ROOM_MODES.SOLO_VS_BOTS
+        ? resolveBotDifficulty(room.game?.botDifficulty ?? room.botDifficulty)
+        : null,
       hostId: room.hostId,
       players,
       minPlayers: PLAYER.minPlayers,

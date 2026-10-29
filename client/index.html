@@ -102,8 +102,14 @@
 
             <button class="button button-primary button-xl" id="play-now-button" type="button">
               <span class="button-glyph" aria-hidden="true">▶</span>
-              <span class="button-label"><strong>PLAY NOW</strong><small>SOLO · 5 BOTS</small></span>
+              <span class="button-label"><strong>PLAY NOW</strong><small id="play-now-sub">SOLO · 5 BOTS · EASY</small></span>
             </button>
+
+            <fieldset class="bot-difficulty-picker" id="bot-difficulty-picker">
+              <legend class="field-label">BOT DIFFICULTY</legend>
+              <div class="difficulty-grid" id="bot-difficulty-grid" role="radiogroup" aria-label="Select bot difficulty"></div>
+              <p class="map-picker-note" id="bot-difficulty-note">Forgiving reactions, wider aim spread, and capped focus fire.</p>
+            </fieldset>
 
             <div class="button-row">
               <button class="button button-secondary" id="create-room-button" type="button">
@@ -337,6 +343,17 @@
                 </span>
               </label>
 
+              <label class="setting-row" for="setting-bot-difficulty">
+                <span class="setting-copy"><strong>BOT DIFFICULTY</strong><small>Default AI preset for solo bot matches</small></span>
+                <span class="setting-control">
+                  <select id="setting-bot-difficulty">
+                    <option value="easy">EASY</option>
+                    <option value="normal">NORMAL</option>
+                    <option value="hard">HARD</option>
+                  </select>
+                </span>
+              </label>
+
               <label class="setting-row" for="setting-quality">
                 <span class="setting-copy"><strong>RENDER QUALITY</strong><small>Resolution scale and effects</small></span>
                 <span class="setting-control">
@@ -453,6 +470,7 @@
             <span class="hud-status">LIVE MATCH</span>
             <i></i>
             <span class="hud-arena" id="hud-arena-name">ARENA</span>
+            <span class="hud-bot-badge" id="hud-bot-difficulty" hidden>BOTS · EASY</span>
             <i></i>
             <span class="hud-target">FIRST TO <b id="target-kills">30</b></span>
           </div>
@@ -537,6 +555,10 @@
         <p class="panel-kicker">MATCH IN PROGRESS</p>
         <h2>Click in to deploy</h2>
         <p>Pointer lock keeps your aim inside the arena. Press <kbd>ESC</kbd> to release it.</p>
+        <div class="pause-difficulty" id="pause-bot-difficulty" hidden>
+          <span class="field-label">BOT DIFFICULTY</span>
+          <div class="difficulty-grid is-compact" id="pause-bot-difficulty-grid" role="radiogroup" aria-label="Match bot difficulty"></div>
+        </div>
         <button class="button button-primary" id="resume-button" type="button">ENTER ARENA</button>
       </section>
 

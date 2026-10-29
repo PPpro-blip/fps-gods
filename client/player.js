@@ -28,11 +28,25 @@ function blend(left, right, amount) {
 // Buffers authoritative snapshots for remote-player interpolation. The local
 // player uses separate prediction/reconciliation rather than this delayed view.
 export class StateInterpolator {
-  constructor() {
+  constructor(delayMs = INTERPOLATION_DELAY_MS) {
+    this.baseDelayMs = delayMs;
+    this.delayMs = delayMs;
+    this.lastPushAt = null;
+    this.jitterMs = 0;
     this.states = new Map();
   }
 
   push(players, receivedAt = performance.now()) {
+    if (Number.isFinite(this.lastPushAt)) {
+      const gap = Math.max(0, receivedAt - this.lastPushAt);
+      // 20 Hz server snapshots arrive ~50ms apart; widen the interpolation
+      // buffer slightly when high-RTT internet jitter bunches snapshots.
+      const deviation = Math.min(80, Math.abs(gap - 50));
+      this.jitterMs = this.jitterMs * 0.82 + deviation * 0.18;
+      this.delayMs = Math.min(135, Math.round(this.baseDelayMs + this.jitterMs * 0.9));
+    }
+    this.lastPushAt = receivedAt;
+
     const seen = new Set();
     for (const player of players) {
       seen.add(player.id);
@@ -50,18 +64,21 @@ export class StateInterpolator {
     }
   }
 
-  sample(playerId, renderAt = performance.now() - INTERPOLATION_DELAY_MS) {
+  sample(playerId, renderAt = performance.now() - this.delayMs) {
     const samples = this.states.get(playerId)?.samples;
     if (!samples?.length) return null;
-    if (samples.length === 1 || renderAt <= samples[0].receivedAt) return samples[0];
+    const safeRenderAt = Number.isFinite(renderAt)
+      ? renderAt
+      : (samples[samples.length - 1].receivedAt - this.delayMs);
+    if (samples.length === 1 || safeRenderAt <= samples[0].receivedAt) return samples[0];
 
     for (let index = 0; index < samples.length - 1; index += 1) {
       const before = samples[index];
       const after = samples[index + 1];
-      if (renderAt > after.receivedAt) continue;
+      if (safeRenderAt > after.receivedAt) continue;
 
       const span = after.receivedAt - before.receivedAt;
-      const amount = span > 0 ? Math.max(0, Math.min(1, (renderAt - before.receivedAt) / span)) : 1;
+      const amount = span > 0 ? Math.max(0, Math.min(1, (safeRenderAt - before.receivedAt) / span)) : 1;
       return {
         ...after,
         x: blend(before.x, after.x, amount),
@@ -73,17 +90,20 @@ export class StateInterpolator {
     }
 
     const latest = samples[samples.length - 1];
-    const extrapolation = Math.min(MAX_EXTRAPOLATION_MS, Math.max(0, renderAt - latest.receivedAt)) / 1_000;
+    const extrapolation = Math.min(MAX_EXTRAPOLATION_MS, Math.max(0, safeRenderAt - latest.receivedAt)) / 1_000;
     return {
       ...latest,
-      x: latest.x + latest.vx * extrapolation,
-      y: Math.max(0, latest.y + latest.vy * extrapolation),
-      z: latest.z + latest.vz * extrapolation,
+      x: latest.x + (latest.vx ?? 0) * extrapolation,
+      y: Math.max(0, latest.y + (latest.vy ?? 0) * extrapolation),
+      z: latest.z + (latest.vz ?? 0) * extrapolation,
     };
   }
 
   clear() {
     this.states.clear();
+    this.lastPushAt = null;
+    this.jitterMs = 0;
+    this.delayMs = this.baseDelayMs;
   }
 }
 
@@ -193,9 +213,15 @@ export class PlayerController {
     );
   }
 
-  setEnabled(enabled) {
+  setEnabled(enabled, { preserveKeys = false } = {}) {
     const next = Boolean(enabled);
-    if (this.enabled && !next) this.clearKeys();
+    if (this.enabled && !next) {
+      if (preserveKeys) {
+        this.resetTransientState();
+      } else {
+        this.clearKeys();
+      }
+    }
     this.enabled = next;
     if (next && document.pointerLockElement === this.canvas && this.keys.size > 0) {
       this.onInputEdge?.();
@@ -250,7 +276,13 @@ export class PlayerController {
     this.wheelDelta = 0;
   }
 
-  /** Full input reset for death, respawn, disconnect, and scene changes. */
+  /** Clear one-shot jump/wheel latches while preserving physically held WASD keys across respawns/overlays. */
+  resetTransientState() {
+    this.jumpTapLatched = false;
+    this.wheelDelta = 0;
+  }
+
+  /** Full input reset for blur, tab hide, disconnect, and match teardown. */
   reset() {
     this.clearKeys();
   }

@@ -3,7 +3,7 @@ import { createServer } from 'node:http';
 import { pathToFileURL } from 'node:url';
 import express from 'express';
 import { Server } from 'socket.io';
-import { EVENTS, ROOM_STATES } from '../shared/events.js';
+import { EVENTS, ROOM_MODES, ROOM_STATES } from '../shared/events.js';
 import { PLAYER } from '../shared/gameConfig.js';
 import { DEFAULT_GAME_SERVER_HOST, DEFAULT_GAME_SERVER_PORT } from '../shared/deployment.js';
 import { GameDatabase } from './database.js';
@@ -407,10 +407,14 @@ export function createGameServer(options = {}) {
       mode: room.mode,
       mapId: room.game.mapId,
       mapName: room.game.map.name,
+      botDifficulty: room.mode === ROOM_MODES.SOLO_VS_BOTS ? room.game.botDifficulty : null,
       targetKills: PLAYER.targetKills,
       playerCount: room.game.players.size,
     });
     roomManager.broadcastRoomState(room);
+    // Push the initial authoritative snapshot immediately on launch so high-RTT
+    // clients can move on frame 0 without waiting up to 50ms for the next tick.
+    io.to(room.code).emit(EVENTS.GAME_STATE_UPDATE, room.game.getPublicState(now));
   }
 
   io.on('connection', (socket) => {
@@ -485,6 +489,10 @@ export function createGameServer(options = {}) {
       roomManager.setRoomMap(socket, payload.mapId);
     });
 
+    socket.on(EVENTS.SET_BOT_DIFFICULTY, (payload = {}) => {
+      roomManager.setBotDifficulty(socket, payload?.botDifficulty, Date.now());
+    });
+
     socket.on(EVENTS.PLAYER_READY, (payload = {}) => {
       roomManager.setReady(socket, payload.ready);
     });
@@ -535,8 +543,8 @@ export function createGameServer(options = {}) {
       roomManager.returnToLobby(socket);
     });
 
-    socket.on(EVENTS.PLAY_AGAIN, () => {
-      const result = roomManager.restartSoloMatch(socket);
+    socket.on(EVENTS.PLAY_AGAIN, (payload = {}) => {
+      const result = roomManager.restartSoloMatch(socket, payload);
       if (result.error) {
         roomManager.emitError(socket, result.error);
         return;
