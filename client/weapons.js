@@ -13,8 +13,47 @@ const BUNDLE_TRACER_COLOR = Object.freeze({
 
 const NO_TRACER = new Set(['PISTOL', 'KNIFE', 'GOD_FIST', 'SMOKE_GRENADE', 'COMBAT_SHIELD', 'ROCKET']);
 const NO_FLASH = new Set(['KNIFE', 'GOD_FIST', 'SMOKE_GRENADE', 'COMBAT_SHIELD']);
+const SHELL_WEAPONS = new Set(['SMG', 'PISTOL', 'SHOTGUN', 'LMG', 'SNIPER', 'MINIGUN']);
 const SWITCH_DURATION_MS = 190;
 const RECOIL_DECAY_PER_SECOND = 10;
+const MAX_ACTIVE_SHELLS = 14;
+const MAX_SURFACE_IMPACTS = 18;
+
+const WEAPON_FEEL = Object.freeze({
+  SMG: Object.freeze({ kick: 0.44, pitch: 0.048, decay: 10.5, flashScale: 0.96, flashMs: 48 }),
+  PISTOL: Object.freeze({ kick: 0.48, pitch: 0.068, decay: 11.0, flashScale: 0.84, flashMs: 46 }),
+  SHOTGUN: Object.freeze({ kick: 0.96, pitch: 0.095, decay: 8.6, flashScale: 1.48, flashMs: 66 }),
+  SNIPER: Object.freeze({ kick: 1.02, pitch: 0.088, decay: 7.8, flashScale: 1.42, flashMs: 64 }),
+  LMG: Object.freeze({ kick: 0.48, pitch: 0.052, decay: 10.2, flashScale: 1.18, flashMs: 52 }),
+  MINIGUN: Object.freeze({ kick: 0.40, pitch: 0.042, decay: 11.0, flashScale: 1.12, flashMs: 44 }),
+  RAILGUN: Object.freeze({ kick: 0.88, pitch: 0.062, decay: 9.4, flashScale: 1.38, flashMs: 68 }),
+  ROCKET: Object.freeze({ kick: 1.08, pitch: 0.082, decay: 7.2, flashScale: 1.55, flashMs: 72 }),
+});
+
+/** Cosmetic-only ray vs AABB slab test so tracers stop at cover/walls and spark cleanly. */
+function intersectBoxRay(ox, oy, oz, dx, dy, dz, minX, maxX, minY, maxY, minZ, maxZ, maxDist) {
+  let tmin = 0;
+  let tmax = maxDist;
+  const axes = [
+    [ox, dx, minX, maxX],
+    [oy, dy, minY, maxY],
+    [oz, dz, minZ, maxZ],
+  ];
+  for (let i = 0; i < 3; i += 1) {
+    const [o, d, lo, hi] = axes[i];
+    if (Math.abs(d) < 1e-7) {
+      if (o < lo || o > hi) return null;
+    } else {
+      let t1 = (lo - o) / d;
+      let t2 = (hi - o) / d;
+      if (t1 > t2) { const tmp = t1; t1 = t2; t2 = tmp; }
+      if (t1 > tmin) tmin = t1;
+      if (t2 < tmax) tmax = t2;
+      if (tmin > tmax) return null;
+    }
+  }
+  return tmin > 0.05 && tmin <= maxDist ? tmin : null;
+}
 
 // Base hip-fire framing per weapon class (compact Krunker-inspired lower-right
 // placement that keeps the center crosshair unobstructed across 60..110 FOV).
@@ -101,8 +140,8 @@ function computeWeaponPose(weaponId, length) {
         mountRotation: [0, 0, 0],
         rightPos: [0.006, -0.052, 0.148],
         rightRot: [0.10, 0, 0.04],
-        leftPos: [-0.008, 0.068, -0.148],
-        leftRot: [0.20, -0.08, -0.20],
+        leftPos: [-0.010, -0.014, -0.142],
+        leftRot: [0.18, -0.06, -0.16],
         leftVisible: true,
       };
     case 'SNIPER':
@@ -110,8 +149,8 @@ function computeWeaponPose(weaponId, length) {
         mountRotation: [0, 0, 0],
         rightPos: [0.004, -0.036, 0.178],
         rightRot: [0.12, 0, 0.04],
-        leftPos: [-0.010, 0.010, -0.205],
-        leftRot: [0.22, -0.08, -0.20],
+        leftPos: [-0.010, -0.008, -0.205],
+        leftRot: [0.20, -0.06, -0.16],
         leftVisible: true,
       };
     case 'LMG':
@@ -121,8 +160,8 @@ function computeWeaponPose(weaponId, length) {
         mountRotation: [0, 0, 0],
         rightPos: [0.006, -0.084, 0.145],
         rightRot: [0.10, 0, 0.04],
-        leftPos: [-0.008, 0.046, -0.192],
-        leftRot: [0.22, -0.08, -0.20],
+        leftPos: [-0.010, -0.018, -0.188],
+        leftRot: [0.20, -0.06, -0.16],
         leftVisible: true,
       };
     case 'ROCKET':
@@ -415,6 +454,14 @@ export class WeaponEffects {
     this.smokeMeshes = new Map();
     this.projectileMeshes = new Map();
     this.impacts = [];
+    this.shells = [];
+    this.surfaceImpacts = [];
+    this.shellRoot = new THREE.Group();
+    this.camera.add(this.shellRoot);
+    this.shellGeometry = null;
+    this.shellMaterial = null;
+    this.surfaceSparkGeometry = null;
+    this.arenaContext = null;
     this.projectileGeometry = new THREE.SphereGeometry(0.10, 8, 6);
     this.projectileMaterial = new THREE.MeshBasicMaterial({ color: '#ffb14a' });
     this.impactGeometry = new THREE.SphereGeometry(1, 10, 8);
@@ -428,6 +475,18 @@ export class WeaponEffects {
     this.weaponId = null;
     this.bundleId = 'RUSHER';
     this.movementAmount = 0;
+    this.strafeInput = 0;
+    this.forwardInput = 0;
+    this.verticalVelocity = 0;
+    this.groundedState = true;
+    this.reducedMotion = false;
+    this.lookSwayX = 0;
+    this.lookSwayY = 0;
+    this.strafeTilt = 0;
+    this.airOffset = 0;
+    this.landingDip = 0;
+    this.stridePhase = 0;
+    this.recoilYaw = 0;
     this.reloadStartedAt = null;
     this.reloadDuration = 900;
     this.flashUntil = 0;
@@ -492,15 +551,15 @@ export class WeaponEffects {
     });
     this.materials.push(sleeve, glove, seam, accent);
 
-    // Unit-height tapered sleeve cylinder stretched dynamically each frame from
-    // the wrist cuff to a camera-lower-edge shoulder/ribcage anchor so forearms
-    // never float or terminate mid-screen during hip-fire, ADS, or reloads.
-    const armGeometry = new THREE.CylinderGeometry(0.023, 0.029, 1.0, 10, 1);
-    const cuffGeometry = new THREE.CylinderGeometry(0.027, 0.025, 0.032, 10);
-    const palmGeometry = new THREE.BoxGeometry(0.024, 0.050, 0.054);
-    const fingerGeometry = new THREE.CapsuleGeometry(0.0068, 0.024, 3, 6);
-    const thumbGeometry = new THREE.CapsuleGeometry(0.0074, 0.024, 3, 6);
-    const knuckleGeometry = new THREE.BoxGeometry(0.008, 0.042, 0.040);
+    // Tapered anatomical sleeve cylinder & structured gauntlet cuff stretched
+    // dynamically each frame from the wrist to a natural lower-right bent-elbow
+    // anchor so forearms look muscular and solid rather than thin rods.
+    const armGeometry = new THREE.CylinderGeometry(0.031, 0.041, 1.0, 12, 1);
+    const cuffGeometry = new THREE.CylinderGeometry(0.034, 0.031, 0.042, 12);
+    const palmGeometry = new THREE.BoxGeometry(0.025, 0.052, 0.056);
+    const fingerGeometry = new THREE.CapsuleGeometry(0.0072, 0.025, 3, 6);
+    const thumbGeometry = new THREE.CapsuleGeometry(0.0078, 0.025, 3, 6);
+    const knuckleGeometry = new THREE.BoxGeometry(0.009, 0.044, 0.042);
     this.geometries.push(
       armGeometry,
       cuffGeometry,
@@ -561,11 +620,26 @@ export class WeaponEffects {
   buildFlash() {
     this.muzzle = new THREE.Object3D();
     this.weaponMount.add(this.muzzle);
-    this.flashMaterial = new THREE.MeshBasicMaterial({ color: '#ffe6a3', transparent: true, opacity: 0.95 });
-    this.flashMesh = new THREE.Mesh(new THREE.SphereGeometry(0.055, 10, 8), this.flashMaterial);
+    this.flashMaterial = new THREE.MeshBasicMaterial({
+      color: '#ffe6a3', transparent: true, opacity: 0.95, side: THREE.DoubleSide, depthWrite: false,
+    });
+    const coreGeo = new THREE.SphereGeometry(0.038, 8, 6);
+    const finGeo = new THREE.PlaneGeometry(0.155, 0.036);
+    const jetGeo = new THREE.ConeGeometry(0.028, 0.13, 6);
+    jetGeo.rotateX(-Math.PI / 2);
+    this.geometries.push(coreGeo, finGeo, jetGeo);
+
+    this.flashMesh = new THREE.Mesh(coreGeo, this.flashMaterial);
+    const finA = new THREE.Mesh(finGeo, this.flashMaterial);
+    const finB = new THREE.Mesh(finGeo, this.flashMaterial);
+    finB.rotation.z = Math.PI / 2;
+    const jet = new THREE.Mesh(jetGeo, this.flashMaterial);
+    jet.position.z = -0.055;
+    this.flashMesh.add(finA, finB, jet);
     this.flashMesh.visible = false;
     this.muzzle.add(this.flashMesh);
-    this.flashLight = new THREE.PointLight('#ffe0a0', 2.6, 2.6, 2);
+
+    this.flashLight = new THREE.PointLight('#ffe0a0', 2.6, 2.8, 2);
     this.flashLight.visible = false;
     this.muzzle.add(this.flashLight);
   }
@@ -607,33 +681,46 @@ export class WeaponEffects {
     if (rawLen > 1e-5) this._armDirTmp.divideScalar(rawLen);
     else this._armDirTmp.set(0, -1, 0);
 
-    cuffMesh.position.copy(this._wristTmp).addScaledVector(this._armDirTmp, 0.014);
+    cuffMesh.position.copy(this._wristTmp).addScaledVector(this._armDirTmp, 0.016);
     cuffMesh.quaternion.setFromUnitVectors(UP_AXIS, this._armDirTmp);
 
-    armMesh.position.copy(this._wristTmp).addScaledVector(this._armDirTmp, len * 0.5 + 0.012);
+    armMesh.position.copy(this._wristTmp).addScaledVector(this._armDirTmp, len * 0.5 + 0.016);
     armMesh.quaternion.copy(cuffMesh.quaternion);
-    armMesh.scale.set(1, len, 1);
+    armMesh.scale.set(0.92, len, 1.06);
   }
 
   syncForearmAnchors() {
     if (!this.rightHandGroup || !this.leftHandGroup) return;
     this.camera.updateMatrixWorld(true);
     this.viewModel.updateMatrixWorld(true);
-    // Camera-local shoulder/ribcage anchors sit below the bottom viewport edge
-    // while staying strictly forward of -0.35m so no limb ever clips the near plane.
+    const ads = this.aimAmount;
+    // Right dominant elbow tucks below the lower-right viewport edge; left
+    // support elbow rises naturally from beneath the weapon rather than
+    // stretching diagonally across center screen. All anchors stay strictly
+    // forward of -0.43 m so no hand mesh ever approaches the near plane.
     this.syncForearmLimb(
       this.rightHandGroup,
       this.rightCuff,
       this.rightArm,
       0.020, -0.008, 0.018,
-      0.36, -0.48, -0.39,
+      0.35 - ads * 0.14, -0.46, -0.44,
     );
+
+    let leftAnchorX = 0.05 - ads * 0.14;
+    let leftAnchorY = -0.46;
+    if (this.weaponId === 'COMBAT_SHIELD') {
+      leftAnchorX = -0.02;
+      leftAnchorY = -0.49;
+    } else if (this.weaponId === 'PISTOL' || this.weaponId === 'SMOKE_GRENADE') {
+      leftAnchorX = 0.11 - ads * 0.12;
+      leftAnchorY = -0.47;
+    }
     this.syncForearmLimb(
       this.leftHandGroup,
       this.leftCuff,
       this.leftArm,
       -0.020, -0.010, 0.018,
-      -0.24, -0.48, -0.42,
+      leftAnchorX, leftAnchorY, -0.45,
     );
   }
 
@@ -670,12 +757,19 @@ export class WeaponEffects {
   resetPresentation() {
     this.reloadStartedAt = null;
     this.recoil = 0;
+    this.recoilYaw = 0;
+    this.lookSwayX = 0;
+    this.lookSwayY = 0;
+    this.strafeTilt = 0;
+    this.airOffset = 0;
+    this.landingDip = 0;
     this.meleeStartedAt = null;
     this.blockingTarget = false;
     this.blockingAmount = 0;
     this.opticalScopeHidden = false;
     this.weaponMount.visible = true;
     this.setVisible(true);
+    this.clearShellsAndSurfaceImpacts();
     if (this.switchTransition) {
       const { from, to } = this.switchTransition;
       from?.removeFromParent();
@@ -813,6 +907,191 @@ export class WeaponEffects {
     this.movementAmount = Math.max(0, Math.min(1, (Number(speed) || 0) / 7.2));
   }
 
+  /**
+   * High-frequency local movement & look feed for responsive 1P weapon inertia,
+   * directional banking, airborne float, and landing compression.
+   */
+  setMotionState({
+    speed = 0,
+    forward = 0,
+    strafe = 0,
+    vy = 0,
+    grounded = true,
+    lookYawDelta = 0,
+    lookPitchDelta = 0,
+    reducedMotion = false,
+  } = {}) {
+    const targetMove = Math.max(0, Math.min(1, (Number(speed) || 0) / 7.2));
+    this.movementAmount += (targetMove - this.movementAmount) * 0.35;
+    this.forwardInput = Math.max(-1, Math.min(1, Number(forward) || 0));
+    this.strafeInput = Math.max(-1, Math.min(1, Number(strafe) || 0));
+    this.verticalVelocity = Number(vy) || 0;
+    this.groundedState = grounded !== false;
+    this.reducedMotion = reducedMotion === true;
+
+    const swayScale = this.reducedMotion ? 0.25 : 1;
+    this.lookSwayX = Math.max(-0.022, Math.min(0.022, this.lookSwayX + (Number(lookYawDelta) || 0) * 0.22 * swayScale));
+    this.lookSwayY = Math.max(-0.018, Math.min(0.018, this.lookSwayY + (Number(lookPitchDelta) || 0) * 0.20 * swayScale));
+  }
+
+  triggerLanding(impactSpeed = 5) {
+    const scale = this.reducedMotion ? 0.25 : 1;
+    const impulse = Math.min(0.036, Math.max(0.008, Math.abs(Number(impactSpeed) || 0) * 0.0038)) * scale;
+    this.landingDip = Math.max(this.landingDip, impulse);
+  }
+
+  /**
+   * Optional arena reference used solely to clip cosmetic tracers at cover/walls
+   * and place cosmetic impact sparks. Never influences server hit detection.
+   */
+  setArenaContext(context) {
+    this.arenaContext = context ?? null;
+  }
+
+  resolveCosmeticRayHit(origin, direction, maxDistance) {
+    const ctx = this.arenaContext;
+    if (!ctx) return null;
+    const map = typeof ctx.getMap === 'function' ? ctx.getMap() : ctx.map;
+    if (!map?.bounds) return null;
+
+    let closest = maxDistance;
+    let hitSurface = false;
+    const ox = origin.x;
+    const oy = origin.y;
+    const oz = origin.z;
+    const dx = direction.x;
+    const dy = direction.y;
+    const dz = direction.z;
+
+    const coverList = typeof ctx.getCover === 'function' ? ctx.getCover() : map.cover;
+    if (Array.isArray(coverList)) {
+      for (let i = 0; i < coverList.length; i += 1) {
+        const b = coverList[i];
+        if (!b || b.destroyed) continue;
+        const hw = b.width * 0.5;
+        const hd = b.depth * 0.5;
+        const baseY = Number.isFinite(b.y) ? b.y - b.height * 0.5 : 0;
+        const t = intersectBoxRay(
+          ox, oy, oz, dx, dy, dz,
+          b.x - hw, b.x + hw, baseY, baseY + b.height, b.z - hd, b.z + hd,
+          closest,
+        );
+        if (t !== null && t < closest) {
+          closest = t;
+          hitSurface = true;
+        }
+      }
+    }
+
+    // Floor y = 0
+    if (dy < -1e-5 && oy > 0) {
+      const tf = -oy / dy;
+      if (tf > 0.05 && tf < closest) {
+        closest = tf;
+        hitSurface = true;
+      }
+    }
+
+    // Perimeter inner walls
+    const limX = map.bounds.halfWidth - (map.bounds.wallThickness ?? 1) * 0.5;
+    const limZ = map.bounds.halfDepth - (map.bounds.wallThickness ?? 1) * 0.5;
+    const wallH = map.bounds.wallHeight ?? 6;
+    if (Math.abs(dx) > 1e-5) {
+      const targetX = dx > 0 ? limX : -limX;
+      const tw = (targetX - ox) / dx;
+      const hy = oy + dy * tw;
+      const hz = oz + dz * tw;
+      if (tw > 0.05 && tw < closest && hy >= 0 && hy <= wallH && Math.abs(hz) <= limZ + 0.5) {
+        closest = tw;
+        hitSurface = true;
+      }
+    }
+    if (Math.abs(dz) > 1e-5) {
+      const targetZ = dz > 0 ? limZ : -limZ;
+      const tw = (targetZ - oz) / dz;
+      const hy = oy + dy * tw;
+      const hx = ox + dx * tw;
+      if (tw > 0.05 && tw < closest && hy >= 0 && hy <= wallH && Math.abs(hx) <= limX + 0.5) {
+        closest = tw;
+        hitSurface = true;
+      }
+    }
+
+    if (!hitSurface) return null;
+    return {
+      distance: closest,
+      point: new THREE.Vector3(ox + dx * closest, oy + dy * closest, oz + dz * closest),
+    };
+  }
+
+  spawnSurfaceImpact(point, color = '#ffd27d', now = performance.now()) {
+    if (!point) return;
+    if (!this.surfaceSparkGeometry) {
+      this.surfaceSparkGeometry = new THREE.OctahedronGeometry(0.065, 0);
+    }
+    if (this.surfaceImpacts.length >= MAX_SURFACE_IMPACTS) {
+      const oldest = this.surfaceImpacts.shift();
+      this.scene.remove(oldest.mesh);
+      oldest.mesh.material.dispose();
+    }
+    const material = new THREE.MeshBasicMaterial({
+      color, transparent: true, opacity: 0.9, depthWrite: false,
+    });
+    const mesh = new THREE.Mesh(this.surfaceSparkGeometry, material);
+    mesh.position.copy(point);
+    mesh.rotation.set(Math.random() * 3.14, Math.random() * 3.14, 0);
+    this.scene.add(mesh);
+    this.surfaceImpacts.push({ mesh, start: now, lifeMs: 185 });
+  }
+
+  ejectShellCasing(now = performance.now(), weaponId = this.weaponId) {
+    if (this.reducedMotion || !SHELL_WEAPONS.has(weaponId) || !this.viewModel.visible) return;
+    if (!this.shellGeometry) {
+      this.shellGeometry = new THREE.CylinderGeometry(0.0048, 0.0048, 0.022, 6);
+      this.shellMaterial = new THREE.MeshBasicMaterial({
+        color: '#e8bc62', transparent: true, opacity: 0.94,
+      });
+    }
+    if (this.shells.length >= MAX_ACTIVE_SHELLS) {
+      const oldest = this.shells.shift();
+      this.shellRoot.remove(oldest.mesh);
+    }
+
+    const portWorld = this.weaponMount.localToWorld(new THREE.Vector3(0.032, 0.024, 0.02));
+    const origin = this.camera.worldToLocal(portWorld);
+    const velocity = new THREE.Vector3(
+      1.15 + Math.random() * 0.45,
+      0.95 + Math.random() * 0.35,
+      0.18 + Math.random() * 0.24,
+    );
+
+    const mesh = new THREE.Mesh(this.shellGeometry, this.shellMaterial);
+    mesh.position.copy(origin);
+    mesh.rotation.set(Math.random() * 3, Math.random() * 3, Math.random() * 3);
+    mesh.renderOrder = 1000;
+    mesh.frustumCulled = false;
+    this.shellRoot.add(mesh);
+    this.shells.push({
+      mesh,
+      velocity,
+      spinX: 14 + Math.random() * 10,
+      spinZ: -12 - Math.random() * 10,
+      expiresAt: now + 390,
+    });
+  }
+
+  clearShellsAndSurfaceImpacts() {
+    for (const s of this.shells) {
+      this.shellRoot.remove(s.mesh);
+    }
+    this.shells.length = 0;
+    for (const imp of this.surfaceImpacts) {
+      this.scene.remove(imp.mesh);
+      imp.mesh.material.dispose();
+    }
+    this.surfaceImpacts.length = 0;
+  }
+
   startReload(duration = 900) {
     this.reloadStartedAt = performance.now();
     this.reloadDuration = Math.max(300, Math.min(4_000, Number(duration) || 900));
@@ -835,9 +1114,47 @@ export class WeaponEffects {
       const direction = authoritativeShot?.direction
         ? new THREE.Vector3(authoritativeShot.direction.x, authoritativeShot.direction.y, authoritativeShot.direction.z).normalize()
         : new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion).normalize();
-      const distance = weaponId === 'ROCKET' ? 34 : 58;
-      const end = start.clone().addScaledVector(direction, distance);
-      this.addTracer(start, end, tracerColor, 100, 0.92, now);
+      const maxDistance = weaponId === 'ROCKET' ? 34 : 58;
+      const surfaceHit = this.resolveCosmeticRayHit(start, direction, maxDistance);
+      const end = surfaceHit
+        ? surfaceHit.point
+        : start.clone().addScaledVector(direction, maxDistance);
+      const lifeMs = weaponId === 'RAILGUN' || weaponId === 'SNIPER' ? 145 : 100;
+      this.addTracer(start, end, tracerColor, lifeMs, 0.92, now);
+      if (surfaceHit) {
+        this.spawnSurfaceImpact(surfaceHit.point, tracerColor, now);
+      }
+
+      // Cosmetic multi-pellet buckshot streaks for Shotgun visual punch in live arenas.
+      if (weaponId === 'SHOTGUN' && !authoritativeShot && this.arenaContext) {
+        const spreadOffsets = [
+          [0.028, 0.016],
+          [-0.026, 0.018],
+          [0.018, -0.024],
+        ];
+        const camRight = new THREE.Vector3(1, 0, 0).applyQuaternion(this.camera.quaternion);
+        const camUp = new THREE.Vector3(0, 1, 0).applyQuaternion(this.camera.quaternion);
+        for (const [ox, oy] of spreadOffsets) {
+          const pelletDir = direction.clone()
+            .addScaledVector(camRight, ox)
+            .addScaledVector(camUp, oy)
+            .normalize();
+          const pelletHit = this.resolveCosmeticRayHit(start, pelletDir, 28);
+          const pelletEnd = pelletHit ? pelletHit.point : start.clone().addScaledVector(pelletDir, 24);
+          this.addTracer(start, pelletEnd, tracerColor, 85, 0.62, now);
+          if (pelletHit) this.spawnSurfaceImpact(pelletHit.point, '#ffd596', now);
+        }
+      }
+    } else if (weaponId === 'PISTOL') {
+      // Subtle surface impact spark on Pistol hits against walls/cover without heavy tracer beam.
+      const start = authoritativeShot?.origin
+        ? new THREE.Vector3(authoritativeShot.origin.x, authoritativeShot.origin.y, authoritativeShot.origin.z)
+        : this.camera.getWorldPosition(new THREE.Vector3());
+      const direction = authoritativeShot?.direction
+        ? new THREE.Vector3(authoritativeShot.direction.x, authoritativeShot.direction.y, authoritativeShot.direction.z).normalize()
+        : new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion).normalize();
+      const surfaceHit = this.resolveCosmeticRayHit(start, direction, 48);
+      if (surfaceHit) this.spawnSurfaceImpact(surfaceHit.point, '#ffe0a3', now);
     }
 
     if (present) this.presentFire(now, weaponId, bundleId);
@@ -849,16 +1166,18 @@ export class WeaponEffects {
       return;
     }
     if (!NO_FLASH.has(weaponId)) {
+      const feel = WEAPON_FEEL[weaponId] ?? WEAPON_FEEL.SMG;
       const tracerColor = BUNDLE_TRACER_COLOR[bundleId] ?? BUNDLE_TRACER_COLOR.RUSHER;
       this.flashMaterial.color.set(tracerColor);
       this.flashLight.color.set(tracerColor);
-      this.flashUntil = now + 55;
+      this.flashMesh.rotation.z = Math.random() * Math.PI;
+      this.flashMesh.scale.setScalar(feel.flashScale);
+      this.flashUntil = now + feel.flashMs;
       this.flashMesh.visible = true;
       this.flashLight.visible = true;
-      const kick = weaponId === 'ROCKET'
-        ? 1.05
-        : (weaponId === 'SHOTGUN' || weaponId === 'SNIPER' || weaponId === 'RAILGUN' ? 0.88 : 0.44);
-      this.recoil = Math.min(1.4, this.recoil + kick);
+      this.recoil = Math.min(1.45, this.recoil + feel.kick);
+      this.recoilYaw = (Math.random() - 0.5) * 0.016 * feel.kick;
+      this.ejectShellCasing(now, weaponId);
     }
   }
 
@@ -879,8 +1198,12 @@ export class WeaponEffects {
     if (ray.lengthSq() < 0.5) return;
     ray.normalize();
     const start = new THREE.Vector3(origin.x, origin.y, origin.z);
-    const end = start.clone().addScaledVector(ray, weaponId === 'ROCKET' ? 34 : 58);
-    this.addTracer(start, end, BUNDLE_TRACER_COLOR[bundleId] ?? BUNDLE_TRACER_COLOR.RUSHER, 100, 0.8, now);
+    const maxDist = weaponId === 'ROCKET' ? 34 : 58;
+    const surfaceHit = this.resolveCosmeticRayHit(start, ray, maxDist);
+    const end = surfaceHit ? surfaceHit.point : start.clone().addScaledVector(ray, maxDist);
+    const color = BUNDLE_TRACER_COLOR[bundleId] ?? BUNDLE_TRACER_COLOR.RUSHER;
+    this.addTracer(start, end, color, 100, 0.8, now);
+    if (surfaceHit) this.spawnSurfaceImpact(surfaceHit.point, color, now);
   }
 
   updateProjectiles(projectiles = [], now = performance.now()) {
@@ -933,6 +1256,7 @@ export class WeaponEffects {
       impact.mesh.material.dispose();
     }
     this.impacts.length = 0;
+    this.clearShellsAndSurfaceImpacts();
   }
 
   updateSmokeClouds(clouds = []) {
@@ -1005,41 +1329,93 @@ export class WeaponEffects {
       }
     }
 
+    for (let index = this.surfaceImpacts.length - 1; index >= 0; index -= 1) {
+      const imp = this.surfaceImpacts[index];
+      const progress = Math.max(0, (now - imp.start) / imp.lifeMs);
+      if (progress >= 1) {
+        this.scene.remove(imp.mesh);
+        imp.mesh.material.dispose();
+        this.surfaceImpacts.splice(index, 1);
+      } else {
+        imp.mesh.scale.setScalar(0.55 + progress * 1.45);
+        imp.mesh.material.opacity = (1 - progress) * 0.88;
+      }
+    }
+    for (let index = this.shells.length - 1; index >= 0; index -= 1) {
+      const shell = this.shells[index];
+      if (now >= shell.expiresAt) {
+        this.shellRoot.remove(shell.mesh);
+        this.shells.splice(index, 1);
+      } else {
+        shell.velocity.y -= 9.8 * delta;
+        shell.mesh.position.addScaledVector(shell.velocity, delta);
+        shell.mesh.rotation.x += shell.spinX * delta;
+        shell.mesh.rotation.z += shell.spinZ * delta;
+      }
+    }
+
     const flashVisible = now < this.flashUntil;
     this.flashMesh.visible = flashVisible;
     this.flashLight.visible = flashVisible;
 
-    const moving = this.movementAmount;
-    const bob = Math.sin(now * 0.011) * 0.011 * moving;
-    const sway = Math.cos(now * 0.0055) * 0.006 * moving;
+    const motionScale = this.reducedMotion ? 0.22 : 1;
+    const moving = this.groundedState ? this.movementAmount : this.movementAmount * 0.22;
+    this.stridePhase += delta * (4.2 + moving * 7.0) * (moving > 0.04 ? 1 : 0);
+
+    // Subtle organic idle breath + rhythmic grounded stride figure-8.
+    const tSec = now * 0.001;
+    const idleX = Math.sin(tSec * 1.55) * 0.0016 * motionScale;
+    const idleY = Math.cos(tSec * 3.1) * 0.0020 * motionScale;
+    const bob = Math.abs(Math.sin(this.stridePhase)) * -0.0115 * moving * motionScale;
+    const sway = Math.sin(this.stridePhase) * 0.0072 * moving * motionScale;
+
+    // Smoothly decay mouse-look lag, strafe bank, airborne float, and landing dip.
+    const damp = 1 - Math.exp(-13 * delta);
+    this.lookSwayX += (0 - this.lookSwayX) * damp;
+    this.lookSwayY += (0 - this.lookSwayY) * damp;
+    const targetStrafeTilt = -this.strafeInput * 0.026 * motionScale;
+    this.strafeTilt += (targetStrafeTilt - this.strafeTilt) * (1 - Math.exp(-11 * delta));
+    const targetAirOffset = this.groundedState
+      ? 0
+      : Math.max(-0.016, Math.min(0.016, -this.verticalVelocity * 0.0028 * motionScale));
+    this.airOffset += (targetAirOffset - this.airOffset) * (1 - Math.exp(-10 * delta));
+    this.landingDip *= Math.exp(-15 * delta);
+    if (this.landingDip < 1e-4) this.landingDip = 0;
+
     const reloadProgress = this.reloadStartedAt === null
       ? 0
       : Math.max(0, Math.min(1, (now - this.reloadStartedAt) / this.reloadDuration));
     if (reloadProgress >= 1) this.reloadStartedAt = null;
     const reloadWave = this.reloadStartedAt === null ? 0 : Math.sin(reloadProgress * Math.PI);
-    const reloadDip = reloadWave * 0.12;
+    const reloadDip = reloadWave * 0.125;
 
-    this.recoil = Math.max(0, this.recoil - RECOIL_DECAY_PER_SECOND * delta);
+    const feel = WEAPON_FEEL[this.weaponId] ?? WEAPON_FEEL.SMG;
+    this.recoil = Math.max(0, this.recoil - (feel.decay ?? RECOIL_DECAY_PER_SECOND) * delta);
+    this.recoilYaw *= Math.exp(-14 * delta);
 
     const base = this.basePosition ?? { x: 0.26, y: -0.22, z: -0.62 };
     const aim = this.aimProfile?.offset ?? [base.x, base.y, base.z];
     const amount = this.aimAmount;
+    const hipSwayFactor = 1 - amount * 0.88;
     this.blockingAmount += ((this.blockingTarget ? 1 : 0) - this.blockingAmount) * (1 - Math.exp(-14 * delta));
     const meleeProgress = this.meleeStartedAt === null ? 1 : (now - this.meleeStartedAt) / 240;
     const swing = meleeProgress >= 0 && meleeProgress < 1 ? Math.sin(meleeProgress * Math.PI) : 0;
     const slashArc = meleeProgress >= 0 && meleeProgress < 1 ? Math.sin(meleeProgress * Math.PI * 2) : 0;
     if (meleeProgress >= 1) this.meleeStartedAt = null;
 
-    this.viewModel.position.x = base.x + (aim[0] - base.x) * amount + sway * (1 - amount * 0.88)
+    this.viewModel.position.x = base.x + (aim[0] - base.x) * amount
+      + (sway + idleX + this.lookSwayX) * hipSwayFactor
       - this.recoil * 0.003 - this.blockingAmount * 0.13 - swing * 0.07;
-    this.viewModel.position.y = base.y + (aim[1] - base.y) * amount + bob * (1 - amount * 0.88)
-      - reloadDip + this.recoil * 0.011 + this.blockingAmount * 0.095 + swing * 0.025;
-    this.viewModel.position.z = base.z + (aim[2] - base.z) * amount + reloadDip * 0.42
-      + this.recoil * 0.052 + this.blockingAmount * 0.035 - swing * 0.145;
+    this.viewModel.position.y = base.y + (aim[1] - base.y) * amount
+      + (bob + idleY + this.lookSwayY + this.airOffset) * hipSwayFactor
+      - this.landingDip - reloadDip + this.recoil * 0.012 + this.blockingAmount * 0.095 + swing * 0.025;
+    this.viewModel.position.z = base.z + (aim[2] - base.z) * amount
+      + reloadDip * 0.42 + this.recoil * 0.052 + this.blockingAmount * 0.035 - swing * 0.145;
 
-    this.viewModel.rotation.z = Math.sin(now * 0.0055) * 0.013 * moving * (1 - amount) - swing * 0.42;
-    this.viewModel.rotation.x = -0.015 * (1 - amount) + reloadDip * 0.5 - this.recoil * 0.055 + swing * 0.44;
-    this.viewModel.rotation.y = -0.035 * (1 - amount) + slashArc * 0.18;
+    const pitchKick = this.recoil * (feel.pitch ?? 0.055);
+    this.viewModel.rotation.z = (Math.sin(this.stridePhase) * 0.011 * moving * motionScale + this.strafeTilt - this.lookSwayX * 0.7) * (1 - amount) - swing * 0.42;
+    this.viewModel.rotation.x = -0.015 * (1 - amount) + reloadDip * 0.52 - pitchKick - this.landingDip * 1.1 + swing * 0.44;
+    this.viewModel.rotation.y = -0.035 * (1 - amount) - this.lookSwayX * 0.65 * (1 - amount) + this.recoilYaw + slashArc * 0.18;
 
     // Blend weaponMount rest orientation cleanly to zero as ADS approaches 1,
     // and animate the cohesive support hand toward the magwell during reloads.
@@ -1087,9 +1463,24 @@ export class WeaponEffects {
 
   dispose() {
     this.clearProjectiles();
+    if (this.shellRoot) {
+      this.camera.remove(this.shellRoot);
+    }
     this.projectileGeometry.dispose();
     this.projectileMaterial.dispose();
     this.impactGeometry.dispose();
+    if (this.shellGeometry) {
+      this.shellGeometry.dispose();
+      this.shellGeometry = null;
+    }
+    if (this.shellMaterial) {
+      this.shellMaterial.dispose();
+      this.shellMaterial = null;
+    }
+    if (this.surfaceSparkGeometry) {
+      this.surfaceSparkGeometry.dispose();
+      this.surfaceSparkGeometry = null;
+    }
     for (const tracer of this.tracers) {
       this.scene.remove(tracer.line);
       tracer.line.geometry.dispose();
@@ -1106,7 +1497,6 @@ export class WeaponEffects {
     for (const material of this.materials) material.dispose();
     for (const material of this.viewMaterialCache.values()) material.dispose();
     this.viewMaterialCache.clear();
-    this.flashMesh.geometry.dispose();
     this.flashMaterial.dispose();
     this.camera.remove(this.viewModel);
     if (this.viewModelLight) this.camera.remove(this.viewModelLight);

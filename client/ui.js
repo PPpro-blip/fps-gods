@@ -78,7 +78,10 @@ export class GameUI {
     this.scoreboardSignature = null;
     this.lastHudPlayer = null;
     this.lastHealth = null;
+    this.lastAmmoCount = null;
     this.damageTimer = null;
+    this.elimBannerTimer = null;
+    this.ammoPopTimer = null;
     this.fps = 0;
     this.startedAt = Date.now();
 
@@ -111,7 +114,7 @@ export class GameUI {
       'profile-callsign-input', 'profile-message', 'settings-reset',
       'setting-sensitivity', 'setting-sensitivity-value', 'setting-fov',
       'setting-fov-value', 'setting-volume', 'setting-volume-value', 'setting-bot-difficulty',
-      'setting-quality', 'setting-crosshair', 'setting-invert', 'setting-fps', 'onboarding',
+      'setting-quality', 'setting-crosshair', 'setting-invert', 'setting-reduced-motion', 'setting-fps', 'onboarding',
       'onboarding-identity', 'onboarding-loadout', 'step-one', 'step-two',
       'player-name', 'callsign-error', 'callsign-continue-button', 'onboarding-bundles',
       'bundle-error', 'bundle-back-button', 'bundle-continue-button', 'lobby-shell',
@@ -121,7 +124,7 @@ export class GameUI {
       'hud-arena-name', 'hud-bot-difficulty', 'map-grid', 'map-picker', 'map-picker-note',
       'lobby-arena', 'lobby-map-name', 'lobby-map-grid',
       'lobby-map-note', 'target-kills', 'alive-count', 'ping-value',
-      'hud-credits-pill', 'hud-credits-value', 'hud-reward-pop',
+      'hud-credits-pill', 'hud-credits-value', 'hud-reward-pop', 'hud-elim-banner',
       'ads-scope-overlay', 'ads-scope-label', 'hud-loadout-strip',
       'fps-value', 'kill-feed', 'name-tags', 'crosshair', 'health-value', 'health-fill',
       'health-state', 'shield-state', 'spawn-note', 'weapon-name', 'weapon-bundle',
@@ -205,6 +208,9 @@ export class GameUI {
     el['setting-invert'].addEventListener('change', () => {
       this.emitSettings({ invertY: el['setting-invert'].checked });
     });
+    el['setting-reduced-motion']?.addEventListener('change', () => {
+      this.emitSettings({ reducedMotion: el['setting-reduced-motion'].checked });
+    });
     el['setting-fps'].addEventListener('change', () => {
       this.emitSettings({ showFps: el['setting-fps'].checked });
     });
@@ -238,6 +244,7 @@ export class GameUI {
     el['setting-quality'].value = QUALITY_PRESETS[s.quality] ? s.quality : 'high';
     el['setting-crosshair'].value = CROSSHAIR_STYLES.includes(s.crosshair) ? s.crosshair : 'standard';
     el['setting-invert'].checked = s.invertY === true;
+    if (el['setting-reduced-motion']) el['setting-reduced-motion'].checked = s.reducedMotion === true;
     el['setting-fps'].checked = s.showFps === true;
     el.crosshair.dataset.crosshair = s.crosshair;
     el['fps-value'].hidden = !s.showFps;
@@ -1283,6 +1290,7 @@ export class GameUI {
       this.el['death-panel'].hidden = true;
       this.el['weapon-wheel'].hidden = true;
       this.el['hud-reward-pop'].hidden = true;
+      if (this.el['hud-elim-banner']) this.el['hud-elim-banner'].hidden = true;
     }
   }
 
@@ -1323,9 +1331,12 @@ export class GameUI {
       slot.className = `loadout-slot${weapon.id === activeWeaponId ? ' is-active' : ''}`;
       const num = document.createElement('kbd');
       num.textContent = String(idx + 1);
+      const glyph = document.createElement('em');
+      glyph.className = 'loadout-slot-glyph';
+      glyph.textContent = weapon.icon ?? '';
       const name = document.createElement('strong');
       name.textContent = weapon.name;
-      slot.append(num, name);
+      slot.append(num, glyph, name);
       strip.append(slot);
     });
   }
@@ -1466,6 +1477,14 @@ export class GameUI {
     this.el['weapon-name'].textContent = player.currentWeaponName ?? weapon?.name ?? weaponId;
     this.el['weapon-bundle'].textContent = BUNDLE_BY_ID[player.bundleId]?.name ?? 'BUNDLE';
     this.el['ammo-mode'].textContent = player.auto ? 'AUTO' : 'SEMI';
+    const currentAmmo = player.unlimitedAmmo || noMagazine ? null : (player.ammo ?? 0);
+    if (currentAmmo !== null && this.lastAmmoCount !== null && currentAmmo < this.lastAmmoCount) {
+      this.el['ammo-value'].classList.add('is-pop');
+      window.clearTimeout(this.ammoPopTimer);
+      this.ammoPopTimer = window.setTimeout(() => this.el['ammo-value']?.classList.remove('is-pop'), 95);
+    }
+    this.lastAmmoCount = currentAmmo;
+
     this.el['ammo-value'].textContent = player.unlimitedAmmo ? '∞' : noMagazine ? '—' : String(player.ammo ?? 0);
     this.el['ammo-total'].textContent = player.unlimitedAmmo
       ? '∞'
@@ -1473,8 +1492,11 @@ export class GameUI {
         ? '—'
         : String(player.totalAmmo ?? ((player.ammo ?? 0) + (player.reserveAmmo ?? 0)));
 
+    const lowAmmo = !player.unlimitedAmmo && !noMagazine && player.maxAmmo > 0
+      && (player.ammo ?? 0) > 0 && (player.ammo / player.maxAmmo) <= 0.25;
     this.el.ammoWidget.classList.toggle('is-reloading', Boolean(player.reloading));
     this.el.ammoWidget.classList.toggle('is-overheated', Boolean(player.overheated));
+    this.el.ammoWidget.classList.toggle('is-low', lowAmmo);
     this.el.ammoWidget.classList.toggle(
       'is-empty',
       !player.unlimitedAmmo && !noMagazine && (player.ammo ?? 0) <= 0,
@@ -1616,15 +1638,54 @@ export class GameUI {
   showHitMarker(hit) {
     if (!hit?.hit) return;
     const crosshair = this.el.crosshair;
-    crosshair.classList.remove('is-hit', 'is-kill', 'is-headshot');
-    if (hit.killed) crosshair.classList.add('is-kill');
-    else crosshair.classList.add('is-hit');
-    if (hit.headshot) crosshair.classList.add('is-headshot');
+    crosshair.classList.remove('is-hit', 'is-kill', 'is-headshot', 'is-blocked');
+    if (hit.protected || hit.blockedByShield) {
+      crosshair.classList.add('is-blocked');
+    } else if (hit.killed) {
+      crosshair.classList.add('is-kill');
+    } else {
+      crosshair.classList.add('is-hit');
+    }
+    if (hit.headshot && !hit.protected && !hit.blockedByShield) {
+      crosshair.classList.add('is-headshot');
+    }
     window.clearTimeout(this.hitMarkerTimer);
     this.hitMarkerTimer = window.setTimeout(
-      () => crosshair.classList.remove('is-hit', 'is-kill', 'is-headshot'),
-      180,
+      () => crosshair.classList.remove('is-hit', 'is-kill', 'is-headshot', 'is-blocked'),
+      hit.killed ? 240 : 180,
     );
+  }
+
+  /**
+   * Compact authoritative elimination banner triggered strictly by server
+   * `KILL_FEED_UPDATE` when `entry.killerId === localId`.
+   */
+  showEliminationBanner(entry) {
+    const banner = this.el['hud-elim-banner'];
+    if (!banner || !entry?.victimName) return;
+    banner.replaceChildren();
+    const kicker = document.createElement('span');
+    kicker.className = 'elim-kicker';
+    kicker.textContent = 'ELIMINATED';
+    const victim = document.createElement('strong');
+    victim.className = 'elim-victim';
+    victim.textContent = entry.victimName;
+    banner.append(kicker, victim);
+    if (entry.headshot) {
+      const hs = document.createElement('em');
+      hs.className = 'elim-headshot';
+      hs.textContent = 'HEADSHOT';
+      banner.append(hs);
+    }
+    banner.hidden = false;
+    banner.classList.remove('is-active');
+    void banner.offsetWidth;
+    banner.classList.add('is-active');
+    window.clearTimeout(this.elimBannerTimer);
+    this.elimBannerTimer = window.setTimeout(() => {
+      banner.classList.remove('is-active');
+      banner.hidden = true;
+    }, 1_650);
   }
 
   showGameEnd(data, localId = this.selfId) {
@@ -1852,6 +1913,8 @@ export class GameUI {
     window.clearTimeout(this.hitMarkerTimer);
     window.clearTimeout(this.damageTimer);
     window.clearTimeout(this.rewardPopTimer);
+    window.clearTimeout(this.elimBannerTimer);
+    window.clearTimeout(this.ammoPopTimer);
     for (const timers of this.feedTimers.values()) timers.forEach((timer) => window.clearTimeout(timer));
     this.feedTimers.clear();
   }

@@ -84,6 +84,46 @@ function botWaypointDuration() {
     + Math.random() * (BOT.maximumWaypointTimeMs - BOT.minimumWaypointTimeMs);
 }
 
+/**
+ * Find a walkable pocket on the sheltered side of a nearby cover block away
+ * from `threat`, so hurt or reloading bots duck behind real cover instead of
+ * standing exposed in open lanes. Runs in O(cover.length) with zero allocation
+ * pressure at the 10 Hz bot think cadence.
+ */
+function findShelteredCoverPoint(bot, threat, map, cover) {
+  if (!Array.isArray(cover) || cover.length === 0 || !threat) return null;
+  const maxX = map.bounds.halfWidth - map.bounds.wallThickness / 2 - PLAYER.radius - 0.6;
+  const maxZ = map.bounds.halfDepth - map.bounds.wallThickness / 2 - PLAYER.radius - 0.6;
+  let bestPoint = null;
+  let bestScore = Infinity;
+
+  for (let i = 0; i < cover.length; i += 1) {
+    const block = cover[i];
+    if (!block || block.destroyed || block.height < 1.1) continue;
+    const distToBot = Math.hypot(block.x - bot.x, block.z - bot.z);
+    if (distToBot > 12.5) continue;
+
+    let awayX = block.x - threat.x;
+    let awayZ = block.z - threat.z;
+    const awayLen = Math.hypot(awayX, awayZ);
+    if (awayLen < 0.25) continue;
+    awayX /= awayLen;
+    awayZ /= awayLen;
+
+    const standOff = Math.max(block.width, block.depth) * 0.5 + PLAYER.radius + 0.65;
+    const candX = clamp(block.x + awayX * standOff, -maxX, maxX);
+    const candZ = clamp(block.z + awayZ * standOff, -maxZ, maxZ);
+    if (collidesWithCover(candX, candZ, 0, cover)) continue;
+
+    const score = distToBot - Math.min(2.2, block.height) * 0.6;
+    if (score < bestScore) {
+      bestScore = score;
+      bestPoint = { x: candX, z: candZ };
+    }
+  }
+  return bestPoint;
+}
+
 function createWeaponState(weapon, now) {
   return {
     ammo: weapon.magSize,
@@ -571,30 +611,80 @@ export class GameState {
           1.45,
         );
 
-        const toWaypointX = brain.waypoint.x - bot.x;
-        const toWaypointZ = brain.waypoint.z - bot.z;
-        const waypointDistance = Math.hypot(toWaypointX, toWaypointZ);
-        const desiredX = waypointDistance > BOT.waypointReachDistance ? toWaypointX / waypointDistance : 0;
-        const desiredZ = waypointDistance > BOT.waypointReachDistance ? toWaypointZ / waypointDistance : 0;
+        const weapon = this.ensureBotCombatWeapon(bot, chosen.distance, now);
         const forwardX = -Math.sin(bot.yaw);
         const forwardZ = -Math.cos(bot.yaw);
         const rightX = Math.cos(bot.yaw);
         const rightZ = -Math.sin(bot.yaw);
 
-        let forwardIntent = desiredX * forwardX + desiredZ * forwardZ;
-        let strafeIntent = desiredX * rightX + desiredZ * rightZ;
+        // Tactical positioning: hurt, reloading, or burst-pausing bots seek the
+        // sheltered side of nearby cover; otherwise they space according to
+        // weapon role and weave laterally instead of clumping or freezing.
+        const needsShelter = Boolean(bot.reloading)
+          || bot.health <= Math.max(35, preset.retreatHealthThreshold)
+          || (now < brain.burstCooldownUntil && preset.id !== 'easy');
+        const shelterPoint = needsShelter
+          ? findShelteredCoverPoint(bot, target, this.map, this.cover)
+          : null;
 
-        if (now >= brain.nextStrafeFlipAt) {
-          brain.strafeSign *= -1;
-          brain.nextStrafeFlipAt = now + randomBetween(1_350, 2_450);
+        let forwardIntent = 0;
+        let strafeIntent = 0;
+
+        if (shelterPoint) {
+          const sx = shelterPoint.x - bot.x;
+          const sz = shelterPoint.z - bot.z;
+          const sDist = Math.hypot(sx, sz);
+          if (sDist > 0.45) {
+            const nx = sx / sDist;
+            const nz = sz / sDist;
+            forwardIntent = nx * forwardX + nz * forwardZ;
+            strafeIntent = nx * rightX + nz * rightZ;
+          }
+        } else {
+          const toWaypointX = brain.waypoint.x - bot.x;
+          const toWaypointZ = brain.waypoint.z - bot.z;
+          const waypointDistance = Math.hypot(toWaypointX, toWaypointZ);
+          const desiredX = waypointDistance > BOT.waypointReachDistance ? toWaypointX / waypointDistance : 0;
+          const desiredZ = waypointDistance > BOT.waypointReachDistance ? toWaypointZ / waypointDistance : 0;
+          forwardIntent = (desiredX * forwardX + desiredZ * forwardZ) * 0.35;
+          strafeIntent = (desiredX * rightX + desiredZ * rightZ) * 0.35;
+
+          if (now >= brain.nextStrafeFlipAt) {
+            brain.strafeSign *= -1;
+            brain.nextStrafeFlipAt = now + randomBetween(1_250, 2_350);
+          }
+          if (Math.abs(strafeIntent) < 0.28) {
+            strafeIntent = brain.strafeSign * preset.strafeStrength;
+          }
+
+          const wid = weapon?.id ?? bot.currentWeaponId;
+          const closeRole = wid === 'SHOTGUN' || wid === 'KNIFE' || wid === 'GOD_FIST';
+          const longRole = wid === 'SNIPER' || wid === 'RAILGUN' || wid === 'LMG';
+          const minRange = closeRole
+            ? 3.8
+            : (longRole ? Math.max(10.5, preset.preferredMinRange) : preset.preferredMinRange * 0.78);
+          const maxRange = closeRole
+            ? 8.8
+            : (longRole ? Math.max(19.5, preset.preferredMaxRange) : preset.preferredMaxRange);
+
+          if (bot.health <= preset.retreatHealthThreshold || chosen.distance < minRange) {
+            forwardIntent = Math.min(forwardIntent, -0.58);
+          } else if (chosen.distance > maxRange) {
+            forwardIntent = Math.max(forwardIntent, closeRole ? 0.82 : 0.70);
+          }
         }
-        if (Math.abs(strafeIntent) < 0.2) {
-          strafeIntent = brain.strafeSign * preset.strafeStrength;
-        }
-        if (bot.health <= preset.retreatHealthThreshold || chosen.distance < preset.preferredMinRange * 0.72) {
-          forwardIntent = Math.min(forwardIntent, -0.55);
-        } else if (chosen.distance > preset.preferredMaxRange) {
-          forwardIntent = Math.max(forwardIntent, 0.7);
+
+        // Keep bots from stacking onto the exact same coordinate in multi-bot lanes.
+        for (const peer of this.players.values()) {
+          if (!peer.isBot || !peer.alive || peer.id === bot.id) continue;
+          const px = bot.x - peer.x;
+          const pz = bot.z - peer.z;
+          const pDist = Math.hypot(px, pz);
+          if (pDist > 0.01 && pDist < 2.3) {
+            const push = ((2.3 - pDist) / 2.3) * 0.55;
+            forwardIntent += (px / pDist) * forwardX * push + (pz / pDist) * forwardZ * push;
+            strafeIntent += (px / pDist) * rightX * push + (pz / pDist) * rightZ * push;
+          }
         }
 
         bot.input.forward = clamp(forwardIntent, -1, 1);
@@ -602,7 +692,6 @@ export class GameState {
         bot.input.jump = false;
         bot.lastInputAt = now;
 
-        const weapon = this.ensureBotCombatWeapon(bot, chosen.distance, now);
         if (!weapon || weapon.behavior === 'shield' || weapon.behavior === 'smoke') continue;
         if (chosen.distance > weapon.range) continue;
 

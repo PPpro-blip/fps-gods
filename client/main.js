@@ -201,6 +201,28 @@ let lastSnapshotTick = -1;
 let predictionCover = [];
 let nextPingId = 1;
 let pingInterval = null;
+let cameraStridePhase = 0;
+let cameraBobX = 0;
+let cameraBobY = 0;
+let cameraLandingDip = 0;
+let cameraStrafeRoll = 0;
+let wasLocalGrounded = true;
+let lastAirborneVy = 0;
+
+weaponEffects.setArenaContext({
+  getMap: () => world.map,
+  getCover: () => predictionCover,
+});
+
+function resetCameraMotionState() {
+  cameraStridePhase = 0;
+  cameraBobX = 0;
+  cameraBobY = 0;
+  cameraLandingDip = 0;
+  cameraStrafeRoll = 0;
+  wasLocalGrounded = true;
+  lastAirborneVy = 0;
+}
 
 function canPlay() {
   return matchActive && !matchEnded && currentRoom?.state === 'PLAYING';
@@ -254,6 +276,8 @@ function syncInputState() {
 function clearMatchPresentation() {
   matchActive = false;
   matchEnded = false;
+  audio.setAmbience(null);
+  resetCameraMotionState();
   trigger.release();
   closeWeaponWheel(false);
   nextClientShotByWeapon.clear();
@@ -291,6 +315,9 @@ function syncArena(mapId, { announce = false } = {}) {
   }
   applySettings(settings.snapshot);
   ui.setArena(world.map);
+  if (matchActive && !matchEnded) {
+    audio.setAmbience(world.map?.scenery?.style ?? 'foundry');
+  }
   if (announce) ui.showToast(`Arena: ${world.map.name}`);
   return true;
 }
@@ -302,6 +329,7 @@ function enterMatch(room = currentRoom) {
   matchActive = true;
   matchEnded = false;
   if (!wasActive) {
+    resetCameraMotionState();
     latestPlayers = [];
     latestLocalPlayer = null;
     latestPlayerAlive = false;
@@ -319,6 +347,7 @@ function enterMatch(room = currentRoom) {
   }
   const mapChanged = syncArena(room.mapId ?? DEFAULT_MAP_ID);
   if (!wasActive || mapChanged) world.resetCover();
+  audio.setAmbience(world.map?.scenery?.style ?? 'foundry');
   if (menuStage) menuStage.hide();
   ui.showMatch(room);
   ui.setLobbyVisible(false);
@@ -522,7 +551,8 @@ const network = new GameNetwork(
       if (latestLocalPlayer) {
         syncLocalWeapon(latestLocalPlayer.currentWeaponId, latestLocalPlayer.bundleId);
         weaponEffects.setBlocking(rightMouseHeld && latestLocalPlayer.blocking === true);
-        weaponEffects.setMovementSpeed(Math.hypot(latestLocalPlayer.vx ?? 0, latestLocalPlayer.vz ?? 0));
+        const motionRef = prediction.state ?? latestLocalPlayer;
+        weaponEffects.setMovementSpeed(Math.hypot(motionRef.vx ?? 0, motionRef.vz ?? 0));
         ui.updateHud(
           latestLocalPlayer,
           Date.now() + serverClockOffset,
@@ -533,6 +563,7 @@ const network = new GameNetwork(
     },
     onGameEnd: (result) => {
       matchEnded = true;
+      audio.setAmbience(null);
       trigger.release();
       releaseRightAction();
       closeWeaponWheel(false);
@@ -576,6 +607,7 @@ const network = new GameNetwork(
         });
       }
       prediction.reset(latestLocalPlayer);
+      resetCameraMotionState();
       inputCadence.reset();
       releaseRightAction();
       aim.reset(true);
@@ -588,11 +620,22 @@ const network = new GameNetwork(
       audio.play('spawn');
       ui.showToast('Redeployed. Two seconds of spawn protection.');
     },
-    onKillFeed: (entry) => ui.addKillFeed(entry, network.id),
+    onKillFeed: (entry) => {
+      ui.addKillFeed(entry, network.id);
+      if (entry?.killerId === network.id) {
+        ui.showEliminationBanner(entry);
+      }
+    },
     onScoreUpdate: (data) => ui.updateScoreboard(data?.players, network.id),
     onHitConfirmed: (hit) => {
       ui.showHitMarker(hit);
-      if (hit?.hit) audio.play(hit.killed ? 'kill' : 'hit');
+      if (hit?.hit) {
+        if (hit.targetId) remotePlayers.triggerHitReaction(hit.targetId, hit.headshot);
+        audio.play(hit.killed ? 'kill' : 'hit', {
+          headshot: Boolean(hit.headshot),
+          blocked: Boolean(hit.protected || hit.blockedByShield),
+        });
+      }
     },
     onAmmoUpdate: (data) => {
       if (!latestLocalPlayer) return;
@@ -618,6 +661,7 @@ const network = new GameNetwork(
         player.currentWeaponIcon = data.weaponIcon;
       }
       if (data.playerId === network.id && latestLocalPlayer) {
+        const previousWeaponId = latestLocalPlayer.currentWeaponId;
         Object.assign(latestLocalPlayer, {
           bundleId: data.bundleId,
           currentWeaponId: data.weaponId,
@@ -628,6 +672,9 @@ const network = new GameNetwork(
         });
         trigger.sync(data.weaponId, data.auto);
         syncLocalWeapon(data.weaponId, data.bundleId);
+        if (matchActive && previousWeaponId && previousWeaponId !== data.weaponId) {
+          audio.play('switch');
+        }
         ui.updateHud(
           latestLocalPlayer,
           Date.now() + serverClockOffset,
@@ -645,7 +692,7 @@ const network = new GameNetwork(
         const predicted = predictedShots.consume(data.shotId);
         if (data.weaponId === latestLocalPlayer?.currentWeaponId) {
           weaponEffects.fire(now, data.weaponId, data.bundleId, data, !predicted);
-          if (!predicted) audio.play('shot', { weaponClass: weaponEffects.weaponClass });
+          if (!predicted) audio.play('shot', { weaponId: data.weaponId, weaponClass: weaponEffects.weaponClass });
         } else {
           weaponEffects.showRemoteTracer(data);
         }
@@ -655,7 +702,10 @@ const network = new GameNetwork(
       weaponEffects.showRemoteTracer(data);
     },
     onSmokeUpdate: (data) => weaponEffects.updateSmokeClouds(data.smokeClouds ?? []),
-    onProjectileImpact: (data) => weaponEffects.showImpact(data),
+    onProjectileImpact: (data) => {
+      weaponEffects.showImpact(data);
+      audio.play('explosion');
+    },
     onCoverDestroyed: (data) => world.destroyCover(data.blockId),
     onHealthUpdate: (data) => {
       if (!latestLocalPlayer) return;
@@ -878,11 +928,14 @@ document.addEventListener('pointerlockerror', () => {
 
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
+    audio.setAmbience(null);
     trigger.release();
     releaseRightAction();
     closeWeaponWheel(false);
     controller.reset();
     sendNeutralInput();
+  } else if (matchActive && !matchEnded && world.map) {
+    audio.setAmbience(world.map.scenery?.style ?? 'foundry');
   }
   syncInputState();
 });
@@ -1093,7 +1146,7 @@ function fireOnce(now) {
   diagnostics.recordShotSent(now);
   network.shoot(shotId);
   weaponEffects.presentFire(now, weaponId, latestLocalPlayer.bundleId);
-  audio.play('shot', { weaponClass: weaponEffects.weaponClass });
+  audio.play('shot', { weaponId, weaponClass: weaponEffects.weaponClass });
 }
 
 /* ────────────────────────────────── loop ─────────────────────────────────── */
@@ -1124,18 +1177,99 @@ function animate(now = performance.now()) {
   if (!matchActive && menuStage?.built && !menuStage.visible) menuStage.show();
 
   if (matchActive) {
+    const reducedMotion = settings.snapshot.reducedMotion === true;
+    world.update(now, delta, { reducedMotion });
+
+    let activeInput = { forward: 0, strafe: 0, jump: false };
     if (canPlay() && network.connected) {
-      const input = sampleLocalInput();
-      if (latestPlayerAlive) prediction.step(input, delta, world.map, predictionCover);
+      activeInput = sampleLocalInput();
+      if (latestPlayerAlive) prediction.step(activeInput, delta, world.map, predictionCover);
     }
+
+    const predState = prediction.state ?? latestLocalPlayer;
+    const localSpeed = latestPlayerAlive && predState
+      ? Math.hypot(predState.vx ?? 0, predState.vz ?? 0)
+      : 0;
+    const predVy = latestPlayerAlive && predState ? (predState.vy ?? 0) : 0;
+    const nowGrounded = !latestPlayerAlive || !predState ? true : predState.grounded !== false;
+
+    if (latestPlayerAlive) {
+      if (wasLocalGrounded && !nowGrounded && predVy > 2.2) {
+        audio.play('jump');
+      } else if (!wasLocalGrounded && nowGrounded && lastAirborneVy < -1.8) {
+        const impactSpeed = Math.abs(lastAirborneVy);
+        const dipScale = reducedMotion ? 0.15 : 1;
+        cameraLandingDip = Math.min(0.046, Math.max(0.010, impactSpeed * 0.0046)) * dipScale;
+        weaponEffects.triggerLanding(impactSpeed);
+        audio.play('land', { intensity: impactSpeed / 6.5 });
+      }
+      if (!nowGrounded) {
+        lastAirborneVy = Math.min(lastAirborneVy, predVy);
+      } else {
+        lastAirborneVy = 0;
+      }
+      wasLocalGrounded = nowGrounded;
+    }
+
+    const moveNorm = Math.min(1, localSpeed / PLAYER.speed);
+    if (latestPlayerAlive && nowGrounded && moveNorm > 0.22) {
+      const prevSin = Math.sin(cameraStridePhase);
+      cameraStridePhase += delta * (4.6 + moveNorm * 6.8);
+      const nextSin = Math.sin(cameraStridePhase);
+      if ((prevSin >= 0 && nextSin < 0) || (prevSin <= 0 && nextSin > 0)) {
+        audio.play('step');
+      }
+    }
+
+    const motionComfortScale = (reducedMotion ? 0.12 : 1) * (1 - aim.amount * 0.82);
+    const targetBobX = (nowGrounded && moveNorm > 0.05)
+      ? Math.cos(cameraStridePhase) * 0.0065 * moveNorm * motionComfortScale
+      : 0;
+    const targetBobY = (nowGrounded && moveNorm > 0.05)
+      ? -Math.abs(Math.sin(cameraStridePhase)) * 0.0135 * moveNorm * motionComfortScale
+      : 0;
+    const smoothBob = 1 - Math.exp(-15 * delta);
+    cameraBobX += (targetBobX - cameraBobX) * smoothBob;
+    cameraBobY += (targetBobY - cameraBobY) * smoothBob;
+    if (Math.abs(cameraBobX) < 1e-5) cameraBobX = 0;
+    if (Math.abs(cameraBobY) < 1e-5) cameraBobY = 0;
+
+    cameraLandingDip *= Math.exp(-15 * delta);
+    if (cameraLandingDip < 1e-4) cameraLandingDip = 0;
+
+    const targetRoll = (latestPlayerAlive && !reducedMotion)
+      ? -activeInput.strafe * 0.0052 * (1 - aim.amount * 0.85)
+      : 0;
+    cameraStrafeRoll += (targetRoll - cameraStrafeRoll) * (1 - Math.exp(-12 * delta));
+    if (Math.abs(cameraStrafeRoll) < 1e-5) cameraStrafeRoll = 0;
+
+    const lookDelta = controller.consumeLookDelta();
+    weaponEffects.setMotionState({
+      speed: localSpeed,
+      forward: activeInput.forward,
+      strafe: activeInput.strafe,
+      vy: predVy,
+      grounded: nowGrounded,
+      lookYawDelta: lookDelta.yaw,
+      lookPitchDelta: lookDelta.pitch,
+      reducedMotion,
+    });
 
     camera.rotation.order = 'YXZ';
     camera.rotation.y = controller.yaw;
     camera.rotation.x = controller.pitch;
-    camera.rotation.z = 0;
+    camera.rotation.z = cameraStrafeRoll;
     const renderAt = now - interpolator.delayMs;
     const localPose = prediction.sample(delta) ?? latestLocalPlayer;
-    if (localPose) camera.position.set(localPose.x, localPose.y + PLAYER.eyeHeight, localPose.z);
+    if (localPose) {
+      const rightX = Math.cos(controller.yaw);
+      const rightZ = -Math.sin(controller.yaw);
+      camera.position.set(
+        localPose.x + rightX * cameraBobX,
+        localPose.y + PLAYER.eyeHeight + cameraBobY - cameraLandingDip,
+        localPose.z + rightZ * cameraBobX,
+      );
+    }
     camera.updateMatrixWorld(true);
     remotePlayers.update(latestPlayers, interpolator, camera, renderAt, network.id);
   }
