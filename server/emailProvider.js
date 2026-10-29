@@ -48,8 +48,8 @@ export function createEmailProvider(customProvider = null) {
   const from = (process.env.AUTH_EMAIL_FROM || '').trim();
   const resendKey = (process.env.RESEND_API_KEY || '').trim();
   const sendgridKey = (process.env.SENDGRID_API_KEY || '').trim();
-  const webhookUrl = (process.env.OTP_EMAIL_WEBHOOK_URL || '').trim();
-  const webhookSecret = (process.env.OTP_EMAIL_WEBHOOK_SECRET || '').trim();
+  const webhookUrl = (process.env.AUTH_EMAIL_WEBHOOK_URL || process.env.OTP_EMAIL_WEBHOOK_URL || '').trim();
+  const webhookSecret = (process.env.AUTH_EMAIL_WEBHOOK_SECRET || process.env.OTP_EMAIL_WEBHOOK_SECRET || '').trim();
 
   if (resendKey && from) {
     return {

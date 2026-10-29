@@ -23,7 +23,7 @@ services:
     healthCheckPath: /health
     autoDeploy: true
     envVars:
-      # package.json requires Node >= 20.19 (Vite 8); pin the verified version.
+      # Built-in unflagged node:sqlite requires Node >= 22.13.0; pin the verified version.
       - key: NODE_VERSION
         value: 22.22.3
       - key: HOST

@@ -5,7 +5,7 @@
   "type": "module",
   "description": "A browser-based, server-authoritative multiplayer free-for-all FPS arena.",
   "engines": {
-    "node": ">=20.19.0"
+    "node": ">=22.13.0"
   },
   "scripts": {
     "dev": "concurrently -k -n SERVER,CLIENT -c cyan,magenta \"npm:dev:server\" \"npm:dev:client\"",
