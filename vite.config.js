@@ -29,6 +29,10 @@ export default defineConfig(({ mode }) => {
           changeOrigin: true,
           ws: true,
         },
+        '/api': {
+          target: gameServer,
+          changeOrigin: true,
+        },
       },
     },
     preview: {

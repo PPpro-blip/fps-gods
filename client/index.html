@@ -27,6 +27,10 @@
             <span class="connection-dot"></span>
             <span id="connection-label">CONNECTING</span>
           </div>
+          <button class="credits-pill" id="topbar-credits-button" type="button" aria-label="Credits balance">
+            <span class="credits-glyph" aria-hidden="true">◈</span>
+            <strong id="topbar-credits-value">GUEST</strong>
+          </button>
           <button class="profile-chip" id="profile-chip" type="button" data-nav="profile">
             <span class="profile-chip-avatar" id="profile-avatar">R</span>
             <span class="profile-chip-copy">
@@ -175,26 +179,42 @@
           <section class="panel-screen" id="screen-store" data-screen-panel="store" hidden>
             <header class="panel-head">
               <div>
-                <p class="panel-kicker">REQUISITION</p>
-                <h2>Store</h2>
+                <p class="panel-kicker">REQUISITION &amp; WALLET</p>
+                <h2>Credits Armory</h2>
               </div>
-              <span class="panel-tag is-muted">PHASE 2</span>
+              <span class="panel-tag" id="store-wallet-status">GUEST</span>
             </header>
-            <p class="panel-lede">There is no economy, currency, or payment flow in this build, so nothing here can be purchased. No transaction is simulated.</p>
+            <p class="panel-lede">Credits (◈) are awarded only by the authoritative game server from verified combat and match events.</p>
+
+            <article class="notice-card is-accent">
+              <div class="wallet-summary-head">
+                <div>
+                  <span class="wallet-kicker">PERSISTENT BALANCE</span>
+                  <h3 class="wallet-amount" id="store-wallet-balance">◈ 0 Credits</h3>
+                </div>
+                <div class="wallet-sub">
+                  <span>LIFETIME EARNED</span>
+                  <strong id="store-wallet-lifetime">◈ 0</strong>
+                </div>
+              </div>
+              <ul class="bullet-list compact-rates">
+                <li><strong>+15 CR</strong> Multiplayer elimination (<strong>+5 CR</strong> headshot bonus)</li>
+                <li><strong>+5 CR</strong> Combat damage assist or Solo Bot elimination</li>
+                <li><strong>+25 CR</strong> Match completion · <strong>+50 CR</strong> Match victory</li>
+              </ul>
+              <button class="button button-secondary" id="store-auth-button" type="button">SIGN IN TO SAVE CREDITS</button>
+            </article>
 
             <article class="notice-card">
-              <h3>Not yet available</h3>
-              <p>Purchasing, inventory ownership, and persistent currency arrive with the SHARZS economy in a later phase. This screen is a placeholder for that integration, not a mock checkout.</p>
-              <ul class="bullet-list">
-                <li>No prices or balances are displayed because none exist server-side.</li>
-                <li>No purchase button can succeed, so none is offered.</li>
-                <li>Progression in Phase 1 is earned only: lifetime eliminations.</li>
+              <h3>Recent verified ledger</h3>
+              <ul class="ledger-list" id="store-ledger-list">
+                <li class="ledger-empty">Sign in with Email OTP on the Profile tab to persist Credits across sessions.</li>
               </ul>
             </article>
 
             <article class="notice-card is-accent">
               <h3>Earned unlock — GODS TIER</h3>
-              <p>The only unlock in this build is earned in the arena and verified by the server.</p>
+              <p>Unlocked at 30 server-verified lifetime eliminations.</p>
               <div class="progress-block">
                 <div class="progress-head"><span>LIFETIME ELIMINATIONS</span><strong id="store-kills-value">0 / 30</strong></div>
                 <div class="progress-track"><span id="store-kills-fill"></span></div>
@@ -214,6 +234,8 @@
             </header>
 
             <div class="profile-grid">
+              <div class="profile-field"><span>ACCOUNT MODE</span><strong id="account-status-badge">GUEST SESSION</strong></div>
+              <div class="profile-field"><span>CREDITS WALLET</span><strong id="profile-stat-credits">◈ 0 (GUEST)</strong></div>
               <div class="profile-field"><span>PROFILE KEY</span><code id="profile-key">—</code></div>
               <div class="profile-field"><span>LIFETIME ELIMINATIONS</span><strong id="profile-stat-kills">0</strong></div>
               <div class="profile-field"><span>GODS TIER</span><strong id="profile-stat-unlock">LOCKED</strong></div>
@@ -226,6 +248,47 @@
               <div class="progress-track"><span id="profile-progress-fill"></span></div>
             </div>
 
+            <article class="notice-card auth-card">
+              <div class="auth-card-head">
+                <h3>Email OTP Account</h3>
+                <small>Passwordless persistent operator login</small>
+              </div>
+
+              <div id="auth-guest-panel">
+                <p class="auth-copy" id="auth-provider-note">Sign in with a one-time 6-digit email code to persist your Credits wallet, callsign, and lifetime unlocks across devices.</p>
+
+                <form class="join-form" id="auth-email-form">
+                  <label class="field-label" for="auth-email-input">EMAIL ADDRESS</label>
+                  <div class="join-row">
+                    <input id="auth-email-input" name="email" type="email" maxlength="254" autocomplete="email" placeholder="operator@domain.com" />
+                    <button class="button button-primary" id="auth-send-code-button" type="submit">SEND CODE</button>
+                  </div>
+                </form>
+
+                <form class="join-form" id="auth-verify-form" hidden>
+                  <label class="field-label" for="auth-code-input">6-DIGIT VERIFICATION CODE</label>
+                  <div class="join-row">
+                    <input id="auth-code-input" name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" placeholder="000000" />
+                    <button class="button button-primary" id="auth-verify-button" type="submit">VERIFY</button>
+                  </div>
+                  <button class="text-button auth-link-btn" id="auth-back-email-button" type="button">USE DIFFERENT EMAIL OR RESEND</button>
+                </form>
+              </div>
+
+              <div id="auth-account-panel" hidden>
+                <div class="auth-signed-row">
+                  <div>
+                    <span class="field-label">SIGNED IN AS</span>
+                    <strong id="auth-account-email">—</strong>
+                    <small id="auth-account-matches">0 matches · 0 wins</small>
+                  </div>
+                  <button class="button button-secondary" id="auth-logout-button" type="button">SIGN OUT</button>
+                </div>
+              </div>
+
+              <p class="inline-message" id="auth-message" aria-live="polite" hidden></p>
+            </article>
+
             <form class="join-form" id="profile-callsign-form">
               <label class="field-label" for="profile-callsign-input">CALLSIGN</label>
               <div class="join-row">
@@ -235,7 +298,7 @@
             </form>
 
             <p class="inline-message" id="profile-message" aria-live="polite" hidden></p>
-            <p class="panel-footnote">Profile keys, lifetime eliminations, and unlocks are stored by the game server. Match history is not persisted in this phase.</p>
+            <p class="panel-footnote">Guest play works immediately without signing in. Verified Email OTP accounts store Credits, callsign, and lifetime unlocks durably on the server.</p>
           </section>
 
           <!-- SETTINGS -->
@@ -393,7 +456,28 @@
             <i></i>
             <span class="hud-target">FIRST TO <b id="target-kills">30</b></span>
           </div>
-          <div class="hud-right"><span id="alive-count">0</span> ALIVE <i></i> <span id="fps-value" hidden>0 FPS</span></div>
+          <div class="hud-right">
+            <span class="hud-credits-pill" id="hud-credits-pill"><b id="hud-credits-value">GUEST</b></span>
+            <i></i>
+            <span><span id="alive-count">0</span> ALIVE</span>
+            <span id="ping-value">0 MS</span>
+            <span id="fps-value" hidden>0 FPS</span>
+          </div>
+        </div>
+
+        <div class="hud-reward-pop" id="hud-reward-pop" aria-live="polite" hidden></div>
+
+        <div class="ads-scope-overlay" id="ads-scope-overlay" aria-hidden="true" hidden>
+          <div class="ads-scope-lens">
+            <span class="scope-line scope-line-h"></span>
+            <span class="scope-line scope-line-v"></span>
+            <span class="scope-center-dot"></span>
+            <span class="scope-mil scope-mil-l1"></span>
+            <span class="scope-mil scope-mil-r1"></span>
+            <span class="scope-mil scope-mil-b1"></span>
+            <span class="scope-mil scope-mil-b2"></span>
+            <span class="scope-readout" id="ads-scope-label">4.0× OPTIC</span>
+          </div>
         </div>
 
         <div class="kill-feed" id="kill-feed" aria-live="polite"></div>
@@ -412,17 +496,20 @@
 
         <div class="hud-bottom">
           <div class="vitals">
-            <div class="vitals-head"><span id="health-value">100</span><small>/ 100 HEALTH</small><em id="health-state">READY</em></div>
+            <div class="vitals-head"><span id="health-value">100</span><small>/ 100 HP</small><em id="health-state">READY</em></div>
             <div class="health-track"><span id="health-fill"></span></div>
             <div class="vitals-foot"><span id="shield-state">SPAWN SHIELD</span><span id="spawn-note">—</span></div>
           </div>
 
-          <div class="controls-hint">
-            <span><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> MOVE</span>
-            <span><kbd>SPACE</kbd> JUMP</span>
-            <span><kbd>R</kbd> RELOAD</span>
-            <span><kbd>Q</kbd> WEAPONS</span>
-            <span><kbd>TAB</kbd> SCORE</span>
+          <div class="hud-center-dock">
+            <div class="hud-loadout-strip" id="hud-loadout-strip" aria-label="Loadout slots"></div>
+            <div class="controls-hint">
+              <span><kbd>WASD</kbd> MOVE</span>
+              <span><kbd>1-3</kbd>/<kbd>Q</kbd> SWAP</span>
+              <span><kbd>RMB</kbd> AIM/GUARD</span>
+              <span><kbd>R</kbd> RELOAD</span>
+              <span><kbd>TAB</kbd> SCORE</span>
+            </div>
           </div>
 
           <div class="ammo">

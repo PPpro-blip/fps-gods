@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { PLAYER } from '../shared/gameConfig.js';
 import { createOperator } from './operator.js';
 
-const INTERPOLATION_DELAY_MS = 90;
+const INTERPOLATION_DELAY_MS = 75;
 const MAX_EXTRAPOLATION_MS = 130;
 const WEAPON_SWITCH_MS = 160;
 // Creating a dressed skinned rig is a measurable synchronous task. Spread
@@ -15,6 +15,7 @@ const FLASH_COLORS = Object.freeze({
   GODS_TIER: '#ffd45e',
 });
 const HITSCAN_FLASH = new Set(['SMG', 'SHOTGUN', 'PISTOL', 'SNIPER', 'LMG', 'ROCKET', 'RAILGUN', 'MINIGUN']);
+const MOVEMENT_CODES = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space']);
 
 function angleDelta(from, to) {
   return ((to - from + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI;
@@ -22,12 +23,6 @@ function angleDelta(from, to) {
 
 function blend(left, right, amount) {
   return left + (right - left) * amount;
-}
-
-function numericHash(value) {
-  let hash = 0;
-  for (const character of String(value ?? '')) hash = (hash * 31 + character.charCodeAt(0)) >>> 0;
-  return hash;
 }
 
 // Buffers authoritative snapshots for remote-player interpolation. The local
@@ -100,34 +95,42 @@ export class PlayerController {
     this.canvas = canvas;
     this.enabled = false;
     this.keys = new Set();
+    this.jumpTapLatched = false;
     this.yaw = 0;
     this.pitch = 0;
     this.sensitivity = 0.0022;
+    this.lookScale = 1;
     this.invertY = false;
     this.wheelDelta = 0;
+    this.onInputEdge = null;
 
     this.handleMouseMove = this.handleMouseMove.bind(this);
     this.handleKeyDown = this.handleKeyDown.bind(this);
     this.handleKeyUp = this.handleKeyUp.bind(this);
     this.handleWheel = this.handleWheel.bind(this);
     this.handleBlur = this.handleBlur.bind(this);
+    this.handleVisibilityChange = this.handleVisibilityChange.bind(this);
+    this.handlePointerLockChange = this.handlePointerLockChange.bind(this);
 
     document.addEventListener('mousemove', this.handleMouseMove);
     document.addEventListener('keydown', this.handleKeyDown);
     document.addEventListener('keyup', this.handleKeyUp);
     document.addEventListener('wheel', this.handleWheel, { passive: false });
+    document.addEventListener('pointerlockchange', this.handlePointerLockChange);
     window.addEventListener('blur', this.handleBlur);
     // A backgrounded tab never delivers keyup, which used to leave the player
     // walking forever after an alt-tab.
-    document.addEventListener('visibilitychange', this.handleBlur);
+    document.addEventListener('visibilitychange', this.handleVisibilityChange);
   }
 
   handleMouseMove(event) {
     if (!this.enabled || document.pointerLockElement !== this.canvas) return;
     const movementX = Number(event.movementX) || 0;
     const movementY = Number(event.movementY) || 0;
-    this.yaw -= movementX * this.sensitivity;
-    const pitchDelta = movementY * this.sensitivity * (this.invertY ? -1 : 1);
+    const scale = Number.isFinite(this.lookScale) ? THREE.MathUtils.clamp(this.lookScale, 0.15, 1) : 1;
+    const step = this.sensitivity * scale;
+    this.yaw -= movementX * step;
+    const pitchDelta = movementY * step * (this.invertY ? -1 : 1);
     this.pitch = Math.max(-1.45, Math.min(1.45, this.pitch - pitchDelta));
     this.yaw = ((this.yaw + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI;
   }
@@ -139,13 +142,45 @@ export class PlayerController {
   }
 
   handleKeyDown(event) {
-    if (!this.enabled || document.pointerLockElement !== this.canvas || this.isTyping(event.target)) return;
-    if (['KeyW', 'KeyA', 'KeyS', 'KeyD', 'Space'].includes(event.code)) event.preventDefault();
+    if (this.isTyping(event.target)) return;
+    // Capture movement keys even while pointer-lock is still settling so holding
+    // W as the match starts or as the canvas locks responds on frame zero
+    // instead of stalling until a fresh key re-press or OS key-repeat event.
+    if (!this.enabled && !MOVEMENT_CODES.has(event.code)) return;
+    const locked = document.pointerLockElement === this.canvas;
+    if (this.enabled && locked && MOVEMENT_CODES.has(event.code)) {
+      event.preventDefault();
+    }
+    const wasDown = this.keys.has(event.code);
     this.keys.add(event.code);
+    if (event.code === 'Space' && this.enabled && locked && !wasDown) {
+      this.jumpTapLatched = true;
+    }
+    if (!wasDown && this.enabled && locked && MOVEMENT_CODES.has(event.code)) {
+      this.onInputEdge?.();
+    }
   }
 
   handleKeyUp(event) {
-    this.keys.delete(event.code);
+    const hadKey = this.keys.delete(event.code);
+    if (hadKey && this.enabled && document.pointerLockElement === this.canvas && MOVEMENT_CODES.has(event.code)) {
+      this.onInputEdge?.();
+    }
+  }
+
+  handlePointerLockChange() {
+    if (this.enabled && document.pointerLockElement === this.canvas && this.keys.size > 0) {
+      this.onInputEdge?.();
+    }
+    if (document.pointerLockElement !== this.canvas) {
+      this.jumpTapLatched = false;
+    }
+  }
+
+  handleVisibilityChange() {
+    if (document.hidden) {
+      this.clearKeys();
+    }
   }
 
   handleBlur() {
@@ -162,6 +197,9 @@ export class PlayerController {
     const next = Boolean(enabled);
     if (this.enabled && !next) this.clearKeys();
     this.enabled = next;
+    if (next && document.pointerLockElement === this.canvas && this.keys.size > 0) {
+      this.onInputEdge?.();
+    }
   }
 
   setSensitivity(radiansPerPixel) {
@@ -170,19 +208,31 @@ export class PlayerController {
     this.sensitivity = Math.min(0.02, Math.max(0.0002, numeric));
   }
 
+  setLookScale(scale) {
+    this.lookScale = Number.isFinite(scale) ? THREE.MathUtils.clamp(scale, 0.15, 1) : 1;
+  }
+
   setInvertY(invertY) {
     this.invertY = invertY === true;
   }
 
-  getInput(sequence) {
+  getInput(sequence, { consumeJumpTap = false } = {}) {
     const active = this.enabled && document.pointerLockElement === this.canvas;
-    const forward = active ? Number(this.keys.has('KeyW')) - Number(this.keys.has('KeyS')) : 0;
-    const strafe = active ? Number(this.keys.has('KeyD')) - Number(this.keys.has('KeyA')) : 0;
+    const forward = active
+      ? Number(this.keys.has('KeyW') || this.keys.has('ArrowUp')) - Number(this.keys.has('KeyS') || this.keys.has('ArrowDown'))
+      : 0;
+    const strafe = active
+      ? Number(this.keys.has('KeyD') || this.keys.has('ArrowRight')) - Number(this.keys.has('KeyA') || this.keys.has('ArrowLeft'))
+      : 0;
+    const jump = active && (this.keys.has('Space') || this.jumpTapLatched);
+    if (consumeJumpTap && this.jumpTapLatched) {
+      this.jumpTapLatched = false;
+    }
     return {
       seq: sequence,
       forward,
       strafe,
-      jump: active && this.keys.has('Space'),
+      jump,
       yaw: this.yaw,
       pitch: this.pitch,
     };
@@ -196,6 +246,7 @@ export class PlayerController {
 
   clearKeys() {
     this.keys.clear();
+    this.jumpTapLatched = false;
     this.wheelDelta = 0;
   }
 
@@ -209,7 +260,8 @@ export class PlayerController {
     document.removeEventListener('keydown', this.handleKeyDown);
     document.removeEventListener('keyup', this.handleKeyUp);
     document.removeEventListener('wheel', this.handleWheel);
-    document.removeEventListener('visibilitychange', this.handleBlur);
+    document.removeEventListener('pointerlockchange', this.handlePointerLockChange);
+    document.removeEventListener('visibilitychange', this.handleVisibilityChange);
     window.removeEventListener('blur', this.handleBlur);
   }
 }

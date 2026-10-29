@@ -5,6 +5,7 @@ import {
   DEFAULT_BUNDLE_ID,
   WEAPON_PRESENTATION,
 } from '../shared/bundles.js';
+import { formatCredits } from '../shared/economy.js';
 import { ROOM_MODES } from '../shared/events.js';
 import { DEFAULT_MAP_ID, MAP_LIST, getMap, resolveMapId } from '../shared/maps.js';
 import { WEAPON_MODEL_FILE } from '../shared/weaponModels.js';
@@ -29,10 +30,31 @@ export class GameUI {
     this.screen = 'play';
     this.profile = {
       profileId: profileId ?? null,
+      accountId: null,
+      authenticated: false,
+      emailMasked: '',
       callsign: '',
       lifetimeKills: 0,
       godsTierUnlocked: false,
+      matchesPlayed: 0,
+      matchesWon: 0,
     };
+    this.authState = {
+      loading: false,
+      otpConfigured: true,
+      emailProvider: 'unknown',
+      pendingEmail: '',
+      step: 'email',
+    };
+    this.wallet = {
+      authenticated: false,
+      loading: false,
+      error: '',
+      balance: 0,
+      lifetimeEarned: 0,
+      recentTransactions: [],
+    };
+    this.rewardPopTimer = null;
     this.rooms = { status: 'idle', entries: [], error: '' };
     this.selectedMapId = DEFAULT_MAP_ID;
     this.arena = getMap(DEFAULT_MAP_ID);
@@ -57,17 +79,26 @@ export class GameUI {
 
     this.el = {};
     for (const id of [
-      'app-shell', 'game-canvas', 'connection-pill', 'connection-label', 'profile-chip',
+      'app-shell', 'game-canvas', 'connection-pill', 'connection-label',
+      'topbar-credits-button', 'topbar-credits-value', 'profile-chip',
       'profile-avatar', 'profile-callsign', 'profile-kills', 'brand-home', 'nav-rail',
       'menu-shell', 'hero-copy', 'stage-note', 'play-bundle-tag', 'play-now-button',
       'create-room-button', 'browse-rooms-button', 'join-room-form', 'room-code-input',
       'join-room-button', 'play-error', 'play-loadout-line', 'play-server-line',
       'refresh-rooms-button', 'room-list', 'rooms-create-button', 'rooms-join-button',
       'rooms-error', 'inventory-kills-tag', 'bundle-grid', 'inventory-error',
+      'store-wallet-status', 'store-wallet-balance', 'store-wallet-lifetime',
+      'store-auth-button', 'store-ledger-list',
       'store-kills-value', 'store-kills-fill', 'store-goto-play', 'profile-title',
-      'profile-tier-tag', 'profile-key', 'profile-stat-kills', 'profile-stat-unlock',
+      'profile-tier-tag', 'account-status-badge', 'profile-stat-credits',
+      'profile-key', 'profile-stat-kills', 'profile-stat-unlock',
       'profile-stat-bundle', 'profile-server-target', 'profile-progress',
-      'profile-progress-value', 'profile-progress-fill', 'profile-callsign-form',
+      'profile-progress-value', 'profile-progress-fill',
+      'auth-guest-panel', 'auth-provider-note', 'auth-email-form', 'auth-email-input',
+      'auth-send-code-button', 'auth-verify-form', 'auth-code-input',
+      'auth-verify-button', 'auth-back-email-button', 'auth-account-panel',
+      'auth-account-email', 'auth-account-matches', 'auth-logout-button', 'auth-message',
+      'profile-callsign-form',
       'profile-callsign-input', 'profile-message', 'settings-reset',
       'setting-sensitivity', 'setting-sensitivity-value', 'setting-fov',
       'setting-fov-value', 'setting-volume', 'setting-volume-value', 'setting-quality',
@@ -80,7 +111,9 @@ export class GameUI {
       'start-button', 'match-hud', 'hud-room', 'hud-room-code', 'hud-room-copy',
       'hud-arena-name', 'map-grid', 'map-picker', 'map-picker-note',
       'lobby-arena', 'lobby-map-name', 'lobby-map-grid',
-      'lobby-map-note', 'target-kills', 'alive-count',
+      'lobby-map-note', 'target-kills', 'alive-count', 'ping-value',
+      'hud-credits-pill', 'hud-credits-value', 'hud-reward-pop',
+      'ads-scope-overlay', 'ads-scope-label', 'hud-loadout-strip',
       'fps-value', 'kill-feed', 'name-tags', 'crosshair', 'health-value', 'health-fill',
       'health-state', 'shield-state', 'spawn-note', 'weapon-name', 'weapon-bundle',
       'ammo-mode', 'ammo-value', 'ammo-total', 'ammo-status', 'reload-hint',
@@ -120,12 +153,16 @@ export class GameUI {
     this.bindOnboarding();
     this.bindSettings();
     this.bindProfile();
+    this.bindAuth();
     this.bindRoomControls();
     this.bindMapControls();
     this.bindHud();
     this.el['asset-warning-dismiss'].addEventListener('click', () => this.hideAssetWarning());
     this.applySettings(this.settings);
     this.updateProfileChipsToBundle();
+    this.renderWallet();
+    this.renderAuth();
+    this.renderHudLoadoutStrip(this.selectedBundleId, null);
     this.el['build-stamp'].textContent = `v1.0 · ${new Date(this.startedAt).getFullYear()}`;
 
     const onboarded = localStorage.getItem(ONBOARDED_KEY) === '1' && Boolean(this.playerName);
@@ -206,6 +243,18 @@ export class GameUI {
       button.addEventListener('click', () => navigate(button.dataset.nav));
     }
     this.el['profile-chip'].addEventListener('click', () => navigate('profile'));
+    this.el['topbar-credits-button'].addEventListener('click', () => {
+      navigate(this.profile.authenticated ? 'store' : 'profile');
+    });
+    this.el['store-auth-button'].addEventListener('click', () => {
+      if (this.profile.authenticated) {
+        this.playUiSound();
+        this.handlers.onRefreshWallet?.();
+      } else {
+        navigate('profile');
+        this.el['auth-email-input']?.focus?.();
+      }
+    });
     this.el['brand-home'].addEventListener('click', (event) => {
       event.preventDefault();
       navigate('play');
@@ -761,6 +810,237 @@ export class GameUI {
     this.profileMessageTimer = window.setTimeout(() => { target.hidden = true; }, 4_000);
   }
 
+  bindAuth() {
+    this.el['auth-email-form'].addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const email = this.el['auth-email-input'].value.trim();
+      if (!email) {
+        this.setAuthMessage('Enter your email address first.', true);
+        return;
+      }
+      this.setAuthBusy(true);
+      try {
+        await this.handlers.onRequestOtp?.(email);
+        this.authState.pendingEmail = email;
+        this.authState.step = 'verify';
+        this.renderAuth();
+        this.setAuthMessage('Verification code sent. Enter the 6-digit code from your inbox.', false);
+        this.el['auth-code-input']?.focus?.();
+      } catch (error) {
+        this.setAuthMessage(error?.message || 'Could not send verification code.', true);
+      } finally {
+        this.setAuthBusy(false);
+      }
+    });
+
+    this.el['auth-verify-form'].addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const email = this.authState.pendingEmail || this.el['auth-email-input'].value.trim();
+      const code = this.el['auth-code-input'].value.trim();
+      if (!/^\d{6}$/.test(code)) {
+        this.setAuthMessage('Enter the 6-digit numeric verification code.', true);
+        return;
+      }
+      this.setAuthBusy(true);
+      try {
+        await this.handlers.onVerifyOtp?.({
+          email,
+          code,
+          callsign: this.playerName || this.profile.callsign,
+          selectedBundle: this.selectedBundleId,
+        });
+        this.el['auth-code-input'].value = '';
+        this.authState.step = 'email';
+        this.renderAuth();
+        this.setAuthMessage('Signed in. Your Credits wallet and operator record are now persistent.', false);
+      } catch (error) {
+        this.setAuthMessage(error?.message || 'Invalid or expired verification code.', true);
+      } finally {
+        this.setAuthBusy(false);
+      }
+    });
+
+    this.el['auth-back-email-button'].addEventListener('click', () => {
+      this.playUiSound();
+      this.authState.step = 'email';
+      this.el['auth-code-input'].value = '';
+      this.renderAuth();
+      this.el['auth-email-input']?.focus?.();
+    });
+
+    this.el['auth-logout-button'].addEventListener('click', async () => {
+      this.playUiSound();
+      this.setAuthBusy(true);
+      try {
+        await this.handlers.onLogout?.();
+        this.setAuthMessage('Signed out. Playing in isolated guest mode.', false);
+      } catch (error) {
+        this.setAuthMessage(error?.message || 'Sign-out failed.', true);
+      } finally {
+        this.setAuthBusy(false);
+      }
+    });
+  }
+
+  setAuthBusy(busy) {
+    this.authState.loading = Boolean(busy);
+    this.el['auth-send-code-button'].disabled = this.authState.loading || !this.authState.otpConfigured;
+    this.el['auth-verify-button'].disabled = this.authState.loading;
+    this.el['auth-logout-button'].disabled = this.authState.loading;
+  }
+
+  setAuthMessage(message, isError = false) {
+    const target = this.el['auth-message'];
+    if (!message) {
+      target.hidden = true;
+      target.textContent = '';
+      return;
+    }
+    target.textContent = String(message);
+    target.className = `inline-message${isError ? ' is-error' : ' is-success'}`;
+    target.hidden = false;
+  }
+
+  setAuthStatus(status = {}) {
+    if (!status || typeof status !== 'object') return;
+    if (typeof status.otpConfigured === 'boolean') {
+      this.authState.otpConfigured = status.otpConfigured;
+    }
+    if (typeof status.emailProvider === 'string') {
+      this.authState.emailProvider = status.emailProvider;
+    }
+    this.renderAuth();
+  }
+
+  renderAuth() {
+    const signedIn = this.profile.authenticated === true;
+    this.el['auth-guest-panel'].hidden = signedIn;
+    this.el['auth-account-panel'].hidden = !signedIn;
+    this.el['account-status-badge'].textContent = signedIn ? 'VERIFIED ACCOUNT' : 'GUEST SESSION';
+    this.el['account-status-badge'].style.color = signedIn ? 'var(--ok)' : '';
+
+    if (signedIn) {
+      this.el['auth-account-email'].textContent = this.profile.emailMasked || 'Verified email';
+      this.el['auth-account-matches'].textContent = `${this.profile.matchesPlayed ?? 0} matches · ${this.profile.matchesWon ?? 0} wins`;
+      return;
+    }
+
+    const verifying = this.authState.step === 'verify';
+    this.el['auth-email-form'].hidden = verifying;
+    this.el['auth-verify-form'].hidden = !verifying;
+    this.el['auth-send-code-button'].disabled = this.authState.loading || !this.authState.otpConfigured;
+    if (!this.authState.otpConfigured) {
+      this.el['auth-provider-note'].textContent = 'Email OTP delivery is not configured on this server yet (set RESEND_API_KEY and AUTH_EMAIL_FROM on the backend). Guest play remains fully active.';
+    } else {
+      this.el['auth-provider-note'].textContent = 'Sign in with a one-time 6-digit email code to persist your Credits wallet, callsign, and lifetime unlocks across devices.';
+    }
+  }
+
+  setWallet(walletPayload, { loading = false, error = '' } = {}) {
+    this.wallet.loading = Boolean(loading);
+    this.wallet.error = String(error || '');
+    if (walletPayload && typeof walletPayload === 'object') {
+      const authed = Boolean(walletPayload.accountId) && walletPayload.authenticated !== false;
+      this.wallet.authenticated = authed;
+      this.wallet.balance = Math.max(0, Math.floor(Number(walletPayload.balance) || 0));
+      this.wallet.lifetimeEarned = Math.max(0, Math.floor(Number(walletPayload.lifetimeEarned) || 0));
+      this.wallet.recentTransactions = Array.isArray(walletPayload.recentTransactions)
+        ? walletPayload.recentTransactions
+        : [];
+    }
+    this.renderWallet();
+  }
+
+  renderWallet() {
+    const signedIn = this.profile.authenticated === true || this.wallet.authenticated === true;
+    const balanceLabel = this.wallet.loading
+      ? 'SYNCING…'
+      : this.wallet.error
+        ? 'WALLET ERR'
+        : signedIn
+          ? `${formatCredits(this.wallet.balance, { compact: true })} CR`
+          : 'GUEST · 0 CR';
+
+    this.el['topbar-credits-value'].textContent = balanceLabel;
+    this.el['topbar-credits-button'].classList.toggle('is-authenticated', signedIn);
+    this.el['hud-credits-value'].textContent = signedIn
+      ? `${formatCredits(this.wallet.balance, { compact: true })} CR`
+      : 'GUEST';
+    this.el['profile-stat-credits'].textContent = signedIn
+      ? formatCredits(this.wallet.balance, { includeName: true })
+      : '◈ 0 (SIGN IN TO SAVE)';
+
+    this.el['store-wallet-status'].textContent = this.wallet.loading
+      ? 'SYNCING'
+      : signedIn
+        ? 'PERSISTENT'
+        : 'GUEST';
+    this.el['store-wallet-balance'].textContent = signedIn
+      ? formatCredits(this.wallet.balance, { includeName: true })
+      : '◈ 0 Credits (Guest)';
+    this.el['store-wallet-lifetime'].textContent = formatCredits(this.wallet.lifetimeEarned);
+    this.el['store-auth-button'].textContent = signedIn ? 'REFRESH WALLET' : 'SIGN IN TO SAVE CREDITS';
+
+    const list = this.el['store-ledger-list'];
+    list.replaceChildren();
+    if (this.wallet.error) {
+      const li = document.createElement('li');
+      li.className = 'ledger-empty';
+      li.textContent = this.wallet.error;
+      list.append(li);
+      return;
+    }
+    if (!signedIn) {
+      const li = document.createElement('li');
+      li.className = 'ledger-empty';
+      li.textContent = 'Sign in with Email OTP on the Profile tab to earn and persist Credits.';
+      list.append(li);
+      return;
+    }
+    if (!this.wallet.recentTransactions.length) {
+      const li = document.createElement('li');
+      li.className = 'ledger-empty';
+      li.textContent = 'No Credits earned yet. Complete matches or score eliminations to populate your ledger.';
+      list.append(li);
+      return;
+    }
+    const reasonLabels = {
+      elimination: 'Elimination reward',
+      assist: 'Combat assist bonus',
+      match_completion: 'Match completion',
+      match_victory: 'Match victory bonus',
+    };
+    for (const tx of this.wallet.recentTransactions.slice(0, 8)) {
+      const li = document.createElement('li');
+      li.className = 'ledger-row';
+      const label = document.createElement('span');
+      label.textContent = reasonLabels[tx.reason] ?? tx.reason;
+      const gain = document.createElement('strong');
+      gain.textContent = `+${tx.amount} CR`;
+      li.append(label, gain);
+      list.append(li);
+    }
+  }
+
+  showRewardEarned(reward) {
+    if (!reward || !(reward.amount > 0)) return;
+    const labels = {
+      elimination: reward.headshot ? 'HEADSHOT ELIM' : 'ELIMINATION',
+      assist: 'ASSIST',
+      match_completion: 'MATCH COMPLETE',
+      match_victory: 'VICTORY',
+    };
+    const pop = this.el['hud-reward-pop'];
+    pop.textContent = `+${reward.amount} CR · ${labels[reward.reason] ?? 'REWARD'}`;
+    pop.hidden = false;
+    pop.classList.add('is-active');
+    window.clearTimeout(this.rewardPopTimer);
+    this.rewardPopTimer = window.setTimeout(() => {
+      pop.classList.remove('is-active');
+      pop.hidden = true;
+    }, 2_100);
+  }
+
   renderProfile() {
     const { profile } = this;
     const kills = profile.lifetimeKills ?? 0;
@@ -797,15 +1077,29 @@ export class GameUI {
   setProfile(profile) {
     if (!profile || typeof profile !== 'object') return;
     const lifetimeKills = Math.max(0, Math.floor(Number(profile.lifetimeKills) || 0));
+    const authenticated = profile.authenticated === true && Boolean(profile.accountId);
     this.profile = {
       profileId: typeof profile.profileId === 'string' ? profile.profileId : this.profile.profileId,
+      accountId: authenticated ? profile.accountId : null,
+      authenticated,
+      emailMasked: authenticated ? String(profile.emailMasked || '') : '',
       callsign: typeof profile.callsign === 'string' && profile.callsign
         ? profile.callsign
         : this.profile.callsign,
       lifetimeKills,
       godsTierUnlocked: profile.godsTierUnlocked === true || lifetimeKills >= BUNDLE_UNLOCK_KILLS,
+      matchesPlayed: Number(profile.matchesPlayed) || 0,
+      matchesWon: Number(profile.matchesWon) || 0,
     };
-    if (this.profile.profileId) localStorage.setItem('fps-gods-profile-id', this.profile.profileId);
+    if (!authenticated && this.profile.profileId && !this.profile.profileId.startsWith('acct_')) {
+      localStorage.setItem('fps-gods-profile-id', this.profile.profileId);
+    }
+    if (authenticated && this.profile.callsign) {
+      this.el['player-name'].value = this.profile.callsign.slice(0, 16);
+    }
+    if (authenticated && typeof profile.selectedBundle === 'string' && BUNDLE_BY_ID[profile.selectedBundle]) {
+      this.selectedBundleId = profile.selectedBundle;
+    }
     if (this.selectedBundleId === 'GODS_TIER' && !this.isGodsTierUnlocked) {
       this.selectedBundleId = DEFAULT_BUNDLE_ID;
       localStorage.setItem('fps-gods-bundle', DEFAULT_BUNDLE_ID);
@@ -813,6 +1107,31 @@ export class GameUI {
     this.renderBundles(this.el.bundleGrid, { compact: false });
     this.renderBundles(this.el.onboardingBundles, { compact: true });
     this.renderProfile();
+    this.renderAuth();
+    this.renderWallet();
+    this.updateProfileChipsToBundle();
+  }
+
+  resetToGuestProfile(guestProfileId = null) {
+    this.profile = {
+      profileId: guestProfileId,
+      accountId: null,
+      authenticated: false,
+      emailMasked: '',
+      callsign: localStorage.getItem('fps-gods-callsign') || this.playerName || 'Operator',
+      lifetimeKills: 0,
+      godsTierUnlocked: false,
+      matchesPlayed: 0,
+      matchesWon: 0,
+    };
+    if (this.selectedBundleId === 'GODS_TIER') {
+      this.selectedBundleId = DEFAULT_BUNDLE_ID;
+    }
+    this.setWallet({ accountId: null, authenticated: false, balance: 0, lifetimeEarned: 0, recentTransactions: [] });
+    this.renderBundles(this.el.bundleGrid, { compact: false });
+    this.renderBundles(this.el.onboardingBundles, { compact: true });
+    this.renderProfile();
+    this.renderAuth();
     this.updateProfileChipsToBundle();
   }
 
@@ -868,10 +1187,62 @@ export class GameUI {
     this.el['match-hud'].hidden = !visible;
     if (!visible) {
       this.setScoreboard(false);
+      this.setAimPresentation(null);
       this.el['pause-panel'].hidden = true;
       this.el['death-panel'].hidden = true;
       this.el['weapon-wheel'].hidden = true;
+      this.el['hud-reward-pop'].hidden = true;
     }
+  }
+
+  setAimPresentation(state = null) {
+    const scopeOverlay = this.el['ads-scope-overlay'];
+    const crosshair = this.el.crosshair;
+    if (!state || !(state.rawAmount > 0.12)) {
+      scopeOverlay.hidden = true;
+      delete scopeOverlay.dataset.scope;
+      delete crosshair.dataset.ads;
+      crosshair.hidden = false;
+      return;
+    }
+    if (state.scopeActive && (state.scope === 'optic' || state.scope === 'rail')) {
+      scopeOverlay.hidden = false;
+      scopeOverlay.dataset.scope = state.scope;
+      this.el['ads-scope-label'].textContent = `${state.magnification ?? '4.0×'} ${state.scope === 'rail' ? 'RAIL OPTIC' : 'OPTIC'}`;
+      crosshair.hidden = state.scope === 'optic';
+      crosshair.dataset.ads = state.reticle || 'optic';
+      return;
+    }
+    scopeOverlay.hidden = true;
+    delete scopeOverlay.dataset.scope;
+    crosshair.hidden = false;
+    crosshair.dataset.ads = state.reticle || 'iron';
+  }
+
+  renderHudLoadoutStrip(bundleId, activeWeaponId) {
+    const strip = this.el['hud-loadout-strip'];
+    if (!strip) return;
+    const key = `${bundleId}:${activeWeaponId}`;
+    if (this.lastLoadoutStripKey === key) return;
+    this.lastLoadoutStripKey = key;
+    const bundle = BUNDLE_BY_ID[bundleId] ?? BUNDLE_BY_ID[DEFAULT_BUNDLE_ID];
+    strip.replaceChildren();
+    bundle.weapons.forEach((weapon, idx) => {
+      const slot = document.createElement('span');
+      slot.className = `loadout-slot${weapon.id === activeWeaponId ? ' is-active' : ''}`;
+      const num = document.createElement('kbd');
+      num.textContent = String(idx + 1);
+      const name = document.createElement('strong');
+      name.textContent = weapon.name;
+      slot.append(num, name);
+      strip.append(slot);
+    });
+  }
+
+  setPing(rttMs) {
+    if (!this.el['ping-value']) return;
+    const safe = Number.isFinite(rttMs) && rttMs > 0 ? Math.round(rttMs) : 0;
+    this.el['ping-value'].textContent = `${safe} MS`;
   }
 
   showLobby(room = this.room, selfId = this.selfId) {
@@ -997,6 +1368,7 @@ export class GameUI {
 
     const weaponId = player.currentWeaponId ?? 'SMG';
     const weapon = WEAPON_PRESENTATION[weaponId];
+    this.renderHudLoadoutStrip(player.bundleId ?? this.selectedBundleId, weaponId);
     const noMagazine = !player.unlimitedAmmo && !(player.maxAmmo > 0);
     this.el['weapon-name'].textContent = player.currentWeaponName ?? weapon?.name ?? weaponId;
     this.el['weapon-bundle'].textContent = BUNDLE_BY_ID[player.bundleId]?.name ?? 'BUNDLE';
@@ -1386,6 +1758,7 @@ export class GameUI {
     window.clearTimeout(this.toastTimeout);
     window.clearTimeout(this.hitMarkerTimer);
     window.clearTimeout(this.damageTimer);
+    window.clearTimeout(this.rewardPopTimer);
     for (const timers of this.feedTimers.values()) timers.forEach((timer) => window.clearTimeout(timer));
     this.feedTimers.clear();
   }
