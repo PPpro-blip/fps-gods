@@ -6,7 +6,7 @@ Every operator on screen is the supplied rigged character (`character.glb`, twel
 
 ## Quick start
 
-**Requirements:** Node.js 20.19+ (Node 22+ recommended) and npm.
+**Requirements:** Node.js 22.13+ (`22.22.3` pinned in `.node-version` and `.nvmrc` for built-in unflagged `node:sqlite`) and npm.
 
 ```bash
 npm install
@@ -164,11 +164,11 @@ Every model the game renders ships in the repository and is loaded through a Vit
 `AssetManager` never swaps in a lookalike file. Each required asset is either loaded or recorded as a failure with the exact URL, the HTTP status, and what the host actually returned, and classified as one of: `http-404`, `html-instead-of-glb` (a host answering unknown paths with `index.html`), `not-glb`, `unreadable-glb`, `network-error`, or `unresolved-urls`. The reason is printed to the console, surfaced in a persistent on-screen banner, and exposed as `window.__FPS_GODS_ASSETS__` for bug reports. The game keeps running on fallback operators — it just no longer pretends the real model loaded.
 ## Deployment
 
-The client is a static Vite build; Socket.IO needs a persistent Node.js process. A Render blueprint is included in `render.yaml`.
+The client is a static Vite build; Socket.IO needs a persistent Node.js process (`>=22.13.0`, pinned to `22.22.3` via `.node-version`, `.nvmrc`, `railway.json`, and `render.yaml`).
 
 1. Deploy the server with `npm start`; `GET /health` is available for host checks.
 2. Set `VITE_SOCKET_URL` to the public game-server URL before building the static client when the client and server use different origins. If it is unset, the browser uses `window.location.origin` (suitable for same-origin proxy deployments).
-3. Configure `FPS_GODS_PROFILE_PATH` on persistent storage if lifetime progression must survive server redeploys.
+3. Attach a persistent volume for SQLite (`accounts`, `wallets`, `wallet_ledger`, `auth_sessions`) and guest progression. On Railway, attaching a volume automatically injects `RAILWAY_VOLUME_MOUNT_PATH` (set `RAILWAY_RUN_UID=0` if the mounted volume is owned by `root`); on other hosts set `SQLITE_DB_PATH` and `FPS_GODS_PROFILE_PATH` on mounted durable storage.
 
 Socket.IO accepts cross-origin connections. CORS is not authentication; gameplay and profile progression are validated server-side.
 

@@ -154,6 +154,7 @@ export function createGameServer(options = {}) {
     response.status(200).json({
       status: 'ok',
       service: 'fps-gods-game-server',
+      nodeVersion: process.versions.node,
       uptime: process.uptime(),
       rooms: roomManager.rooms.size,
       connections: io.engine.clientsCount,
@@ -653,7 +654,11 @@ export function startGameServer() {
   });
 
   server.httpServer.listen(port, host, () => {
-    console.log(`FPS GODS server listening on http://${host}:${server.httpServer.address().port}`);
+    const persistence = server.database.getPersistenceSummary();
+    console.log(
+      `FPS GODS server listening on http://${host}:${server.httpServer.address().port} `
+      + `(Node v${process.versions.node}, sqlite: ${persistence.mode})`,
+    );
   });
 
   let shuttingDown = false;

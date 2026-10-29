@@ -1,58 +1,179 @@
 import fs from 'node:fs';
+import { createRequire } from 'node:module';
 import path from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
 
-const DEFAULT_RELATIVE_DB_PATH = path.join('.data', 'fps-gods.sqlite');
+export const MIN_SUPPORTED_NODE_VERSION = Object.freeze({
+  major: 22,
+  minor: 13,
+  patch: 0,
+  text: '22.13.0',
+});
 
-export function resolveDatabaseConfig(options = {}) {
+export function parseNodeVersion(versionString = process.versions.node) {
+  const clean = String(versionString ?? '').trim().replace(/^v/i, '');
+  const match = clean.match(/^(\d+)\.(\d+)\.(\d+)/);
+  if (!match) return null;
+  return {
+    major: Number(match[1]),
+    minor: Number(match[2]),
+    patch: Number(match[3]),
+    raw: clean,
+  };
+}
+
+export function assertSupportedNodeRuntime(versionString = process.versions.node) {
+  const parsed = parseNodeVersion(versionString);
+  const supported = Boolean(
+    parsed
+    && (
+      parsed.major > MIN_SUPPORTED_NODE_VERSION.major
+      || (
+        parsed.major === MIN_SUPPORTED_NODE_VERSION.major
+        && parsed.minor >= MIN_SUPPORTED_NODE_VERSION.minor
+      )
+    ),
+  );
+  if (!supported) {
+    const error = new Error(
+      `[FPS GODS] Unsupported Node.js runtime v${String(versionString ?? 'unknown').replace(/^v/i, '')}: `
+      + `server/database.js requires Node.js >= ${MIN_SUPPORTED_NODE_VERSION.text} for built-in unflagged node:sqlite (DatabaseSync). `
+      + 'Ensure Railway/Render uses Node 22.22.3 (via .node-version / package.json engines / NODE_VERSION).',
+    );
+    error.code = 'ERR_UNSUPPORTED_NODE_RUNTIME';
+    throw error;
+  }
+  return parsed;
+}
+
+assertSupportedNodeRuntime();
+const require = createRequire(import.meta.url);
+const { DatabaseSync } = require('node:sqlite');
+
+const DEFAULT_DB_FILENAME = 'fps-gods.sqlite';
+const DEFAULT_RELATIVE_DB_PATH = path.join('.data', DEFAULT_DB_FILENAME);
+
+function normalizeSqliteFilePath(rawPath, cwd = process.cwd()) {
+  const trimmed = String(rawPath ?? '').trim();
+  if (!trimmed || trimmed === ':memory:') return ':memory:';
+  const endsWithSeparator = trimmed.endsWith('/') || trimmed.endsWith('\\') || trimmed.endsWith(path.sep);
+  const resolved = path.resolve(cwd, trimmed);
+  if (endsWithSeparator) {
+    return path.join(resolved, DEFAULT_DB_FILENAME);
+  }
+  try {
+    if (fs.existsSync(resolved) && fs.statSync(resolved).isDirectory()) {
+      return path.join(resolved, DEFAULT_DB_FILENAME);
+    }
+  } catch {
+    // Path may not exist yet or stat may fail before mkdir; treat as file path.
+  }
+  return resolved;
+}
+
+export function resolveDatabaseConfig(options = {}, env = process.env) {
+  const cwd = options.cwd || process.cwd();
   if (typeof options.dbPath === 'string' && options.dbPath.trim()) {
-    const explicit = options.dbPath.trim();
+    const explicitRaw = options.dbPath.trim();
+    const dbPath = explicitRaw === ':memory:'
+      ? ':memory:'
+      : normalizeSqliteFilePath(explicitRaw, cwd);
     return {
-      dbPath: explicit,
-      mode: explicit === ':memory:' ? 'memory' : 'explicit-path',
-      durableConfigured: explicit !== ':memory:',
+      dbPath,
+      mode: dbPath === ':memory:' ? 'memory' : 'explicit-path',
+      durableConfigured: dbPath !== ':memory:',
+      explicit: true,
     };
   }
-  const envPath = (process.env.DATABASE_PATH || process.env.SQLITE_DB_PATH || '').trim();
+
+  const envPath = (env.DATABASE_PATH || env.SQLITE_DB_PATH || '').trim();
   if (envPath) {
+    const dbPath = envPath === ':memory:'
+      ? ':memory:'
+      : normalizeSqliteFilePath(envPath, cwd);
     return {
-      dbPath: envPath,
-      mode: envPath === ':memory:' ? 'memory' : 'configured-volume',
-      durableConfigured: envPath !== ':memory:',
+      dbPath,
+      mode: dbPath === ':memory:' ? 'memory' : 'configured-volume',
+      durableConfigured: dbPath !== ':memory:',
+      explicit: false,
     };
   }
-  const isTestRunner = process.execArgv.includes('--test') || process.env.NODE_ENV === 'test';
+
+  const isTestRunner = options.isTestRunner ?? (process.execArgv.includes('--test') || env.NODE_ENV === 'test');
   if (isTestRunner) {
     return {
       dbPath: ':memory:',
       mode: 'memory',
       durableConfigured: false,
+      explicit: false,
     };
   }
+
+  const railwayMount = (env.RAILWAY_VOLUME_MOUNT_PATH || '').trim();
+  if (railwayMount) {
+    return {
+      dbPath: path.join(path.resolve(cwd, railwayMount), DEFAULT_DB_FILENAME),
+      mode: 'railway-volume',
+      durableConfigured: true,
+      explicit: false,
+    };
+  }
+
   return {
-    dbPath: path.resolve(process.cwd(), DEFAULT_RELATIVE_DB_PATH),
+    dbPath: path.resolve(cwd, DEFAULT_RELATIVE_DB_PATH),
     mode: 'local-sqlite',
     durableConfigured: false,
+    explicit: false,
   };
 }
 
 export class GameDatabase {
   constructor(options = {}) {
-    this.config = resolveDatabaseConfig(options);
-    if (this.config.dbPath !== ':memory:') {
-      fs.mkdirSync(path.dirname(this.config.dbPath), { recursive: true });
-    }
-    this.db = new DatabaseSync(this.config.dbPath);
+    this.config = resolveDatabaseConfig(options, options.env);
+    this.db = this.openDatabase(options);
     this.closed = false;
     this.inTransaction = false;
     this.initSchema();
+  }
+
+  openDatabase(options = {}) {
+    if (this.config.dbPath === ':memory:') {
+      return new DatabaseSync(':memory:');
+    }
+    try {
+      fs.mkdirSync(path.dirname(this.config.dbPath), { recursive: true });
+      return new DatabaseSync(this.config.dbPath);
+    } catch (error) {
+      if (this.config.explicit || options.allowMemoryFallback === false) {
+        throw error;
+      }
+      const failedPath = this.config.dbPath;
+      const reason = error?.code || error?.message || 'SQLITE_OPEN_FAILED';
+      console.error(
+        `[FPS GODS] Could not open SQLite database at "${failedPath}" (${reason}). `
+        + 'Falling back to ephemeral in-memory SQLite so gameplay remains online. '
+        + 'On Railway, attach a persistent volume (e.g. /data) and set RAILWAY_RUN_UID=0 if the volume is root-owned.',
+      );
+      this.config = {
+        dbPath: ':memory:',
+        requestedPath: failedPath,
+        mode: 'memory-fallback',
+        durableConfigured: false,
+        fallbackReason: String(reason),
+        explicit: false,
+      };
+      return new DatabaseSync(':memory:');
+    }
   }
 
   initSchema() {
     this.db.exec('PRAGMA foreign_keys = ON;');
     this.db.exec('PRAGMA busy_timeout = 5000;');
     if (this.config.dbPath !== ':memory:') {
-      this.db.exec('PRAGMA journal_mode = WAL;');
+      try {
+        this.db.exec('PRAGMA journal_mode = WAL;');
+      } catch {
+        this.db.exec('PRAGMA journal_mode = DELETE;');
+      }
       this.db.exec('PRAGMA synchronous = NORMAL;');
     }
 
@@ -153,6 +274,7 @@ export class GameDatabase {
     return {
       mode: this.config.mode,
       durableConfigured: this.config.durableConfigured,
+      ...(this.config.fallbackReason ? { fallbackReason: this.config.fallbackReason } : {}),
     };
   }
 

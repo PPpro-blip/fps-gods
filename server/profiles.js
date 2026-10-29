@@ -1,10 +1,32 @@
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { BUNDLE_UNLOCK_KILLS } from '../shared/bundles.js';
 import { GODS_TIER_BUNDLE_ID } from './weaponConfig.js';
 
-const DEFAULT_PROFILE_PATH = process.env.FPS_GODS_PROFILE_PATH || join(process.cwd(), '.data', 'profiles.json');
+export function resolveProfileStorePath(env = process.env, cwd = process.cwd()) {
+  const configured = (env.FPS_GODS_PROFILE_PATH || '').trim();
+  if (configured) {
+    const endsWithSep = configured.endsWith('/') || configured.endsWith('\\');
+    const resolved = resolve(cwd, configured);
+    if (endsWithSep) return join(resolved, 'profiles.json');
+    try {
+      if (existsSync(resolved) && statSync(resolved).isDirectory()) {
+        return join(resolved, 'profiles.json');
+      }
+    } catch {
+      // Treat as file path if stat fails before directory creation.
+    }
+    return resolved;
+  }
+  const railwayMount = (env.RAILWAY_VOLUME_MOUNT_PATH || '').trim();
+  if (railwayMount) {
+    return join(resolve(cwd, railwayMount), 'profiles.json');
+  }
+  return join(cwd, '.data', 'profiles.json');
+}
+
+const DEFAULT_PROFILE_PATH = resolveProfileStorePath();
 
 function normalizeGuestProfileId(value) {
   // Reserved prefix `acct_` belongs exclusively to server-verified authenticated
@@ -138,12 +160,16 @@ export class PlayerProfileStore {
 
   save() {
     if (!this.filePath) return;
-    const directory = dirname(this.filePath);
-    mkdirSync(directory, { recursive: true });
-    const temporaryPath = `${this.filePath}.${process.pid}.tmp`;
-    const records = [...this.profiles.values()].sort((left, right) => left.id.localeCompare(right.id));
-    writeFileSync(temporaryPath, `${JSON.stringify({ profiles: records }, null, 2)}\n`, 'utf8');
-    renameSync(temporaryPath, this.filePath);
+    try {
+      const directory = dirname(this.filePath);
+      mkdirSync(directory, { recursive: true });
+      const temporaryPath = `${this.filePath}.${process.pid}.tmp`;
+      const records = [...this.profiles.values()].sort((left, right) => left.id.localeCompare(right.id));
+      writeFileSync(temporaryPath, `${JSON.stringify({ profiles: records }, null, 2)}\n`, 'utf8');
+      renameSync(temporaryPath, this.filePath);
+    } catch (error) {
+      console.error('[FPS GODS] Could not save player profiles:', error.message);
+    }
   }
 }
 
