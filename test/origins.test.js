@@ -6,7 +6,9 @@ import { ALLOWED_ORIGIN, createCorsOrigin, isOriginAllowed, socketCorsOptions } 
 // fps-gods.vercel.app (and any preview URL) never dies on a CORS allowlist.
 test('the socket CORS policy is a wildcard for methods browsers use', () => {
   const options = socketCorsOptions();
-  assert.equal(options.origin, '*');
+  assert.equal(options.credentials, true);
+  options.origin('https://fps-gods.vercel.app', (_err, result) => assert.equal(result, 'https://fps-gods.vercel.app'));
+  options.origin('https://evil.example', (_err, result) => assert.equal(result, false));
   assert.equal(ALLOWED_ORIGIN, '*');
   assert.deepEqual(options.methods, ['GET', 'POST']);
 });

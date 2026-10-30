@@ -192,7 +192,7 @@ test('HTTP OTP routes, unconfigured provider guard, and Socket.IO account impers
     authedSocket = createClient(baseUrl, {
       transports: ['websocket'],
       forceNew: true,
-      auth: { sessionToken: verified.sessionToken },
+      extraHeaders: { Cookie: setCookie.split(';')[0] },
     });
     const authedProfilePromise = waitForEvent(authedSocket, EVENTS.PROFILE_UPDATE);
     await waitForEvent(authedSocket, 'connect');

@@ -187,12 +187,13 @@ test('Live server awards Credits only on authoritative server kills and ignores 
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email: 'ace@example.com', code: outbox[0].code, callsign: 'Ace' }),
-    }).then((r) => r.json());
+    });
+    const cookie = verifyRes.headers.get('set-cookie').split(';')[0];
 
     killerSocket = createClient(baseUrl, {
       transports: ['websocket'],
       forceNew: true,
-      auth: { sessionToken: verifyRes.sessionToken },
+      extraHeaders: { Cookie: cookie },
     });
     victimSocket = createClient(baseUrl, { transports: ['websocket'], forceNew: true });
     await Promise.all([waitForEvent(killerSocket, 'connect'), waitForEvent(victimSocket, 'connect')]);
@@ -201,7 +202,7 @@ test('Live server awards Credits only on authoritative server kills and ignores 
     killerSocket.emit(EVENTS.WALLET_UPDATE, { balance: 999_999 });
     killerSocket.emit(EVENTS.REWARD_EARNED, { amount: 999_999 });
     const walletBefore = await fetch(`${baseUrl}/api/wallet`, {
-      headers: { Authorization: `Bearer ${verifyRes.sessionToken}` },
+      headers: { Cookie: cookie },
     }).then((r) => r.json());
     assert.equal(walletBefore.wallet.balance, 0);
 

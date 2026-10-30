@@ -145,6 +145,10 @@ test('differentiated ADS profiles, optical scope tube hide, and HUD scope/wallet
   await library.ready;
   const effects = new WeaponEffects(scene, camera, library);
   const ui = new GameUI({ profileId: 'guest-test' });
+  assert.equal(ui.el['auth-guest-panel'].hidden, true);
+  assert.match(ui.el['topbar-credits-value'].textContent, /RESTORING/);
+  ui.setAuthRestoring(false);
+  assert.equal(ui.el['auth-guest-panel'].hidden, false);
   const states = [];
   const aim = new AimController(camera, effects, {
     onStateChange: (state) => {
