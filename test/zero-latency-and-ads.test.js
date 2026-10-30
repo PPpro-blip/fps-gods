@@ -207,12 +207,12 @@ test('differentiated ADS profiles, optical scope tube hide, and HUD scope/wallet
       lifetimeEarned: 500,
       recentTransactions: [{ reason: 'elimination', amount: 20 }],
     });
-    assert.match(document.getElementById('topbar-credits-value').textContent, /245 CR/);
+    assert.match(document.getElementById('topbar-credits-value').textContent, /245 SHARZS/);
     assert.equal(document.getElementById('account-status-badge').textContent, 'VERIFIED ACCOUNT');
 
     ui.showRewardEarned({ amount: 20, reason: 'elimination', headshot: true });
     assert.equal(document.getElementById('hud-reward-pop').hidden, false);
-    assert.match(document.getElementById('hud-reward-pop').textContent, /\+20 CR/);
+    assert.match(document.getElementById('hud-reward-pop').textContent, /\+20 SHARZS/);
   } finally {
     ui.dispose();
     effects.dispose();

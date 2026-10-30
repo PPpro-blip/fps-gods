@@ -2361,3 +2361,14 @@ kbd {
   letter-spacing: 0.12em;
 }
 
+
+/* Private combat intelligence: compact, high-contrast and never a screen overlay. */
+.opponent-health { position: absolute; width: 42px; height: 5px; transform: translate(-50%, -100%); padding: 1px; border: 1px solid rgba(240,248,255,.75); border-radius: 4px; background: #091526; box-shadow: 0 1px 5px #000; pointer-events: none; }
+.opponent-health-fill { height: 100%; width: 100%; border-radius: 2px; background: linear-gradient(90deg, #ff9e4a, #ff4f88); transition: width 180ms ease-out; }
+.damage-number { position: absolute; transform: translate(-50%, -50%); color: #fff2c0; font: 800 15px system-ui, sans-serif; text-shadow: 0 2px 3px #07111f, 0 0 7px #ff8c3a; pointer-events: none; }
+.damage-number.is-critical { color: #ffca6c; font-size: 18px; text-shadow: 0 2px 3px #07111f, 0 0 9px #ff4c8e; }
+/* Vivid but restrained HUD hierarchy: cyan vitality, violet loadout, amber ammo. */
+.ammo-weapon strong { color: #d9b4ff; text-shadow: 0 0 9px rgba(174,91,255,.3); }
+.ammo-count strong { color: #ffe4ad; }
+.health-fill { box-shadow: 0 0 9px rgba(45, 221, 255, .45); }
+.hud-elim-banner .elim-kicker { color: #ffb05a; }

@@ -76,7 +76,7 @@ const NEON_FOUNDRY = Object.freeze({
     coverEdge: '#7fd8f2',
     coverSeam: '#63c9e8',
     accent: '#59d8ff',
-    secondary: '#ff8b3d',
+    secondary: '#ff9747',
     skyline: '#1a2938',
   }),
   lighting: Object.freeze({
@@ -148,8 +148,8 @@ const SKYBRIDGE = Object.freeze({
     cover: Object.freeze(['#44596f', '#516a84', '#3b4f63']),
     coverEdge: '#9ae9ff',
     coverSeam: '#6fd8ff',
-    accent: '#8fe6ff',
-    secondary: '#7c8cff',
+    accent: '#56dcff',
+    secondary: '#bc67ff',
     skyline: '#16273a',
   }),
   lighting: Object.freeze({

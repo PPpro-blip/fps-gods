@@ -392,6 +392,16 @@ test('two live clients join, ready, play, synchronize weapon switches, and resum
     const originalGuestState = room.game.players.get(guest.id);
     assert.ok(originalGuestState);
 
+    phase = 'private health snapshots';
+    const [hostSnapshot, guestSnapshot] = await Promise.all([
+      waitForEvent(host, EVENTS.GAME_STATE_UPDATE), waitForEvent(guest, EVENTS.GAME_STATE_UPDATE),
+    ]);
+    assert.equal(hostSnapshot.players.find(p => p.id === host.id).health, 100);
+    assert.equal(hostSnapshot.players.find(p => p.id === guest.id).health, undefined);
+    assert.equal(guestSnapshot.players.find(p => p.id === guest.id).health, 100);
+    assert.equal(guestSnapshot.players.find(p => p.id === host.id).health, undefined);
+    assert.equal(room.game.getScoreboard().some(p => 'health' in p), false);
+
     phase = 'synchronize weapon switch';
     const synchronizedSwitch = waitForEvent(
       host,

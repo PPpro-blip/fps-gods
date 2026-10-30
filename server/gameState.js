@@ -221,6 +221,8 @@ function makeGamePlayer(record, spawn, now, map, cover) {
     input: { forward: 0, strafe: 0, jump: false },
     pendingJump: false,
     recentDamagers: new Map(),
+    healthObservers: new Set(),
+    teamId: record.teamId ?? null,
     lastInputAt: now,
     lastInputSequence: -1,
     lastProcessedInputSequence: -1,
@@ -1112,14 +1114,17 @@ export class GameState {
       const blockedByShield = this.isFrontalShieldBlock(target, hit.source ?? shooter, hit.point, now);
       const multiplier = blockedByShield ? getWeapon(target.currentWeaponId).damageMultiplier : 1;
       const damage = protectedAtSpawn ? 0 : hit.damage * multiplier;
+      const appliedDamage = Math.min(target.health, damage);
       if (damage > 0) target.health = Math.max(0, target.health - damage);
 
       const killed = damage > 0 && target.health === 0;
+      const opponents = shooter.id !== target.id && !(shooter.teamId != null && shooter.teamId === target.teamId);
       this.emitPlayer(shooter.id, EVENTS.HIT_CONFIRMED, {
         hit: true,
         targetId: target.id,
         weaponId: weapon.id,
-        damage,
+        damage: appliedDamage,
+        opponent: opponents,
         headshot: hit.headshot,
         protected: protectedAtSpawn,
         blockedByShield,
@@ -1128,6 +1133,15 @@ export class GameState {
       });
 
       if (damage > 0) {
+        if (opponents && !shooter.isBot) target.healthObservers.add(shooter.id);
+        for (const observerId of target.healthObservers) {
+          const observer = this.players.get(observerId);
+          if (observer?.connected && !(observer.teamId != null && observer.teamId === target.teamId)) {
+            this.emitPlayer(observerId, EVENTS.OPPONENT_HEALTH, {
+              targetId: target.id, health: target.health, maxHealth: PLAYER.maxHealth,
+            });
+          }
+        }
         if (shooter.id !== target.id) {
           const prev = target.recentDamagers.get(shooter.id);
           const fresh = prev && (now - prev.at <= CURRENCY_CONFIG.antiFarming.assistWindowMs);
@@ -1233,6 +1247,7 @@ export class GameState {
       }
     }
     victim.recentDamagers.clear();
+    victim.healthObservers.clear();
 
     const killSeq = ++this.killSequence;
 
@@ -1334,6 +1349,7 @@ export class GameState {
     player.input.jump = false;
     player.pendingJump = false;
     player.recentDamagers.clear();
+    player.healthObservers.clear();
     player.wasJumping = false;
     player.shieldBlocking = false;
     player.shieldBlockUntil = 0;
@@ -1377,7 +1393,6 @@ export class GameState {
       x: player.x,
       y: player.y,
       z: player.z,
-      health: player.health,
       spawnProtectionUntil: player.spawnProtectionUntil,
     });
     this.sendAmmo(player, now);
@@ -1448,6 +1463,7 @@ export class GameState {
       if (entry.victimId === previousId) entry.victimId = nextId;
     }
     for (const other of this.players.values()) {
+      if (other.healthObservers.delete(previousId)) other.healthObservers.add(nextId);
       if (other.recentDamagers?.has(previousId)) {
         const dmg = other.recentDamagers.get(previousId);
         other.recentDamagers.delete(previousId);
@@ -1459,8 +1475,18 @@ export class GameState {
     return true;
   }
 
+  getRevealedHealthFor(playerId) {
+    const observer = this.players.get(playerId);
+    if (!observer) return [];
+    return [...this.players.values()]
+      .filter(target => target.alive && target.connected && target.healthObservers.has(playerId)
+        && !(observer.teamId != null && observer.teamId === target.teamId))
+      .map(target => ({ targetId: target.id, health: target.health, maxHealth: PLAYER.maxHealth }));
+  }
+
   removePlayer(playerId) {
     this.players.delete(playerId);
+    for (const other of this.players.values()) other.healthObservers.delete(playerId);
     this.projectiles = this.projectiles.filter((projectile) => projectile.ownerId !== playerId);
     const previousCount = this.smokeClouds.length;
     this.smokeClouds = this.smokeClouds.filter((cloud) => cloud.ownerId !== playerId);
@@ -1475,7 +1501,6 @@ export class GameState {
         color: player.color,
         kills: player.kills,
         deaths: player.deaths,
-        health: player.health,
         alive: player.alive,
         isBot: player.isBot,
         connected: player.connected,

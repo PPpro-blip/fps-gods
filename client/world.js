@@ -234,6 +234,8 @@ export class World {
       trim: make(new THREE.MeshBasicMaterial({ color: palette.wallTrim })),
       accent: make(new THREE.MeshBasicMaterial({ color: palette.accent })),
       secondary: make(new THREE.MeshBasicMaterial({ color: palette.secondary ?? palette.wallTrim })),
+      signalPurple: make(new THREE.MeshBasicMaterial({ color: '#c25cff', transparent: true, opacity: 0.85 })),
+      signalGreen: make(new THREE.MeshBasicMaterial({ color: '#72f5bd', transparent: true, opacity: 0.85 })),
       laneNorth: make(new THREE.MeshBasicMaterial({
         color: palette.accent, transparent: true, opacity: 0.46,
       })),
@@ -628,6 +630,18 @@ export class World {
       landmarks.add(strip);
     }
 
+    // Paired violet/green signal crowns sit outside the collision boundary,
+    // identifying the mid-axis without washing the combat floor in glow.
+    for (const sign of [-1, 1]) {
+      const crown = new THREE.Mesh(this.sharedUnitBox, sign < 0 ? this.materials.signalPurple : this.materials.signalGreen);
+      crown.scale.set(0.22, 1.35, 1.2);
+      crown.position.set(sign * (halfWidth + 0.42), wallHeight + 3.2, 0);
+      landmarks.add(crown);
+    }
+    this.animatedItems.push(
+      { kind: 'pulse-opacity', material: this.materials.signalPurple, speed: 0.7, phase: 0, base: 0.8, amp: 0.16 },
+      { kind: 'pulse-opacity', material: this.materials.signalGreen, speed: 0.7, phase: Math.PI, base: 0.8, amp: 0.16 },
+    );
     this.add(landmarks);
   }
 

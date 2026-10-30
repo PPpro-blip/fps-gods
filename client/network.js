@@ -165,6 +165,7 @@ export class GameNetwork {
     this.socket.on(EVENTS.KILL_FEED_UPDATE, (data) => this.handlers.onKillFeed?.(data));
     this.socket.on(EVENTS.SCORE_UPDATE, (data) => this.handlers.onScoreUpdate?.(data));
     this.socket.on(EVENTS.HIT_CONFIRMED, (data) => this.handlers.onHitConfirmed?.(data));
+    this.socket.on(EVENTS.OPPONENT_HEALTH, (data) => this.handlers.onOpponentHealth?.(data));
     this.socket.on(EVENTS.AMMO_UPDATE, (data) => this.handlers.onAmmoUpdate?.(data));
     this.socket.on(EVENTS.HEALTH_UPDATE, (data) => this.handlers.onHealthUpdate?.(data));
     this.socket.on(EVENTS.WEAPON_UPDATE, (data) => this.handlers.onWeaponUpdate?.(data));
