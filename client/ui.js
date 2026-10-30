@@ -376,7 +376,7 @@ export class GameUI {
       localStorage.setItem(ONBOARDED_KEY, '1');
       this.showOnboarding(false);
       this.showScreen('play');
-      this.handlers.onProfileCallsign?.(this.playerName);
+      if (!this.profile.authenticated) this.handlers.onProfileCallsign?.(this.playerName);
     });
   }
 
@@ -883,20 +883,25 @@ export class GameUI {
   /* ─────────────────────────────── profile ─────────────────────────────── */
 
   bindProfile() {
-    this.el['profile-callsign-form'].addEventListener('submit', (event) => {
+    this.el['profile-callsign-form'].addEventListener('submit', async (event) => {
       event.preventDefault();
       const name = this.el['profile-callsign-input'].value.trim().slice(0, 16);
       if (!name) {
         this.setProfileMessage('Enter a callsign first.', true);
         return;
       }
-      localStorage.setItem('fps-gods-callsign', name);
-      this.el['player-name'].value = name;
-      this.el['profile-callsign'].textContent = name;
-      this.el['profile-avatar'].textContent = [...name][0]?.toUpperCase() ?? 'R';
-      this.el['profile-title'].textContent = name;
-      this.handlers.onProfileCallsign?.(name);
-      this.setProfileMessage('Callsign saved.', false);
+      try {
+        await this.handlers.onProfileCallsign?.(name);
+        localStorage.setItem('fps-gods-callsign', this.profile.authenticated ? this.profile.callsign : name);
+        const saved = this.profile.authenticated ? this.profile.callsign : name;
+        this.el['player-name'].value = saved;
+        this.el['profile-callsign'].textContent = saved;
+        this.el['profile-avatar'].textContent = [...saved][0]?.toUpperCase() ?? 'R';
+        this.el['profile-title'].textContent = saved;
+        this.setProfileMessage('Callsign saved.', false);
+      } catch (error) {
+        this.setProfileMessage(error?.message || 'Could not update callsign.', true);
+      }
     });
   }
 
@@ -951,7 +956,7 @@ export class GameUI {
         this.el['auth-code-input'].value = '';
         this.authState.step = 'email';
         this.renderAuth();
-        this.setAuthMessage('Signed in. Your Credits wallet and operator record are now persistent.', false);
+        this.setAuthMessage('Signed in. Your SHARZS wallet and operator record are now persistent.', false);
       } catch (error) {
         this.setAuthMessage(error?.message || 'Invalid or expired verification code.', true);
       } finally {
@@ -1008,6 +1013,10 @@ export class GameUI {
     if (typeof status.emailProvider === 'string') {
       this.authState.emailProvider = status.emailProvider;
     }
+    if (Number.isSafeInteger(status.callsignChangeFee)) {
+      const note = document.getElementById('callsign-fee-note');
+      if (note) note.textContent = `Account callsign changes cost ${status.callsignChangeFee} SHARZS; cooldown ${Math.ceil((status.callsignCooldownSeconds || 0) / 86400)} days.`;
+    }
     this.renderAuth();
   }
 
@@ -1037,7 +1046,7 @@ export class GameUI {
     if (!this.authState.otpConfigured) {
       this.el['auth-provider-note'].textContent = 'Email OTP delivery is not configured on this server yet (set RESEND_API_KEY and AUTH_EMAIL_FROM on the backend). Guest play remains fully active.';
     } else {
-      this.el['auth-provider-note'].textContent = 'Sign in with a one-time 6-digit email code to persist your Credits wallet, callsign, and lifetime unlocks across devices.';
+      this.el['auth-provider-note'].textContent = 'Sign in with a one-time 6-digit email code to persist your SHARZS wallet, callsign, and lifetime unlocks across devices.';
     }
   }
 
@@ -1063,13 +1072,13 @@ export class GameUI {
       : this.wallet.error
         ? 'WALLET ERR'
         : signedIn
-          ? `${formatCredits(this.wallet.balance, { compact: true })} CR`
-          : 'GUEST · 0 CR';
+          ? `${formatCredits(this.wallet.balance, { compact: true })} SHARZS`
+          : 'GUEST · 0 SHARZS';
 
     this.el['topbar-credits-value'].textContent = balanceLabel;
     this.el['topbar-credits-button'].classList.toggle('is-authenticated', signedIn);
     this.el['hud-credits-value'].textContent = signedIn
-      ? `${formatCredits(this.wallet.balance, { compact: true })} CR`
+      ? `${formatCredits(this.wallet.balance, { compact: true })} SHARZS`
       : 'GUEST';
     this.el['profile-stat-credits'].textContent = signedIn
       ? formatCredits(this.wallet.balance, { includeName: true })
@@ -1082,9 +1091,9 @@ export class GameUI {
         : 'GUEST';
     this.el['store-wallet-balance'].textContent = signedIn
       ? formatCredits(this.wallet.balance, { includeName: true })
-      : '◈ 0 Credits (Guest)';
+      : '◈ 0 SHARZS (Guest)';
     this.el['store-wallet-lifetime'].textContent = formatCredits(this.wallet.lifetimeEarned);
-    this.el['store-auth-button'].textContent = signedIn ? 'REFRESH WALLET' : 'SIGN IN TO SAVE CREDITS';
+    this.el['store-auth-button'].textContent = signedIn ? 'REFRESH WALLET' : 'SIGN IN TO SAVE SHARZS';
 
     const list = this.el['store-ledger-list'];
     list.replaceChildren();
@@ -1098,14 +1107,14 @@ export class GameUI {
     if (!signedIn) {
       const li = document.createElement('li');
       li.className = 'ledger-empty';
-      li.textContent = 'Sign in with Email OTP on the Profile tab to earn and persist Credits.';
+      li.textContent = 'Sign in with Email OTP on the Profile tab to earn and persist SHARZS.';
       list.append(li);
       return;
     }
     if (!this.wallet.recentTransactions.length) {
       const li = document.createElement('li');
       li.className = 'ledger-empty';
-      li.textContent = 'No Credits earned yet. Complete matches or score eliminations to populate your ledger.';
+      li.textContent = 'No SHARZS earned yet. Complete matches or score eliminations to populate your ledger.';
       list.append(li);
       return;
     }
@@ -1114,6 +1123,7 @@ export class GameUI {
       assist: 'Combat assist bonus',
       match_completion: 'Match completion',
       match_victory: 'Match victory bonus',
+      callsign_change: 'Callsign change',
     };
     for (const tx of this.wallet.recentTransactions.slice(0, 8)) {
       const li = document.createElement('li');
@@ -1121,7 +1131,7 @@ export class GameUI {
       const label = document.createElement('span');
       label.textContent = reasonLabels[tx.reason] ?? tx.reason;
       const gain = document.createElement('strong');
-      gain.textContent = `+${tx.amount} CR`;
+      gain.textContent = `${tx.amount > 0 ? '+' : ''}${tx.amount} SHARZS`;
       li.append(label, gain);
       list.append(li);
     }
@@ -1136,7 +1146,7 @@ export class GameUI {
       match_victory: 'VICTORY',
     };
     const pop = this.el['hud-reward-pop'];
-    pop.textContent = `+${reward.amount} CR · ${labels[reward.reason] ?? 'REWARD'}`;
+    pop.textContent = `+${reward.amount} SHARZS · ${labels[reward.reason] ?? 'REWARD'}`;
     pop.hidden = false;
     pop.classList.add('is-active');
     window.clearTimeout(this.rewardPopTimer);

@@ -1,0 +1,83 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { JSDOM } from 'jsdom';
+import * as THREE from 'three';
+import { GameState } from '../server/gameState.js';
+import { EVENTS, ROOM_STATES } from '../shared/events.js';
+import { CombatIntel, isOccluded, smokeOccludes, MAX_DAMAGE_NUMBERS } from '../client/combatIntel.js';
+
+test('server reveals health only to attackers who damaged a target, and resets per life', () => {
+  const ids = ['a', 'b', 'c', 't'];
+  const room = { code: 'TEST', state: ROOM_STATES.PLAYING, players: new Map(ids.map(id => [id, { id, name: id, bundleId: 'GHOST' }])) };
+  const sent = [];
+  const game = new GameState(room, { emitPlayer: (id, event, data) => sent.push({ id, event, data }) }, 0);
+  const [a, b, c, target] = ids.map(id => game.players.get(id));
+  target.spawnProtectionUntil = 0;
+  const weapon = { id: 'test' };
+  const damage = (shooter, amount, now) => game.applyDamageBatch(shooter, [{ target, damage: amount, point: { x: 0, y: 1, z: 0 }, source: shooter, headshot: false }], now, weapon);
+  assert.equal(sent.filter(e => e.event === EVENTS.OPPONENT_HEALTH).length, 0);
+  damage(a, 20, 1);
+  let intel = sent.filter(e => e.event === EVENTS.OPPONENT_HEALTH);
+  assert.deepEqual(intel.map(e => [e.id, e.data.health]), [['a', 80]]);
+  sent.length = 0;
+  damage(b, 10, 2);
+  intel = sent.filter(e => e.event === EVENTS.OPPONENT_HEALTH);
+  assert.deepEqual(intel.map(e => [e.id, e.data.health]).sort(), [['a', 70], ['b', 70]]);
+  assert.equal(sent.some(e => e.id === 'c' && e.event === EVENTS.OPPONENT_HEALTH), false);
+  assert.deepEqual(game.getRevealedHealthFor('a').map(e => e.health), [70]);
+  assert.deepEqual(game.getRevealedHealthFor('c'), []);
+  c.teamId = target.teamId = 'red';
+  sent.length = 0;
+  damage(c, 5, 3);
+  assert.equal(sent.some(e => e.id === 'c' && e.event === EVENTS.OPPONENT_HEALTH), false);
+  assert.equal(sent.find(e => e.id === 'c' && e.event === EVENTS.HIT_CONFIRMED).data.opponent, false);
+  damage(a, 1000, 4);
+  const finalHit = sent.filter(e => e.id === 'a' && e.event === EVENTS.HIT_CONFIRMED).at(-1);
+  assert.equal(finalHit.data.damage, 65); // actual health removed, not nominal overkill
+  assert.equal(target.healthObservers.size, 0);
+  game.respawn(target, 10);
+  target.spawnProtectionUntil = 0;
+  sent.length = 0;
+  damage(b, 10, 11);
+  assert.deepEqual(sent.filter(e => e.event === EVENTS.OPPONENT_HEALTH).map(e => e.id), ['b']);
+});
+
+test('confirmed damage numbers are capped, fade, and bars obey cover, team, range and lifecycle', () => {
+  const dom = new JSDOM('<div id="root"></div>');
+  const oldWindow = globalThis.window, oldDocument = globalThis.document;
+  globalThis.window = dom.window; globalThis.document = dom.window.document;
+  try {
+    const root = document.getElementById('root');
+    const intel = new CombatIntel(root);
+    const camera = new THREE.PerspectiveCamera(75, 1, .1, 100);
+    camera.position.set(0, 1.6, 0); camera.lookAt(0, 1.6, -10); camera.updateMatrixWorld();
+    const player = { id: 'enemy', x: 0, y: 0, z: -10, alive: true, connected: true };
+    const local = { id: 'me', x: 0, y: 0, z: 0, alive: true };
+    const interp = { sample: () => player };
+    const update = (cover = [], now = 0) => intel.update([local, player], interp, camera, 0, 'me', cover, now);
+    update(); assert.equal(intel.bars.size, 0);
+    intel.hit({ hit: false, damage: 50, point: { x: 0, y: 1, z: -10 } }, 0);
+    intel.hit({ hit: true, damage: 0, point: { x: 0, y: 1, z: -10 } }, 0);
+    assert.equal(intel.numbers.length, 0);
+    intel.hit({ hit: true, damage: 23, headshot: true, point: { x: 0, y: 1, z: -10 } }, 0);
+    assert.equal(intel.numbers[0].element.textContent, '23');
+    assert.equal(intel.numbers[0].element.classList.contains('is-critical'), true);
+    intel.health({ targetId: 'enemy', health: 77, maxHealth: 100 }); update();
+    const bar = intel.bars.get('enemy');
+    assert.equal(bar.fill.style.width, '77%');
+    assert.equal(bar.element.style.display, 'block');
+    const wall = { x: 0, z: -5, width: 4, depth: 1, height: 4 };
+    assert.equal(isOccluded(camera.position, { x: 0, y: 2, z: -10 }, [wall]), true);
+    update([wall]); assert.equal(bar.element.style.display, 'none');
+    assert.equal(smokeOccludes(camera.position, { x: 0, y: 2, z: -10 }, [{ x: 0, y: 1.5, z: -5, radius: 2 }]), true);
+    local.teamId = player.teamId = 'blue'; update(); assert.equal(bar.element.style.display, 'none');
+    local.teamId = player.teamId = null; player.z = -80; update(); assert.equal(bar.element.style.display, 'none');
+    player.z = -10;
+    for (let i = 0; i < 60; i++) intel.hit({ hit: true, damage: 1, point: { x: 0, y: 1, z: -10 } }, 0);
+    assert.equal(intel.numbers.length, MAX_DAMAGE_NUMBERS);
+    update([], 900); assert.equal(intel.numbers.length, 0);
+    player.alive = false; update(); assert.equal(intel.bars.size, 0);
+    player.alive = true; update(); assert.equal(intel.bars.size, 0);
+    intel.clear(); assert.equal(root.children.length, 0);
+  } finally { globalThis.window = oldWindow; globalThis.document = oldDocument; dom.window.close(); }
+});

@@ -152,6 +152,10 @@ export class AuthService {
     this.database = database;
     this.db = database.db;
     this.emailProvider = emailProvider;
+    const fee = Number(options.callsignFee ?? process.env.CALLSIGN_CHANGE_FEE ?? 100);
+    const cooldown = Number(options.callsignCooldownMs ?? process.env.CALLSIGN_CHANGE_COOLDOWN_MS ?? 604800000);
+    this.callsignFee = Number.isSafeInteger(fee) && fee > 0 && fee <= 1000000 ? fee : 100;
+    this.callsignCooldownMs = Number.isSafeInteger(cooldown) && cooldown >= 60000 ? cooldown : 604800000;
 
     this.otpTtlMs = options.otpTtlMs ?? (Number(process.env.AUTH_OTP_TTL_MS) || DEFAULT_OTP_TTL_MS);
     this.otpCooldownMs = options.otpCooldownMs ?? (Number(process.env.AUTH_OTP_COOLDOWN_MS) || DEFAULT_OTP_COOLDOWN_MS);
@@ -268,6 +272,8 @@ export class AuthService {
       otpExpiresInSeconds: Math.round(this.otpTtlMs / 1_000),
       resendCooldownSeconds: Math.round(this.otpCooldownMs / 1_000),
       persistence: this.database.getPersistenceSummary(),
+      callsignChangeFee: this.callsignFee,
+      callsignCooldownSeconds: Math.ceil(this.callsignCooldownMs / 1000),
     };
   }
 
@@ -298,21 +304,46 @@ export class AuthService {
     return this.formatPublicAccount(row);
   }
 
-  updateAccountProfile(accountId, { callsign, selectedBundle } = {}, now = Date.now()) {
-    const existing = this.stmtFindAccountById.get(accountId);
-    if (!existing) return null;
-    const nextCallsign = callsign !== undefined
-      ? sanitizeAccountCallsign(callsign, existing.callsign)
-      : existing.callsign;
-    const unlocked = Boolean(existing.gods_tier_unlocked) || existing.lifetime_kills >= BUNDLE_UNLOCK_KILLS;
-    let nextBundle = existing.selected_bundle;
-    if (typeof selectedBundle === 'string' && BUNDLE_BY_ID[selectedBundle]) {
-      if (selectedBundle !== 'GODS_TIER' || unlocked) {
-        nextBundle = selectedBundle;
-      }
+  callsignTaken(callsign, exceptId = '') {
+    return Boolean(this.db.prepare('SELECT id FROM accounts WHERE callsign = ? COLLATE NOCASE AND id != ? LIMIT 1').get(callsign, exceptId));
+  }
+
+  availableInitialCallsign(preferred) {
+    if (!this.callsignTaken(preferred)) return preferred;
+    // Keep existing identities untouched, even if legacy accounts share a name.
+    for (let i = 0; i < 100; i++) {
+      const suffix = crypto.randomBytes(4).toString('hex');
+      const candidate = `${preferred.slice(0, 7)}-${suffix}`;
+      if (!this.callsignTaken(candidate)) return candidate;
     }
-    this.stmtUpdateAccountProfile.run(nextCallsign, nextBundle, now, accountId);
-    return this.getAccountById(accountId);
+    throw new Error('Could not allocate a unique callsign.');
+  }
+
+  updateAccountProfile(accountId, { callsign, selectedBundle } = {}, now = Date.now()) {
+    return this.database.transaction(() => {
+      const existing = this.stmtFindAccountById.get(accountId);
+      if (!existing) return null;
+      const nextCallsign = callsign !== undefined ? sanitizeAccountCallsign(callsign, existing.callsign) : existing.callsign;
+      if (nextCallsign !== existing.callsign) {
+        const fail = (code, message, status = 400) => { const e = new Error(message); e.code = code; e.status = status; throw e; };
+        if (this.callsignTaken(nextCallsign, accountId)) fail('CALLSIGN_TAKEN', 'That callsign is already in use.', 409);
+        const last = this.db.prepare('SELECT changed_at FROM callsign_changes WHERE account_id = ?').get(accountId);
+        if (last && now - last.changed_at < this.callsignCooldownMs) fail('CALLSIGN_COOLDOWN', 'Callsign change cooldown is still active.', 429);
+        this.stmtEnsureWallet.run(accountId, now);
+        const wallet = this.db.prepare('SELECT balance FROM wallets WHERE account_id = ?').get(accountId);
+        if (wallet.balance < this.callsignFee) fail('INSUFFICIENT_FUNDS', `Changing callsign costs ${this.callsignFee} SHARZS.`, 402);
+        const balance = wallet.balance - this.callsignFee;
+        this.db.prepare('UPDATE wallets SET balance = ?, updated_at = ? WHERE account_id = ?').run(balance, now, accountId);
+        this.db.prepare('INSERT INTO wallet_ledger (idempotency_key, account_id, amount, balance_after, reason, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+          .run(`callsign:${crypto.randomUUID()}`, accountId, -this.callsignFee, balance, 'callsign_change', now);
+        this.db.prepare('INSERT INTO callsign_changes (account_id, changed_at) VALUES (?, ?) ON CONFLICT(account_id) DO UPDATE SET changed_at = excluded.changed_at').run(accountId, now);
+      }
+      const unlocked = Boolean(existing.gods_tier_unlocked) || existing.lifetime_kills >= BUNDLE_UNLOCK_KILLS;
+      let nextBundle = existing.selected_bundle;
+      if (typeof selectedBundle === 'string' && BUNDLE_BY_ID[selectedBundle] && (selectedBundle !== 'GODS_TIER' || unlocked)) nextBundle = selectedBundle;
+      this.stmtUpdateAccountProfile.run(nextCallsign, nextBundle, now, accountId);
+      return this.getAccountById(accountId);
+    });
   }
 
   recordAccountKill(accountId, amount = 1, now = Date.now()) {
@@ -487,7 +518,7 @@ export class AuthService {
         isNewAccount = true;
         const accountId = `acct_${crypto.randomUUID()}`;
         const defaultName = normalized.split('@')[0].slice(0, 12);
-        const initialCallsign = sanitizeAccountCallsign(callsign, defaultName || 'Operator');
+        const initialCallsign = this.availableInitialCallsign(sanitizeAccountCallsign(callsign, defaultName || 'Operator'));
         const initialBundle = typeof selectedBundle === 'string'
           && BUNDLE_BY_ID[selectedBundle]
           && selectedBundle !== 'GODS_TIER'

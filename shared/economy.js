@@ -1,8 +1,8 @@
 export const CURRENCY_CONFIG = Object.freeze({
   id: 'credits',
-  name: 'Credits',
-  singularName: 'Credit',
-  shortCode: 'CR',
+  name: 'SHARZS',
+  singularName: 'SHARZS',
+  shortCode: 'SHARZS',
   symbol: '◈',
   maxBalance: 1_000_000_000,
   maxSingleAward: 10_000,

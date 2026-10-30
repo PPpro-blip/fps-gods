@@ -214,6 +214,12 @@ export class GameDatabase {
       CREATE INDEX IF NOT EXISTS idx_wallet_ledger_account_time
         ON wallet_ledger(account_id, created_at DESC);
 
+      CREATE TABLE IF NOT EXISTS callsign_changes (
+        account_id TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+        changed_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_accounts_callsign_nocase ON accounts(callsign COLLATE NOCASE);
+
       CREATE TABLE IF NOT EXISTS otp_challenges (
         id TEXT PRIMARY KEY,
         email_normalized TEXT NOT NULL,

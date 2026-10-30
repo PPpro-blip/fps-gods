@@ -234,6 +234,9 @@ export class RoomManager {
     socket.data.profileId = player.profileId;
     socket.emit(EVENTS.ROOM_SESSION, { roomCode: room.code, resumeToken });
     this.broadcastRoomState(room);
+    if (room.state === ROOM_STATES.PLAYING && room.game) {
+      for (const health of room.game.getRevealedHealthFor(socket.id)) socket.emit(EVENTS.OPPONENT_HEALTH, health);
+    }
     if (room.state === ROOM_STATES.ENDED) {
       socket.emit(EVENTS.GAME_END, {
         code: room.code,

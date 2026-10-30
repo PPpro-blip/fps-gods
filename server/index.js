@@ -318,14 +318,21 @@ export function createGameServer(options = {}) {
       });
       return;
     }
-    const updated = authService.updateAccountProfile(session.accountId, {
-      callsign: req.body?.callsign,
-      selectedBundle: req.body?.selectedBundle,
-    });
-    res.status(200).json({
-      ok: true,
-      account: updated,
-    });
+    try {
+      const updated = authService.updateAccountProfile(session.accountId, {
+        callsign: req.body?.callsign,
+        selectedBundle: req.body?.selectedBundle,
+      });
+      const wallet = economyService.getWallet(session.accountId, { historyLimit: 12 });
+      res.status(200).json({ ok: true, account: updated, wallet });
+      emitWalletToAccount(session.accountId);
+      for (const id of accountSockets.get(session.accountId) || []) {
+        io.to(id).emit(EVENTS.PROFILE_UPDATE, profileStore.getOrCreate(session.accountId, '', session.accountId));
+      }
+    } catch (error) {
+      const status = Number.isInteger(error?.status) ? error.status : 500;
+      res.status(status).json({ ok: false, code: error?.code || 'PROFILE_ERROR', message: status >= 500 ? 'Unable to update profile.' : error.message });
+    }
   });
 
   app.post('/api/auth/logout', (req, res) => {
@@ -365,6 +372,21 @@ export function createGameServer(options = {}) {
       wallet,
     });
   });
+
+  // Shared snapshots contain no opponent health. Each recipient receives only
+  // their own health; unlocked opponent updates travel via OPPONENT_HEALTH.
+  function emitSnapshots(room, snapshot, volatile = false) {
+    for (const player of room.players.values()) {
+      if (player.connected === false) continue;
+      const safe = { ...snapshot, players: snapshot.players.map((p) => {
+        if (p.id === player.id) return p;
+        const { health, maxHealth, ...publicPlayer } = p;
+        return publicPlayer;
+      }) };
+      const target = io.to(player.id);
+      (volatile ? target.volatile : target).emit(EVENTS.GAME_STATE_UPDATE, safe);
+    }
+  }
 
   function launchRoom(room) {
     const now = Date.now();
@@ -458,7 +480,7 @@ export function createGameServer(options = {}) {
     roomManager.broadcastRoomState(room);
     // Push the initial authoritative snapshot immediately on launch so high-RTT
     // clients can move on frame 0 without waiting up to 50ms for the next tick.
-    io.to(room.code).emit(EVENTS.GAME_STATE_UPDATE, room.game.getPublicState(now));
+    emitSnapshots(room, room.game.getPublicState(now));
   }
 
   io.on('connection', (socket) => {
@@ -640,7 +662,7 @@ export function createGameServer(options = {}) {
           setImmediate(() => {
             pendingSnapshots.delete(room.code);
             if (room.state === ROOM_STATES.PLAYING && room.game === entry.game) {
-              io.to(room.code).volatile.emit(EVENTS.GAME_STATE_UPDATE, entry.snapshot);
+              emitSnapshots(room, entry.snapshot, true);
             }
           });
         }

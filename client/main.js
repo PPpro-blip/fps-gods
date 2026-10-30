@@ -1,4 +1,5 @@
 import { restoreAuthSession } from './authSession.js';
+import { CombatIntel } from './combatIntel.js';
 import * as THREE from 'three';
 import { PLAYER } from '../shared/gameConfig.js';
 import { DEFAULT_MAP_ID } from '../shared/maps.js';
@@ -103,6 +104,7 @@ const aim = new AimController(camera, weaponEffects, {
   },
 });
 const remotePlayers = new RemotePlayers(scene, nameTagRoot, weaponModels, assetManager);
+const combatIntel = new CombatIntel(nameTagRoot);
 const trigger = new WeaponTrigger();
 const inputPump = new InputPump(() => {
   if (!canPlay() || !network.connected || !controller.enabled || !latestPlayerAlive) {
@@ -181,6 +183,7 @@ let serverClockOffset = 0;
 let latestPlayerAlive = false;
 let lastSnapshotTick = -1;
 let predictionCover = [];
+let intelSmoke = [];
 let nextPingId = 1;
 let pingInterval = null;
 let cameraStridePhase = 0;
@@ -275,6 +278,8 @@ function clearMatchPresentation() {
   inputCadence.reset();
   lastSnapshotTick = -1;
   remotePlayers.clear();
+  combatIntel.clear();
+  intelSmoke = [];
   weaponEffects.updateSmokeClouds([]);
   weaponEffects.clearProjectiles();
   world.resetCover();
@@ -320,6 +325,8 @@ function enterMatch(room = currentRoom) {
     inputCadence.reset();
     lastSnapshotTick = -1;
     remotePlayers.clear();
+    combatIntel.clear();
+    intelSmoke = [];
     weaponEffects.updateSmokeClouds([]);
     weaponEffects.clearProjectiles();
     nextClientShotByWeapon.clear();
@@ -400,6 +407,7 @@ const network = new GameNetwork(
       }
     },
     onDisconnect: (reason) => {
+      combatIntel.clear();
       stopPingLoop();
       if (reason === 'io client disconnect') ui.setConnectionState('offline');
       else ui.setConnectionState('offline', 'Connection interrupted. Reconnecting…');
@@ -527,7 +535,8 @@ const network = new GameNetwork(
       }
       trigger.sync(latestLocalPlayer?.currentWeaponId, latestLocalPlayer?.auto);
       world.updateCover(state.cover);
-      weaponEffects.updateSmokeClouds(state.smokeClouds ?? []);
+      intelSmoke = state.smokeClouds ?? [];
+      weaponEffects.updateSmokeClouds(intelSmoke);
       weaponEffects.updateProjectiles(state.projectiles ?? [], receivedAt);
       if (latestLocalPlayer) {
         syncLocalWeapon(latestLocalPlayer.currentWeaponId, latestLocalPlayer.bundleId);
@@ -543,6 +552,7 @@ const network = new GameNetwork(
       ui.updateScoreboard(latestPlayers, network.id);
     },
     onGameEnd: (result) => {
+      combatIntel.clear();
       matchEnded = true;
       audio.setAmbience(null);
       trigger.release();
@@ -560,6 +570,7 @@ const network = new GameNetwork(
       if (currentRoom) ui.showLobby(currentRoom, network.id);
     },
     onPlayerDied: (data) => {
+      combatIntel.resetTarget(data.victimId);
       if (data.victimId !== network.id) return;
       latestPlayerAlive = false;
       prediction.reset();
@@ -580,11 +591,12 @@ const network = new GameNetwork(
       syncInputState();
     },
     onPlayerRespawned: (data) => {
+      combatIntel.resetTarget(data.id);
       if (data.id !== network.id) return;
       latestPlayerAlive = true;
       if (latestLocalPlayer) {
         Object.assign(latestLocalPlayer, data, {
-          alive: true, grounded: true, vx: 0, vy: 0, vz: 0, knockbackVX: 0, knockbackVZ: 0, wasJumping: false,
+          health: PLAYER.maxHealth, alive: true, grounded: true, vx: 0, vy: 0, vz: 0, knockbackVX: 0, knockbackVZ: 0, wasJumping: false,
         });
       }
       prediction.reset(latestLocalPlayer);
@@ -608,7 +620,9 @@ const network = new GameNetwork(
       }
     },
     onScoreUpdate: (data) => ui.updateScoreboard(data?.players, network.id),
+    onOpponentHealth: (data) => combatIntel.health(data),
     onHitConfirmed: (hit) => {
+      combatIntel.hit(hit);
       ui.showHitMarker(hit);
       if (hit?.hit) {
         if (hit.targetId) remotePlayers.triggerHitReaction(hit.targetId, hit.headshot);
@@ -682,7 +696,7 @@ const network = new GameNetwork(
       remotePlayers.flashWeapon(data.playerId, data.weaponId, data.bundleId);
       weaponEffects.showRemoteTracer(data);
     },
-    onSmokeUpdate: (data) => weaponEffects.updateSmokeClouds(data.smokeClouds ?? []),
+    onSmokeUpdate: (data) => { intelSmoke = data.smokeClouds ?? []; weaponEffects.updateSmokeClouds(intelSmoke); },
     onProjectileImpact: (data) => {
       weaponEffects.showImpact(data);
       audio.play('explosion');
@@ -738,20 +752,15 @@ ui.setHandlers({
   onCallsignContinue: (name, id) => {
     if (network.connected) network.requestProfile(id, name);
   },
-  onProfileCallsign: (name) => {
-    localStorage.setItem('fps-gods-callsign', name);
+  onProfileCallsign: async (name) => {
     if (ui.profile.authenticated) {
-      network.apiRequest('/api/auth/profile', {
-        method: 'POST',
-        body: { callsign: name },
-      }).then((res) => {
-        if (res?.account) ui.setProfile(res.account);
-      }).catch(() => {});
+      const res = await network.apiRequest('/api/auth/profile', { method: 'POST', body: { callsign: name } });
+      if (res?.account) ui.setProfile(res.account);
+      if (res?.wallet) ui.setWallet(res.wallet, { loading: false, error: '' });
+    } else {
+      localStorage.setItem('fps-gods-callsign', name);
+      if (network.connected) network.requestProfile(ui.profileId, name);
     }
-    if (network.connected) network.requestProfile(ui.profileId, name);
-  },
-  onBundleSelected: (bundleId) => {
-    if (menuStage) menuStage.setBundle(bundleId);
   },
   onBundleChange: (bundleId) => {
     if (menuStage) menuStage.setBundle(bundleId);
@@ -1236,6 +1245,7 @@ function animate(now = performance.now()) {
     }
     camera.updateMatrixWorld(true);
     remotePlayers.update(latestPlayers, interpolator, camera, renderAt, network.id);
+    combatIntel.update(latestPlayers, interpolator, camera, renderAt, network.id, predictionCover, now, intelSmoke);
   }
 
   weaponEffects.setVisible(matchActive && !matchEnded);
@@ -1268,6 +1278,7 @@ window.addEventListener('beforeunload', () => {
   controller.dispose();
   weaponEffects.dispose();
   remotePlayers.clear();
+  combatIntel.clear();
   menuStage?.dispose();
   weaponModels.dispose();
   world.dispose();

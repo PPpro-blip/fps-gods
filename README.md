@@ -229,3 +229,22 @@ for development only; no Vercel production proxy is configured. Persistent
 SQLite storage on Railway is required across instance restarts/redeployments;
 without a volume, accounts and sessions can disappear. Use one instance with
 SQLite or a database architecture that supports shared sessions across replicas.
+
+### Combat intelligence and account callsigns
+
+Confirmed damage reveals an opponent's health for that life only to attackers
+who damaged them. Health is no longer included for opponents in shared
+snapshots or scoreboards. Bars are hidden beyond 55 units, behind current cover
+or smoke, off-screen, and on death/disconnect. Floating numbers use confirmed
+server damage. All current game modes are free-for-all; server-side team IDs
+are guarded if team modes are added.
+
+The existing Credits wallet is now displayed as SHARZS; its database IDs,
+ledger, balances and reward amounts are unchanged. New account callsigns are
+unique case-insensitively. A requested name already in use receives a generated
+suffix on account creation. Existing duplicate callsigns are retained to avoid
+silently changing player identity; they require a future explicit resolution
+policy. Authenticated callsign changes cost `CALLSIGN_CHANGE_FEE` (default 100)
+with `CALLSIGN_CHANGE_COOLDOWN_MS` (default 7 days). The debit, ledger entry,
+cooldown and name change are committed atomically. The existing store page is
+still a wallet/reward and progression view; it does not yet sell cosmetics.
