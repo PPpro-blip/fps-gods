@@ -70,6 +70,12 @@ const ui = new GameUI({
 
 const canvas = document.querySelector('#game-canvas');
 const scene = new THREE.Scene();
+let hitboxDebug = null;
+// This branch is stripped from production builds; the server also requires
+// NODE_ENV=development plus HITBOX_DEBUG=1 before it sends any debug data.
+if (import.meta.env?.DEV && urlParams.get('hitboxes') === '1') {
+  import('./hitboxDebug.js').then(({ HitboxDebug }) => { hitboxDebug = new HitboxDebug(scene); });
+}
 const camera = new THREE.PerspectiveCamera(77, window.innerWidth / window.innerHeight, 0.05, 125);
 camera.rotation.order = 'YXZ';
 scene.add(camera);
@@ -279,6 +285,7 @@ function clearMatchPresentation() {
   lastSnapshotTick = -1;
   remotePlayers.clear();
   combatIntel.clear();
+  hitboxDebug?.clear();
   intelSmoke = [];
   weaponEffects.updateSmokeClouds([]);
   weaponEffects.clearProjectiles();
@@ -507,6 +514,7 @@ const network = new GameNetwork(
       }
       const receivedAt = performance.now();
       latestPlayers = state.players ?? [];
+      hitboxDebug?.observe(latestPlayers, network.id);
       interpolator.push(latestPlayers, receivedAt);
       serverClockOffset = (state.serverTime ?? Date.now()) - Date.now();
       latestLocalPlayer = latestPlayers.find((player) => player.id === network.id) ?? null;
@@ -621,6 +629,7 @@ const network = new GameNetwork(
     },
     onScoreUpdate: (data) => ui.updateScoreboard(data?.players, network.id),
     onOpponentHealth: (data) => combatIntel.health(data),
+    onHitboxTrace: (trace) => hitboxDebug?.trace(trace, network.id),
     onHitConfirmed: (hit) => {
       combatIntel.hit(hit);
       ui.showHitMarker(hit);
@@ -1253,6 +1262,7 @@ function animate(now = performance.now()) {
     if (matchActive) menuStage.hide();
     menuStage.update(delta);
   }
+  hitboxDebug?.update(now);
   aim.update(frameElapsed);
   weaponEffects.update(now, delta);
 
@@ -1279,6 +1289,7 @@ window.addEventListener('beforeunload', () => {
   weaponEffects.dispose();
   remotePlayers.clear();
   combatIntel.clear();
+  hitboxDebug?.dispose();
   menuStage?.dispose();
   weaponModels.dispose();
   world.dispose();
