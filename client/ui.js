@@ -48,6 +48,7 @@ export class GameUI {
     };
     this.authState = {
       loading: false,
+      restoring: true,
       otpConfigured: true,
       emailProvider: 'unknown',
       pendingEmail: '',
@@ -1010,11 +1011,17 @@ export class GameUI {
     this.renderAuth();
   }
 
+  setAuthRestoring(restoring) {
+    this.authState.restoring = Boolean(restoring);
+    this.renderAuth();
+    this.renderWallet();
+  }
+
   renderAuth() {
     const signedIn = this.profile.authenticated === true;
-    this.el['auth-guest-panel'].hidden = signedIn;
+    this.el['auth-guest-panel'].hidden = signedIn || this.authState.restoring;
     this.el['auth-account-panel'].hidden = !signedIn;
-    this.el['account-status-badge'].textContent = signedIn ? 'VERIFIED ACCOUNT' : 'GUEST SESSION';
+    this.el['account-status-badge'].textContent = this.authState.restoring ? 'RESTORING SESSION…' : signedIn ? 'VERIFIED ACCOUNT' : 'GUEST SESSION';
     this.el['account-status-badge'].style.color = signedIn ? 'var(--ok)' : '';
 
     if (signedIn) {
@@ -1051,7 +1058,7 @@ export class GameUI {
 
   renderWallet() {
     const signedIn = this.profile.authenticated === true || this.wallet.authenticated === true;
-    const balanceLabel = this.wallet.loading
+    const balanceLabel = this.authState.restoring ? 'RESTORING…' : this.wallet.loading
       ? 'SYNCING…'
       : this.wallet.error
         ? 'WALLET ERR'

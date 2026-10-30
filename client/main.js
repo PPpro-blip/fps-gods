@@ -1,3 +1,4 @@
+import { restoreAuthSession } from './authSession.js';
 import * as THREE from 'three';
 import { PLAYER } from '../shared/gameConfig.js';
 import { DEFAULT_MAP_ID } from '../shared/maps.js';
@@ -20,8 +21,6 @@ import { RuntimeDiagnostics } from './diagnostics.js';
 
 /* ────────────────────────────── local identity ───────────────────────────── */
 
-const SESSION_TOKEN_KEY = 'fps-gods-auth-token';
-
 function getOrCreateProfileId() {
   const stored = localStorage.getItem('fps-gods-profile-id');
   if (stored && !stored.startsWith('acct_') && /^[A-Za-z0-9_-]{1,96}$/.test(stored)) return stored;
@@ -31,23 +30,6 @@ function getOrCreateProfileId() {
   return profileId;
 }
 
-function readStoredAuthToken() {
-  try {
-    const token = window.sessionStorage?.getItem(SESSION_TOKEN_KEY) ?? null;
-    return token && typeof token === 'string' && token.length >= 24 ? token : null;
-  } catch {
-    return null;
-  }
-}
-
-function writeStoredAuthToken(token) {
-  try {
-    if (token) window.sessionStorage?.setItem(SESSION_TOKEN_KEY, token);
-    else window.sessionStorage?.removeItem(SESSION_TOKEN_KEY);
-  } catch {
-    // Ignore restricted storage contexts; same-origin HttpOnly cookies still work.
-  }
-}
 
 function readRoomSession() {
   try {
@@ -398,7 +380,8 @@ for (const eventName of ['pointerdown', 'keydown']) {
 /* ───────────────────────────────── network ───────────────────────────────── */
 
 let autoJoinAttempted = false;
-const initialAuthToken = readStoredAuthToken();
+
+try { window.sessionStorage?.removeItem('fps-gods-auth-token'); } catch {}
 
 const network = new GameNetwork(
   {
@@ -406,11 +389,6 @@ const network = new GameNetwork(
       ui.setConnectionState('connected');
       ui.setServerTarget(describeTarget(network.connectionTarget));
       startPingLoop();
-      if (network.sessionToken) {
-        network.setSessionToken(network.sessionToken);
-      } else {
-        network.requestProfile(guestProfileId, ui.playerName);
-      }
       bootstrapAuthSession();
       if (!recovered) network.resumeRoom(readRoomSession());
       if (roomCodeFromUrl && !autoJoinAttempted) {
@@ -445,10 +423,13 @@ const network = new GameNetwork(
       if (rtt !== null) ui.setPing(rtt);
     },
     onProfileUpdate: (profile) => {
+      if (!profile?.authenticated && (ui.authState.restoring || ui.profile.authenticated)) return;
       ui.setProfile(profile);
       if (menuStage) menuStage.setBundle(ui.selectedBundleId);
     },
     onWalletUpdate: (wallet) => {
+      if (!wallet?.accountId && ui.profile.authenticated) { bootstrapAuthSession(); return; }
+      if (!wallet?.accountId && ui.authState.restoring) return;
       ui.setWallet(wallet, { loading: false, error: '' });
     },
     onRewardEarned: (reward) => {
@@ -719,7 +700,6 @@ const network = new GameNetwork(
       );
     },
   },
-  initialAuthToken,
 );
 
 ui.setServerTarget(describeTarget(network.connectionTarget));
@@ -732,19 +712,7 @@ async function bootstrapAuthSession() {
   if (authBootInFlight) return;
   authBootInFlight = true;
   try {
-    const res = await network.apiRequest('/api/auth/me');
-    if (res?.status) ui.setAuthStatus(res.status);
-    if (res?.authenticated && res.account) {
-      ui.setProfile(res.account);
-      ui.setWallet(res.wallet, { loading: false, error: '' });
-      if (network.connected) network.setSessionToken(network.sessionToken);
-    } else {
-      writeStoredAuthToken(null);
-      network.setSessionToken(null);
-      ui.setWallet({ accountId: null, authenticated: false, balance: 0, lifetimeEarned: 0, recentTransactions: [] });
-    }
-  } catch {
-    // Offline or non-HTTP test harness: guest play remains fully operational.
+    await restoreAuthSession(ui, network, guestProfileId);
   } finally {
     authBootInFlight = false;
   }
@@ -802,30 +770,26 @@ ui.setHandlers({
     });
   },
   onVerifyOtp: async ({ email, code, callsign, selectedBundle }) => {
-    const res = await network.apiRequest('/api/auth/otp/verify', {
+    await network.apiRequest('/api/auth/otp/verify', {
       method: 'POST',
       body: { email, code, callsign, selectedBundle },
     });
-    if (res?.sessionToken) {
-      writeStoredAuthToken(res.sessionToken);
-      network.setSessionToken(res.sessionToken);
-    } else if (network.connected) {
-      network.setSessionToken(null);
+    const restored = await network.apiRequest('/api/auth/me');
+    if (!restored?.authenticated || !restored.account) {
+      throw new Error('Sign-in could not be persisted. Allow third-party cookies for this site and try again.');
     }
-    if (res?.account) ui.setProfile(res.account);
-    if (res?.wallet) ui.setWallet(res.wallet, { loading: false, error: '' });
+    // Reconnect so the Socket.IO handshake carries the new HttpOnly cookie.
+    if (network.connected) {
+      network.socket.disconnect().connect();
+    }
+    ui.setProfile(restored.account);
+    ui.setWallet(restored.wallet, { loading: false, error: '' });
   },
   onLogout: async () => {
-    try {
-      await network.apiRequest('/api/auth/logout', { method: 'POST' });
-    } finally {
-      writeStoredAuthToken(null);
-      network.setSessionToken(null);
-      ui.resetToGuestProfile(guestProfileId);
-      if (network.connected) {
-        network.requestProfile(guestProfileId, ui.playerName);
-      }
-    }
+    await network.apiRequest('/api/auth/logout', { method: 'POST' });
+    network.clearSocketAuth();
+    ui.resetToGuestProfile(guestProfileId);
+    if (network.connected) network.requestProfile(guestProfileId, ui.playerName);
   },
   onRefreshWallet: () => refreshWallet(),
   onBotDifficultyChange: (botDifficulty) => {

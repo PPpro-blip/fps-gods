@@ -217,7 +217,7 @@ test('a failed bind reports the reason and exits instead of dying on an unhandle
     await blocker.close();
   }
 });
-test('Socket.IO CORS accepts every origin with a wildcard response', async () => {
+test('Socket.IO CORS permits credentials only for trusted origins', async () => {
   const server = await startServer();
   try {
     for (const origin of [
@@ -227,7 +227,7 @@ test('Socket.IO CORS accepts every origin with a wildcard response', async () =>
     ]) {
       const result = await handshake(server.url, '/socket.io/?EIO=4&transport=polling', origin);
       assert.equal(result.status, 200);
-      assert.equal(result.allowOrigin, '*');
+      assert.equal(result.allowOrigin, origin === 'https://fps-gods.vercel.app' ? origin : null);
       assert.match(result.body, /"sid":"/);
       assert.match(result.body, /"upgrades":\["websocket"\]/);
     }

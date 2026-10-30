@@ -1,19 +1,14 @@
-// Socket.IO browser-origin policy for the game server.
-//
-// The arena is meant to be played from any deployment (localhost, Vercel
-// production, per-branch previews) against one persistent Node host, so the
-// handshake answers `Access-Control-Allow-Origin: *` for every origin. CORS is
-// a browser policy, not authentication: gameplay is still validated entirely
-// server-side, and a wildcard simply removes the "CONNECTION LOST" failure mode
-// caused by origin allowlists drifting out of sync with deployment URLs.
+// Credentialed browser sessions use an exact allowlist. Legacy helpers below
+// retain the old anonymous-origin compatibility API; they are not used for auth.
 
-/** The one Socket.IO/CORS origin answer this server ever gives. */
+/** Legacy anonymous wildcard constant; not used for credentialed CORS. */
 export const ALLOWED_ORIGIN = '*';
 
 /** Socket.IO `cors` option used by server/index.js. */
 export function socketCorsOptions() {
   return {
-    origin: ALLOWED_ORIGIN,
+    origin(origin, callback) { callback(null, isCredentialOriginAllowed(origin) ? origin : false); },
+    credentials: true,
     methods: ['GET', 'POST'],
   };
 }
@@ -29,4 +24,17 @@ export function createCorsOrigin(_value = '') {
 /** Report whether a specific origin would be accepted — always true. */
 export function isOriginAllowed(_value, _origin) {
   return true;
+}
+
+// Credentialed browser requests must use an explicit, trusted origin. Additional
+// deployments can be configured as a comma-separated list of exact origins.
+export function isCredentialOriginAllowed(origin, configured = process.env.CLIENT_ORIGIN || '') {
+  const allowed = new Set([
+    'https://fps-gods.vercel.app',
+    'https://fps-gods-production.up.railway.app',
+    'http://localhost:5173',
+    'http://127.0.0.1:5173',
+    ...configured.split(',').map((value) => value.trim()).filter(Boolean),
+  ]);
+  return allowed.has(origin);
 }

@@ -209,3 +209,23 @@ To check the server from anywhere: `curl -s https://<game-server-host>/health`. 
 | `VITE_PORT` | `5173` | Vite development server port |
 | `VITE_SOCKET_URL` | Unset | Browser-facing Socket.IO server URL, baked into the client build |
 | `FPS_GODS_PROFILE_PATH` | `.data/profiles.json` | Persistent server profile store path |
+
+### Email session cookies
+
+The production frontend uses credentialed requests to Railway. The backend
+allows `https://fps-gods.vercel.app` and local Vite origins; configure
+`CLIENT_ORIGIN` as a comma-separated list of exact additional trusted origins
+for custom domains or individual previews. Do not use `*`. HTTPS responses use
+an HttpOnly, Secure, SameSite=None, host-only cookie with a 30-day default
+Max-Age. Local HTTP uses SameSite=Lax. The client restores `/api/auth/me` on
+startup and reconnects Socket.IO with the cookie after sign-in.
+
+These deployments are different **sites**. Browsers that block third-party
+cookies can reject the Railway cookie despite these settings. Sign-in checks
+whether the cookie was accepted and reports an error rather than pretending
+persistence worked. Users must allow third-party cookies for this site, or a
+same-site API/socket architecture must be deployed. The existing Vite proxy is
+for development only; no Vercel production proxy is configured. Persistent
+SQLite storage on Railway is required across instance restarts/redeployments;
+without a volume, accounts and sessions can disappear. Use one instance with
+SQLite or a database architecture that supports shared sessions across replicas.

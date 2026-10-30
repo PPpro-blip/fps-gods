@@ -128,7 +128,7 @@ export function buildSessionCookie(rawToken, { maxAgeSeconds, secure }) {
     `${SESSION_COOKIE_NAME}=${encodeURIComponent(rawToken)}`,
     'Path=/',
     'HttpOnly',
-    'SameSite=Lax',
+    secure ? 'SameSite=None' : 'SameSite=Lax',
     `Max-Age=${Math.max(0, Math.floor(maxAgeSeconds))}`,
   ];
   if (secure) parts.push('Secure');
@@ -140,7 +140,7 @@ export function buildClearSessionCookie({ secure }) {
     `${SESSION_COOKIE_NAME}=`,
     'Path=/',
     'HttpOnly',
-    'SameSite=Lax',
+    secure ? 'SameSite=None' : 'SameSite=Lax',
     'Max-Age=0',
   ];
   if (secure) parts.push('Secure');

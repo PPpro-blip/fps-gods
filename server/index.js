@@ -19,7 +19,7 @@ import {
 import { GameState } from './gameState.js';
 import { PlayerProfileStore } from './profiles.js';
 import { ROOM_RECONNECT_GRACE_MS, RoomManager } from './rooms.js';
-import { ALLOWED_ORIGIN, socketCorsOptions } from './origins.js';
+import { isCredentialOriginAllowed, socketCorsOptions } from './origins.js';
 
 process.on('uncaughtException', (error) => {
   console.error('[FPS GODS] Uncaught exception:', error);
@@ -66,7 +66,20 @@ export function createGameServer(options = {}) {
   app.disable('x-powered-by');
 
   app.use((req, res, next) => {
-    res.set('Access-Control-Allow-Origin', ALLOWED_ORIGIN);
+    const origin = req.headers.origin;
+    if (req.path === '/health') {
+      res.set('Access-Control-Allow-Origin', '*');
+      res.set('Access-Control-Allow-Methods', 'GET, OPTIONS, HEAD');
+      if (req.method === 'OPTIONS') return res.status(204).end();
+      return next();
+    }
+    res.vary('Origin');
+    if (isCredentialOriginAllowed(origin)) {
+      res.set('Access-Control-Allow-Origin', origin);
+      res.set('Access-Control-Allow-Credentials', 'true');
+    } else if (origin && req.path.startsWith('/api/') && req.method !== 'GET' && req.method !== 'HEAD' && req.method !== 'OPTIONS') {
+      return res.status(403).json({ ok: false, code: 'ORIGIN_FORBIDDEN' });
+    }
     res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, HEAD');
     res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept');
     if (req.method === 'OPTIONS') {
@@ -114,6 +127,8 @@ export function createGameServer(options = {}) {
   }
 
   function unbindSocketAccount(socket) {
+    clearTimeout(socket.sessionExpiryTimer);
+    socket.sessionExpiryTimer = null;
     const prevAccountId = socket.data.accountId ?? null;
     if (!prevAccountId) return;
     const set = accountSockets.get(prevAccountId);
@@ -122,6 +137,25 @@ export function createGameServer(options = {}) {
       if (set.size === 0) accountSockets.delete(prevAccountId);
     }
     socket.data.accountId = null;
+    socket.data.sessionId = null;
+  }
+
+  function bindSocketSession(socket, session) {
+    bindSocketAccount(socket, session.accountId);
+    socket.data.sessionId = session.sessionId;
+    clearTimeout(socket.sessionExpiryTimer);
+    const expire = () => {
+      const remaining = session.expiresAt - Date.now();
+      if (remaining > 0) {
+        socket.sessionExpiryTimer = setTimeout(expire, Math.min(remaining, 2_147_000_000));
+        socket.sessionExpiryTimer.unref();
+        return;
+      }
+      unbindSocketAccount(socket);
+      socket.data.profileId = undefined;
+      socket.emit(EVENTS.WALLET_UPDATE, { accountId: null, authenticated: false, balance: 0, recentTransactions: [] });
+    };
+    expire();
   }
 
   function emitWalletToAccount(accountId, rewardEvent = null) {
@@ -145,7 +179,7 @@ export function createGameServer(options = {}) {
   }
 
   app.get('/health', (_request, response) => {
-    response.set('Access-Control-Allow-Origin', ALLOWED_ORIGIN);
+    response.set('Access-Control-Allow-Origin', '*');
     response.set('Cache-Control', 'no-store');
     const avgTickMs = tickDeltasMs.length
       ? +(tickDeltasMs.reduce((a, b) => a + b, 0) / tickDeltasMs.length).toFixed(2)
@@ -168,7 +202,7 @@ export function createGameServer(options = {}) {
   });
 
   app.get('/', (_request, response) => {
-    response.set('Access-Control-Allow-Origin', ALLOWED_ORIGIN);
+    response.set('Access-Control-Allow-Origin', '*');
     response.set('Cache-Control', 'no-store');
     response.status(200).json({
       status: 'ok',
@@ -230,7 +264,6 @@ export function createGameServer(options = {}) {
       res.status(200).json({
         ok: true,
         isNewAccount: verified.isNewAccount,
-        sessionToken: verified.sessionToken,
         expiresAt: verified.sessionExpiresAt,
         account: verified.account,
         wallet,
@@ -298,7 +331,18 @@ export function createGameServer(options = {}) {
   app.post('/api/auth/logout', (req, res) => {
     res.set('Cache-Control', 'no-store');
     const token = extractRequestSessionToken(req);
+    const session = token ? authService.verifySessionToken(token) : null;
     if (token) authService.logout(token);
+    if (session) {
+      for (const id of [...(accountSockets.get(session.accountId) || [])]) {
+        const socket = io.sockets.sockets.get(id);
+        if (socket?.data.sessionId === session.sessionId) {
+          unbindSocketAccount(socket);
+          socket.data.profileId = undefined;
+          socket.emit(EVENTS.WALLET_UPDATE, { accountId: null, authenticated: false, balance: 0, recentTransactions: [] });
+        }
+      }
+    }
     res.set('Set-Cookie', buildClearSessionCookie({ secure: isSecureRequest(req) }));
     res.status(200).json({ ok: true });
   });
@@ -418,17 +462,20 @@ export function createGameServer(options = {}) {
   }
 
   io.on('connection', (socket) => {
-    const initialToken = extractSocketSessionToken(socket);
+    const socketOrigin = socket.handshake.headers.origin;
+    const initialToken = !socketOrigin || isCredentialOriginAllowed(socketOrigin)
+      ? extractSocketSessionToken(socket) : null;
     const initialSession = initialToken ? authService.verifySessionToken(initialToken) : null;
     if (initialSession) {
-      bindSocketAccount(socket, initialSession.accountId);
+      bindSocketSession(socket, initialSession);
       socket.data.profileId = initialSession.accountId;
       const profile = profileStore.getOrCreate(initialSession.accountId, '', initialSession.accountId);
       if (profile) socket.emit(EVENTS.PROFILE_UPDATE, profile);
       const wallet = economyService.getWallet(initialSession.accountId, { historyLimit: 12 });
       if (wallet) socket.emit(EVENTS.WALLET_UPDATE, wallet);
     } else {
-      socket.data.accountId = null;
+      unbindSocketAccount(socket);
+      socket.data.profileId = undefined;
     }
 
     if (socket.recovered && socket.data.roomCode && !roomManager.recoverSocket(socket)) {
@@ -443,7 +490,7 @@ export function createGameServer(options = {}) {
       const candidateToken = typeof payload?.sessionToken === 'string' ? payload.sessionToken.trim() : null;
       const verified = candidateToken ? authService.verifySessionToken(candidateToken) : null;
       if (verified) {
-        bindSocketAccount(socket, verified.accountId);
+        bindSocketSession(socket, verified);
         socket.data.profileId = verified.accountId;
         const profile = profileStore.getOrCreate(verified.accountId, '', verified.accountId);
         if (profile) socket.emit(EVENTS.PROFILE_UPDATE, profile);

@@ -100,11 +100,8 @@ export function resolveApiUrl(baseUrl, pathname) {
 // Thin Socket.IO adapter: gameplay decisions never happen here, only inputs go
 // up and authoritative room/game snapshots and feedback come back down.
 export class GameNetwork {
-  constructor(handlers = {}, initialSessionToken = null) {
+  constructor(handlers = {}) {
     this.handlers = handlers;
-    this.sessionToken = typeof initialSessionToken === 'string' && initialSessionToken.trim()
-      ? initialSessionToken.trim()
-      : null;
     this.lastIssueSignature = null;
     this.probeInFlight = false;
     this.graceElapsed = false;
@@ -130,7 +127,7 @@ export class GameNetwork {
       reconnectionDelayMax: RECONNECT_DELAY_MAX_MS,
       randomizationFactor: 0.4,
       timeout: CONNECT_TIMEOUT_MS,
-      auth: this.sessionToken ? { sessionToken: this.sessionToken } : {},
+      withCredentials: true,
     });
 
     this.socket.on('connect', () => {
@@ -425,13 +422,8 @@ export class GameNetwork {
     this.socket.volatile.emit(EVENTS.NET_PING, payload);
   }
 
-  setSessionToken(token) {
-    const clean = typeof token === 'string' && token.trim() ? token.trim() : null;
-    this.sessionToken = clean;
-    this.socket.auth = clean ? { sessionToken: clean } : {};
-    if (this.socket.connected) {
-      this.socket.emit(EVENTS.AUTH_SYNC, { sessionToken: clean });
-    }
+  clearSocketAuth() {
+    if (this.socket.connected) this.socket.emit(EVENTS.AUTH_SYNC, {});
   }
 
   async apiRequest(pathname, { method = 'GET', body, signal } = {}) {
@@ -440,13 +432,10 @@ export class GameNetwork {
     if (body !== undefined) {
       headers['Content-Type'] = 'application/json';
     }
-    if (this.sessionToken) {
-      headers.Authorization = `Bearer ${this.sessionToken}`;
-    }
     const response = await fetch(url, {
       method,
       headers,
-      credentials: this.target.source === 'same-origin' ? 'same-origin' : 'omit',
+      credentials: 'include',
       body: body !== undefined ? JSON.stringify(body) : undefined,
       signal,
     });
