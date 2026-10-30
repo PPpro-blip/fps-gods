@@ -248,3 +248,16 @@ policy. Authenticated callsign changes cost `CALLSIGN_CHANGE_FEE` (default 100)
 with `CALLSIGN_CHANGE_COOLDOWN_MS` (default 7 days). The debit, ledger entry,
 cooldown and name change are committed atomically. The existing store page is
 still a wallet/reward and progression view; it does not yet sell cosmetics.
+
+### Local combat hitbox inspection
+
+Run the server with `NODE_ENV=development HITBOX_DEBUG=1 npm run dev:server`,
+run Vite separately (`npm run dev:client`), and open `?hitboxes=1`. After a
+shot, the wire cylinders follow received server snapshots; after a shot, they freeze
+the exact server-side poses used for that shot for 1.5 seconds;
+the character models continue to interpolate, making any network offset visible.
+Amber is lower body, cyan upper body, magenta head; the actual post-spread ray
+and its hit, obstruction or miss endpoint are shown for 1.5 seconds. Traces
+are sent only to the shooting client, and are disabled unless the server is
+explicitly in development mode with the debug flag. The visualization is not
+included in production Vite builds. Do not enable debug on a public server.

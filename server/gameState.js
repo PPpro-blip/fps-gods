@@ -225,6 +225,7 @@ function makeGamePlayer(record, spawn, now, map, cover) {
     teamId: record.teamId ?? null,
     lastInputAt: now,
     lastInputSequence: -1,
+    lastShotId: -1,
     lastProcessedInputSequence: -1,
     wasJumping: false,
     shieldBlocking: false,
@@ -247,6 +248,7 @@ export class GameState {
     onHumanKill = () => null,
     onElimination = () => null,
     onMatchFinished = () => null,
+    debugHitboxes = false,
   } = {}, now = Date.now()) {
     this.room = room;
     this.matchId = randomUUID();
@@ -266,6 +268,7 @@ export class GameState {
     this.onHumanKill = onHumanKill;
     this.onElimination = onElimination;
     this.onMatchFinished = onMatchFinished;
+    this.debugHitboxes = debugHitboxes && process.env.NODE_ENV === 'development';
     this.players = new Map();
     this.feed = [];
     this.finished = false;
@@ -842,6 +845,7 @@ export class GameState {
     if (this.finished) return;
     const shooter = this.players.get(playerId);
     if (!shooter || !shooter.connected || !shooter.alive) return;
+    if (Number.isSafeInteger(shotId) && shotId >= 0 && shotId <= shooter.lastShotId) return;
     const weapon = getWeapon(shooter.currentWeaponId);
     const weaponState = shooter.weaponStates[shooter.currentWeaponId];
     if (!weapon || !weaponState || weapon.behavior === 'shield') return;
@@ -876,6 +880,7 @@ export class GameState {
       return;
     }
 
+    if (Number.isSafeInteger(shotId) && shotId >= 0) shooter.lastShotId = shotId;
     weaponState.nextShotAt = now + weapon.fireRate;
     if (!weapon.unlimitedAmmo && weapon.magSize > 0) {
       weaponState.ammo = Math.max(0, weaponState.ammo - 1);
@@ -935,6 +940,7 @@ export class GameState {
 
   fireHitscan(shooter, weapon, origin, direction, players, now) {
     const hits = new Map();
+    const traces = this.debugHitboxes && !shooter.isBot ? [] : null;
     const pellets = weapon.pellets ?? 1;
     for (let pellet = 0; pellet < pellets; pellet += 1) {
       const ray = applySpread(direction, weapon.spread);
@@ -947,6 +953,7 @@ export class GameState {
         cover: this.cover,
         smokeClouds: this.smokeClouds,
         ignoreCover: weapon.piercesCover === true && !shooter.isBot,
+        onTrace: traces ? trace => traces.push(trace) : null,
       });
       if (!result) continue;
       const damage = result.headshot
@@ -964,11 +971,21 @@ export class GameState {
       hits.set(result.target.id, existing);
     }
 
+    if (traces) this.emitHitboxTrace(shooter.id, traces);
     if (hits.size === 0) {
       this.emitPlayer(shooter.id, EVENTS.HIT_CONFIRMED, { hit: false, weaponId: weapon.id });
       return;
     }
     this.applyDamageBatch(shooter, [...hits.values()], now, weapon);
+  }
+
+  emitHitboxTrace(shooterId, traces) {
+    if (!this.debugHitboxes || !traces.length) return;
+    this.emitPlayer(shooterId, EVENTS.HITBOX_TRACE, {
+      traces,
+      players: [...this.players.values()].filter(p => p.alive && p.connected !== false)
+        .map(p => ({ id: p.id, x: p.x, y: p.y, z: p.z, yaw: p.yaw })),
+    });
   }
 
   fireRocket(shooter, weapon, origin, direction, now) {
@@ -998,14 +1015,20 @@ export class GameState {
         const targets = shooter.isBot
           ? new Map([...this.players].filter(([, player]) => !player.isBot))
           : this.players;
+        const traces = this.debugHitboxes && !shooter.isBot ? [] : null;
         const directHit = castShot({
           origin, direction: projectile.direction, players: targets, shooterId: shooter.id,
           cover: this.cover, smokeClouds: [], maxDistance: travel,
+          onTrace: traces ? trace => traces.push(trace) : null,
         });
         const wallHit = this.projectileWallHit(origin, projectile.direction, travel);
         let hit = coverHit;
         if (wallHit && (!hit || wallHit.distance < hit.distance)) hit = wallHit;
         if (directHit && (!hit || directHit.distance < hit.distance)) hit = directHit;
+        if (traces) {
+          if (hit === wallHit && wallHit) traces[0] = { origin, point: wallHit.point, kind: 'cover' };
+          this.emitHitboxTrace(shooter.id, traces);
+        }
         if (hit) {
           this.explodeRocket(projectile, shooter, weapon, hit, now);
           continue;
@@ -1445,6 +1468,7 @@ export class GameState {
     player.shieldBlocking = false;
     player.shieldNeedsRelease = false;
     player.lastInputSequence = -1;
+    player.lastShotId = -1;
     player.lastProcessedInputSequence = -1;
     player.input = { forward: 0, strafe: 0, jump: false };
     player.vx = 0;

@@ -391,6 +391,7 @@ export function createGameServer(options = {}) {
   function launchRoom(room) {
     const now = Date.now();
     room.game = new GameState(room, {
+      debugHitboxes: process.env.NODE_ENV === 'development' && process.env.HITBOX_DEBUG === '1',
       emitRoom: (event, data) => io.to(room.code).emit(event, data),
       emitPlayer: (playerId, event, data) => io.to(playerId).emit(event, data),
       onHumanKill: (player) => profileStore.recordLifetimeKill(player.profileId, player.accountId),

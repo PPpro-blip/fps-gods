@@ -1,4 +1,5 @@
 import { COVER, PLAYER } from '../shared/gameConfig.js';
+import { COMBAT_HITBOXES } from '../shared/combatHitboxes.js';
 
 const EPSILON = 1e-8;
 
@@ -85,8 +86,7 @@ export function raycastCover({
   };
 }
 
-// Intersect a vertical, flat-capped cylinder. Separate body and head cylinders
-// let the server award a headshot only in the capsule's top twenty percent.
+// Intersect a vertical, flat-capped combat cylinder, independent of movement.
 function rayCylinderDistance(origin, direction, centerX, centerZ, radius, bottom, top, maxDistance) {
   const offsetX = origin.x - centerX;
   const offsetZ = origin.z - centerZ;
@@ -156,6 +156,7 @@ export function castShot({
   cover = COVER,
   smokeClouds = [],
   ignoreCover = false,
+  onTrace = null,
 }) {
   const ray = normalizedRay(direction);
   if (!ray) return null;
@@ -177,34 +178,38 @@ export function castShot({
   for (const target of players.values()) {
     if (target.id === shooterId || !target.alive || target.connected === false) continue;
 
-    const headBottom = target.y + PLAYER.height * 0.8;
-    const headDistance = rayCylinderDistance(
-      origin,
-      ray,
-      target.x,
-      target.z,
-      PLAYER.radius * 0.63,
-      headBottom,
-      target.y + PLAYER.height,
-      nearestDistance,
-    );
-    const bodyDistance = rayCylinderDistance(
-      origin,
-      ray,
-      target.x,
-      target.z,
-      PLAYER.radius,
-      target.y + 0.2,
-      headBottom + 0.03,
-      nearestDistance,
-    );
-    const playerDistance = Math.min(headDistance, bodyDistance);
+    for (const volume of COMBAT_HITBOXES) {
+      const distance = rayCylinderDistance(
+        origin, ray, target.x, target.z, volume.radius,
+        target.y + volume.bottom, target.y + volume.top, nearestDistance,
+      );
+      if (!(distance < nearestDistance)) continue;
 
-    if (playerDistance < nearestDistance) {
-      nearestDistance = playerDistance;
+      // A wider combat volume must not protrude through nearby collision cover.
+      // Check the short segment from the struck surface to the target's axis.
+      if (!ignoreCover && cover.length) {
+        const point = pointAlong(origin, ray, distance);
+        const dx = target.x - point.x;
+        const dz = target.z - point.z;
+        const length = Math.hypot(dx, dz);
+        if (length > EPSILON) {
+          const inward = { x: dx / length, y: 0, z: dz / length };
+          if (cover.some(block => rayBoxDistance(point, inward, block, length) < length - EPSILON)) continue;
+        }
+      }
+      nearestDistance = distance;
       nearestPlayer = target;
-      headshot = headDistance <= bodyDistance;
+      headshot = volume.headshot;
     }
+  }
+
+  if (onTrace) {
+    const distance = nearestPlayer ? nearestDistance : blockingDistance;
+    const kind = nearestPlayer ? 'player' : coverDistance <= smokeDistance && coverDistance <= maxDistance
+      ? (obstruction?.hitFloor ? 'floor' : 'cover')
+      : smokeDistance <= maxDistance ? 'smoke' : 'miss';
+    onTrace({ origin: { ...origin }, point: pointAlong(origin, ray, distance), kind,
+      ...(nearestPlayer ? { targetId: nearestPlayer.id, headshot } : {}) });
   }
 
   if (!nearestPlayer) return null;
