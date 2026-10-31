@@ -2372,3 +2372,6 @@ kbd {
 .ammo-count strong { color: #ffe4ad; }
 .health-fill { box-shadow: 0 0 9px rgba(45, 221, 255, .45); }
 .hud-elim-banner .elim-kicker { color: #ffb05a; }
+/* Escape must leave the pause actions accessible even during the death screen. */
+.overlay-pause { z-index: 27; }
+.crosshair.is-melee-miss::after { content: 'MISS'; position: absolute; top: 24px; left: 50%; transform: translateX(-50%); color: #d8e3ec; font: 700 9px var(--mono); text-shadow: 0 1px 3px #000; }

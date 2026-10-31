@@ -571,3 +571,50 @@ test('state updates keep flowing while reliable fire events are emitted on every
     await server.close();
   }
 });
+
+test('leaving a live multiplayer match removes the host without disconnecting or revoking authentication', async () => {
+  const outbox = [];
+  const server = createGameServer({ dbPath: ':memory:', emailProvider: { name: 'test', configured: true, async sendOtpEmail(p) { outbox.push(p); } } });
+  await new Promise(resolve => server.httpServer.listen(0, '127.0.0.1', resolve));
+  const url = `http://127.0.0.1:${server.httpServer.address().port}`;
+  const post = (path, body) => fetch(url + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  let host, guest;
+  try {
+    await post('/api/auth/otp/request', { email: 'leave@example.com' });
+    const verify = await post('/api/auth/otp/verify', { email: 'leave@example.com', code: outbox[0].code, callsign: 'Pilot' });
+    const cookie = verify.headers.get('set-cookie').split(';')[0];
+    const account = (await verify.json()).account;
+    host = ioClient(url, { transports: ['websocket'], extraHeaders: { Cookie: cookie }, reconnection: false });
+    guest = ioClient(url, { transports: ['websocket'], reconnection: false });
+    await Promise.all([waitForEvent(host, 'connect'), waitForEvent(guest, 'connect')]);
+    const hostState = waitForEvent(host, EVENTS.ROOM_STATE, s => s.players.length === 1);
+    host.emit(EVENTS.CREATE_ROOM, { name: 'FakeName', bundleId: 'RUSHER' });
+    const lobby = await hostState;
+    const joined = waitForEvent(guest, EVENTS.ROOM_STATE, s => s.players.length === 2);
+    guest.emit(EVENTS.JOIN_ROOM, { code: lobby.code, name: 'Guest', bundleId: 'GHOST' });
+    await joined;
+    const ready = waitForEvent(host, EVENTS.ROOM_STATE, s => s.players.every(p => p.ready));
+    host.emit(EVENTS.PLAYER_READY, { ready: true });
+    guest.emit(EVENTS.PLAYER_READY, { ready: true });
+    await ready;
+    const playing = waitForEvent(guest, EVENTS.ROOM_STATE, s => s.state === ROOM_STATES.PLAYING);
+    host.emit(EVENTS.START_GAME); await playing;
+    const room = server.roomManager.rooms.get(lobby.code);
+    const removed = waitForEvent(guest, EVENTS.ROOM_STATE, s => s.players.length === 1);
+    const left = waitForEvent(host, EVENTS.ROOM_LEFT);
+    host.emit(EVENTS.LEAVE_ROOM);
+    await left;
+    const remaining = await removed;
+    assert.equal(remaining.hostId, guest.id);
+    assert.equal(remaining.players[0].id, guest.id);
+    assert.equal(room.players.has(host.id), false);
+    assert.equal(room.game.players.has(host.id), false);
+    assert.equal(host.connected, true);
+    assert.equal(guest.connected, true);
+    const me = await fetch(url + '/api/auth/me', { headers: { Cookie: cookie } }).then(r => r.json());
+    assert.equal(me.account.accountId, account.accountId);
+    const next = waitForEvent(host, EVENTS.ROOM_STATE, s => s.code !== lobby.code);
+    host.emit(EVENTS.CREATE_ROOM, { name: 'Other', bundleId: 'RUSHER' });
+    assert.equal((await next).players[0].name, 'Pilot');
+  } finally { host?.disconnect(); guest?.disconnect(); await server.close(); }
+});

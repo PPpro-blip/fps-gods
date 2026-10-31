@@ -560,13 +560,15 @@
       <!-- ───────────────────────────── OVERLAYS ───────────────────────────── -->
       <section class="overlay-panel overlay-pause" id="pause-panel" hidden>
         <p class="panel-kicker">MATCH IN PROGRESS</p>
-        <h2>Click in to deploy</h2>
+        <h2>Match paused</h2>
         <p>Pointer lock keeps your aim inside the arena. Press <kbd>ESC</kbd> to release it.</p>
         <div class="pause-difficulty" id="pause-bot-difficulty" hidden>
           <span class="field-label">BOT DIFFICULTY</span>
           <div class="difficulty-grid is-compact" id="pause-bot-difficulty-grid" role="radiogroup" aria-label="Match bot difficulty"></div>
         </div>
-        <button class="button button-primary" id="resume-button" type="button">ENTER ARENA</button>
+        <button class="button button-primary" id="resume-button" type="button">RESUME</button>
+        <button class="button button-secondary" id="quit-match-button" type="button">QUIT TO MENU</button>
+        <p id="quit-match-note" aria-live="polite" hidden>Press QUIT TO MENU again to confirm.</p>
       </section>
 
       <section class="overlay-panel overlay-death" id="death-panel" hidden>

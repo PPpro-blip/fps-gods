@@ -174,6 +174,9 @@ function describeTarget(target) {
 
 let currentRoom = null;
 let matchActive = false;
+let matchExiting = false;
+let exitAwaitingResume = false;
+let pauseRequested = false;
 let matchEnded = false;
 let weaponWheelOpen = false;
 let wheelPointer = { x: 0, y: 0 };
@@ -216,7 +219,7 @@ function resetCameraMotionState() {
 }
 
 function canPlay() {
-  return matchActive && !matchEnded && currentRoom?.state === 'PLAYING';
+  return matchActive && !matchExiting && !matchEnded && currentRoom?.state === 'PLAYING';
 }
 
 function startPingLoop() {
@@ -243,7 +246,7 @@ function stopPingLoop() {
  */
 function syncInputState() {
   const locked = document.pointerLockElement === canvas;
-  const playable = canPlay() && !weaponWheelOpen && !ui.scoreboardOpen && latestPlayerAlive && windowFocused && !document.hidden;
+  const playable = canPlay() && !pauseRequested && !weaponWheelOpen && !ui.scoreboardOpen && latestPlayerAlive && windowFocused && !document.hidden;
   const wasEnabled = controller.enabled;
   controller.setEnabled(locked && playable, {
     preserveKeys: canPlay() && !weaponWheelOpen,
@@ -261,11 +264,14 @@ function syncInputState() {
     releaseRightAction();
   }
   if (wasEnabled && !controller.enabled) sendNeutralInput();
-  if (canPlay()) ui.setPaused(!locked && (latestPlayerAlive || latestLocalPlayer === null) && !matchEnded);
+  if (canPlay()) ui.setPaused(pauseRequested || (!locked && (latestPlayerAlive || latestLocalPlayer === null)));
 }
 
 function clearMatchPresentation() {
   matchActive = false;
+  matchExiting = false;
+  exitAwaitingResume = false;
+  pauseRequested = false;
   matchEnded = false;
   audio.setAmbience(null);
   resetCameraMotionState();
@@ -289,6 +295,7 @@ function clearMatchPresentation() {
   intelSmoke = [];
   weaponEffects.updateSmokeClouds([]);
   weaponEffects.clearProjectiles();
+  weaponEffects.resetPresentation();
   world.resetCover();
   controller.reset();
   controller.setEnabled(false);
@@ -404,7 +411,11 @@ const network = new GameNetwork(
       ui.setServerTarget(describeTarget(network.connectionTarget));
       startPingLoop();
       bootstrapAuthSession();
-      if (!recovered) network.resumeRoom(readRoomSession());
+      if (matchExiting && recovered) { exitAwaitingResume = false; network.leaveRoom(); }
+      else if (!recovered) {
+        exitAwaitingResume = matchExiting;
+        network.resumeRoom(readRoomSession());
+      }
       if (roomCodeFromUrl && !autoJoinAttempted) {
         autoJoinAttempted = true;
         ui.showToast(`Joining room ${roomCodeFromUrl.toUpperCase()}…`);
@@ -414,6 +425,7 @@ const network = new GameNetwork(
       }
     },
     onDisconnect: (reason) => {
+      if (matchExiting) exitAwaitingResume = true;
       combatIntel.clear();
       stopPingLoop();
       if (reason === 'io client disconnect') ui.setConnectionState('offline');
@@ -454,6 +466,7 @@ const network = new GameNetwork(
     onRoomResumeFailed: (error) => {
       clearRoomSession();
       currentRoom = null;
+      ui.room = null;
       if (matchActive) clearMatchPresentation();
       ui.showScreen('play');
       ui.showToast(error?.message ?? 'The previous room session has expired.');
@@ -461,11 +474,17 @@ const network = new GameNetwork(
     onRoomLeft: () => {
       clearRoomSession();
       currentRoom = null;
+      ui.room = null;
       clearMatchPresentation();
       ui.showScreen('play');
     },
     onRoomList: (payload) => ui.setRoomList(payload),
     onRoomState: (room) => {
+      if (matchExiting) {
+        // A reconnect can rebind the reserved player before we finish leaving.
+        if (exitAwaitingResume && network.connected) { exitAwaitingResume = false; network.leaveRoom(); }
+        return;
+      }
       const previousState = currentRoom?.state;
       const previousMap = currentRoom?.mapId;
       currentRoom = room;
@@ -503,7 +522,7 @@ const network = new GameNetwork(
       enterMatch(currentRoom);
     },
     onGameState: (state) => {
-      if (!matchActive || state.code !== currentRoom?.code) return;
+      if (!matchActive || matchExiting || state.code !== currentRoom?.code) return;
       if (Number.isSafeInteger(state.tick)) {
         if (state.tick <= lastSnapshotTick) return;
         lastSnapshotTick = state.tick;
@@ -875,11 +894,37 @@ ui.setHandlers({
     }
     network.playAgain(ui.botDifficulty);
   },
+  onQuitMatch: () => {
+    if (matchExiting) return;
+    if (!network.connected) {
+      ui.showToast('Reconnect to the server before leaving the match.');
+      ui.resetQuitConfirmation();
+      return;
+    }
+    sendNeutralInput();
+    matchExiting = true;
+    pauseRequested = true;
+    trigger.release();
+    releaseRightAction();
+    closeWeaponWheel(false);
+    aim.reset(true);
+    controller.reset();
+    controller.setEnabled(false);
+    inputPump.stop();
+    weaponEffects.resetPresentation();
+    ui.el['quit-match-button'].disabled = true;
+    ui.el['resume-button'].disabled = true;
+    ui.el['quit-match-note'].textContent = 'Leaving match…';
+    if (document.pointerLockElement === canvas) document.exitPointerLock?.();
+    network.leaveRoom();
+  },
   onResume: () => {
+    pauseRequested = false;
+    ui.setPaused(false);
     unlockAudio();
     if (canPlay() && document.pointerLockElement !== canvas) {
       const request = canvas.requestPointerLock?.();
-      request?.catch?.(() => ui.showToast('Click the arena again to enable pointer lock.'));
+      request?.catch?.(() => { ui.showToast('Click the arena again to enable pointer lock.'); syncInputState(); });
     }
   },
 });
@@ -979,6 +1024,17 @@ window.addEventListener('contextmenu', (event) => event.preventDefault());
 
 document.addEventListener('keydown', (event) => {
   if (controller.isTyping(event.target)) return;
+
+  if (event.code === 'Escape' && !event.repeat && matchActive && !matchEnded && !matchExiting) {
+    pauseRequested = true;
+    trigger.release();
+    releaseRightAction();
+    closeWeaponWheel(false);
+    controller.reset();
+    if (document.pointerLockElement === canvas) document.exitPointerLock?.();
+    syncInputState();
+    return;
+  }
 
   if (event.code === 'KeyQ' && !event.repeat && controller.enabled) {
     event.preventDefault();
