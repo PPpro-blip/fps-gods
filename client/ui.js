@@ -132,7 +132,7 @@ export class GameUI {
       'ammo-mode', 'ammo-value', 'ammo-total', 'ammo-status', 'reload-hint',
       'weapon-wheel', 'weapon-wheel-options', 'wheel-center-name', 'wheel-center-state',
       'pause-panel', 'pause-bot-difficulty', 'pause-bot-difficulty-grid',
-      'resume-button', 'death-panel', 'respawn-countdown',
+      'resume-button', 'quit-match-button', 'quit-match-note', 'death-panel', 'respawn-countdown',
       'scoreboard-panel', 'scoreboard-room', 'scoreboard-body', 'end-panel', 'end-kicker',
       'winner-name', 'winner-summary', 'end-scoreboard', 'return-lobby-button',
       'end-waiting', 'loading-overlay', 'loading-label', 'loading-fill', 'toast',
@@ -611,7 +611,19 @@ export class GameUI {
       this.handlers.onStart?.();
     });
     this.el['copy-room-code-button'].addEventListener('click', () => this.copyRoomCode());
-    this.el['resume-button'].addEventListener('click', () => this.handlers.onResume?.());
+    this.el['resume-button'].addEventListener('click', () => {
+      this.resetQuitConfirmation();
+      this.handlers.onResume?.();
+    });
+    this.el['quit-match-button'].addEventListener('click', () => {
+      if (!this.quitConfirmation) {
+        this.quitConfirmation = true;
+        this.el['quit-match-note'].hidden = false;
+        this.el['quit-match-button'].textContent = 'CONFIRM QUIT TO MENU';
+        return;
+      }
+      this.handlers.onQuitMatch?.();
+    });
     this.el['return-lobby-button'].addEventListener('click', () => {
       if (this.room?.mode === ROOM_MODES.SOLO_VS_BOTS) {
         this.handlers.onPlayAgain?.();
@@ -1458,6 +1470,15 @@ export class GameUI {
     this.lastHealth = null;
   }
 
+  resetQuitConfirmation() {
+    this.quitConfirmation = false;
+    this.el['quit-match-note'].hidden = true;
+    this.el['quit-match-note'].textContent = 'Press QUIT TO MENU again to confirm.';
+    this.el['quit-match-button'].textContent = 'QUIT TO MENU';
+    this.el['quit-match-button'].disabled = false;
+    this.el['resume-button'].disabled = false;
+  }
+
   setPaused(paused) {
     if (this.el['match-hud'].hidden) {
       this.el['pause-panel'].hidden = true;
@@ -1465,6 +1486,7 @@ export class GameUI {
     }
     this.syncBotDifficultyUI(this.room?.botDifficulty ?? null);
     this.el['pause-panel'].hidden = !paused;
+    if (!paused) this.resetQuitConfirmation();
   }
 
   updateHud(player, estimatedServerNow = Date.now(), aliveCount = 0) {
@@ -1653,7 +1675,16 @@ export class GameUI {
   }
 
   showHitMarker(hit) {
-    if (!hit?.hit) return;
+    if (!hit?.hit) {
+      if (hit?.weaponId === 'KNIFE' || hit?.weaponId === 'GOD_FIST') {
+        const crosshair = this.el.crosshair;
+        crosshair.classList.add('is-melee-miss');
+        window.clearTimeout(this.hitMarkerTimer);
+        this.hitMarkerTimer = window.setTimeout(() => crosshair.classList.remove('is-melee-miss'), 300);
+      }
+      return;
+    }
+    this.el.crosshair.classList.remove('is-melee-miss');
     const crosshair = this.el.crosshair;
     crosshair.classList.remove('is-hit', 'is-kill', 'is-headshot', 'is-blocked');
     if (hit.protected || hit.blockedByShield) {

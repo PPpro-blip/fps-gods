@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { EVENTS, ROOM_MODES } from '../shared/events.js';
 import { CURRENCY_CONFIG } from '../shared/economy.js';
+import { COMBAT_HITBOXES } from '../shared/combatHitboxes.js';
 import {
   BOT,
   DEFAULT_BOT_DIFFICULTY,
@@ -18,6 +19,7 @@ const clamp = (value, minimum, maximum) => Math.min(maximum, Math.max(minimum, v
 const wrapAngle = (angle) => ((angle + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI;
 const finiteNumber = (value, fallback) => (Number.isFinite(value) ? value : fallback);
 const MAX_PROJECTILES = 64;
+const MAX_COMBAT_RADIUS = Math.max(...COMBAT_HITBOXES.map(box => box.radius));
 
 function stepAngleToward(current, desired, maxDelta) {
   const delta = wrapAngle(desired - current);
@@ -935,7 +937,44 @@ export class GameState {
     const players = shooter.isBot
       ? new Map([...this.players].filter(([, player]) => !player.isBot))
       : this.players;
+    if (weapon.behavior === 'melee') {
+      this.fireMelee(shooter, weapon, origin, direction, players, now);
+      return;
+    }
     this.fireHitscan(shooter, weapon, origin, direction, players, now);
+  }
+
+  // A single forward cone picks the closest reachable target, then the same
+  // authoritative combat volumes and cover/smoke tests validate the strike.
+  fireMelee(shooter, weapon, origin, direction, players, now) {
+    const candidates = [];
+    for (const target of players.values()) {
+      if (target.id === shooter.id || !target.alive || target.connected === false) continue;
+      const dx = target.x - origin.x, dz = target.z - origin.z;
+      const horizontal = Math.hypot(dx, dz);
+      if (horizontal < 1e-6 || horizontal > weapon.range + MAX_COMBAT_RADIUS) continue;
+      const aimY = origin.y + (direction.y / Math.max(0.01, Math.hypot(direction.x, direction.z))) * horizontal;
+      const targetY = clamp(aimY, target.y + 0.2, target.y + PLAYER.height - 0.1);
+      const dy = targetY - origin.y;
+      const distance = Math.hypot(dx, dy, dz);
+      const alignment = (dx * direction.x + dy * direction.y + dz * direction.z) / distance;
+      if (alignment < Math.cos(Math.PI / 6)) continue;
+      candidates.push({ target, distance, ray: { x: dx / distance, y: dy / distance, z: dz / distance } });
+    }
+    candidates.sort((a, b) => a.distance - b.distance);
+    const traces = this.debugHitboxes && !shooter.isBot ? [] : null;
+    for (const candidate of candidates) {
+      const hit = castShot({ origin, direction: candidate.ray, players, shooterId: shooter.id,
+        maxDistance: weapon.range, cover: this.cover, smokeClouds: this.smokeClouds,
+        onTrace: traces ? trace => traces.push(trace) : null });
+      if (!hit || hit.target.id !== candidate.target.id) continue;
+      if (traces) this.emitHitboxTrace(shooter.id, traces);
+      this.applyDamageBatch(shooter, [{ target: hit.target, damage: weapon.damage,
+        headshot: false, point: hit.point, source: origin }], now, weapon);
+      return;
+    }
+    if (traces?.length) this.emitHitboxTrace(shooter.id, traces);
+    this.emitPlayer(shooter.id, EVENTS.HIT_CONFIRMED, { hit: false, weaponId: weapon.id });
   }
 
   fireHitscan(shooter, weapon, origin, direction, players, now) {

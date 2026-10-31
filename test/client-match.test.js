@@ -18,9 +18,9 @@ async function startServer() {
   return { ...server, port, url: `http://127.0.0.1:${port}` };
 }
 
-function runBootFixture(url, { input = false } = {}) {
+function runBootFixture(url, { input = false, quit = false } = {}) {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(process.execPath, [resolve(repoRoot, 'test/fixtures/boot-client.mjs'), url, ...(input ? ['--check-input'] : [])], {
+    const child = spawn(process.execPath, [resolve(repoRoot, 'test/fixtures/boot-client.mjs'), url, ...(input ? ['--check-input'] : []), ...(quit ? ['--check-quit'] : [])], {
       cwd: repoRoot,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -128,4 +128,22 @@ test('the real client sends key edges and one shot, then handles its authoritati
     GameState.prototype.setInput = originalSetInput;
     await server.close();
   }
+});
+
+
+test('Escape, resume and confirmed Quit to Menu work in a real solo session, then allow redeployment', async () => {
+  const originalBots = GameState.prototype.updateBots;
+  GameState.prototype.updateBots = () => {};
+  const server = await startServer();
+  try {
+    const report = await runBootFixture(server.url, { quit: true });
+    assert.deepEqual(report.windowErrors, []);
+    assert.deepEqual(report.unhandled, []);
+    assert.equal(report.quit.opened, true);
+    assert.equal(report.quit.resumed, true);
+    assert.equal(report.quit.confirmation, true);
+    assert.equal(report.quit.returned, true);
+    assert.equal(report.quit.reentered, true);
+    assert.equal(server.roomManager.rooms.has(report.quit.oldCode), false, 'old solo simulation is removed');
+  } finally { GameState.prototype.updateBots = originalBots; await server.close(); }
 });

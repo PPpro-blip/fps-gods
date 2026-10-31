@@ -18,6 +18,7 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const serverUrl = process.argv[2] ?? null;
 const report = { errors: [], unhandled: [], windowErrors: [] };
 const checkInput = process.argv.includes('--check-input');
+const checkQuit = process.argv.includes('--check-quit');
 
 process.on('uncaughtException', (error) => report.unhandled.push(String(error?.message ?? error)));
 process.on('unhandledRejection', (error) => report.unhandled.push(String(error?.message ?? error)));
@@ -180,6 +181,34 @@ if (serverUrl) {
     await wait(250);
     const ammoAfterFocus = Number(byId('ammo-value').textContent);
     report.match.action = { ammoBefore, ammoAfter, ammoAfterBlur, ammoWhileBlurred, ammoAfterFocus };
+  }
+
+  if (checkQuit) {
+    const canvas = byId('game-canvas');
+    let locked = canvas;
+    Object.defineProperty(document, 'pointerLockElement', { configurable: true, get: () => locked });
+    document.exitPointerLock = () => { locked = null; document.dispatchEvent(new dom.window.Event('pointerlockchange')); };
+    canvas.requestPointerLock = () => { locked = canvas; document.dispatchEvent(new dom.window.Event('pointerlockchange')); return Promise.resolve(); };
+    document.dispatchEvent(new dom.window.Event('pointerlockchange'));
+    document.dispatchEvent(new dom.window.KeyboardEvent('keydown', { code: 'Escape', bubbles: true }));
+    await wait(50);
+    const opened = !byId('pause-panel').hidden && locked === null;
+    click('resume-button');
+    await wait(50);
+    const resumed = byId('pause-panel').hidden && locked === canvas;
+    document.dispatchEvent(new dom.window.KeyboardEvent('keydown', { code: 'Escape', bubbles: true }));
+    await wait(50);
+    click('quit-match-button');
+    const confirmation = !byId('quit-match-note').hidden && !byId('match-hud').hidden;
+    click('quit-match-button');
+    click('quit-match-button');
+    await wait(350);
+    const returned = byId('match-hud').hidden && !byId('menu-shell').hidden;
+    const oldCode = report.match.roomCode;
+    click('play-now-button');
+    await wait(800);
+    const newCode = byId('hud-room-code').textContent;
+    report.quit = { opened, resumed, confirmation, returned, oldCode, newCode, reentered: !byId('match-hud').hidden && newCode !== oldCode };
   }
 
   // The server's own tick has to keep the HUD alive after the first snapshot.
